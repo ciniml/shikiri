@@ -11,7 +11,7 @@ QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
               -nographic -no-reboot
 
 .PHONY: all apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
-        backup-flash flash-p4 monitor clean
+        emu test-emu test-p4emu backup-flash flash-p4 monitor clean
 
 all: kernel-virt image-p4 boot
 
@@ -74,5 +74,18 @@ run-virt: kernel-virt
 test-virt: kernel-virt
 	timeout 20 $(QEMU) $(QEMU_FLAGS) -kernel $(BUILD)/t5-kernel-virt.elf
 
+# ESP32-P4 rev v1.x emulator (doc/11). Runs the same kernel ELF as the
+# hardware; exit status 0 only if the self-test passes.
+T5EMU := emu/target/release/t5emu
+
+emu:
+	cd emu && cargo build --release
+
+test-emu:
+	cd emu && cargo test --release
+
+test-p4emu: emu kernel-p4
+	$(T5EMU) $(BUILD)/t5-kernel-esp32p4v1.elf
+
 clean:
-	rm -rf $(BUILD) kernel/target user/target tools/target
+	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

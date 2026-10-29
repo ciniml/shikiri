@@ -471,7 +471,7 @@ ESP-TEE の実装もこの流れで、ハンドラ先頭で mcause を 8 (U ecal
 - [ ] v1.x の PMP L ビットの挙動（v3.x で「改善」とあるだけで、v1.x の問題の中身は不明 [R3]）。XL ビットが v1.x にあるか。
 - [ ] ROM / ブートローダが pma_cfg・pmpcfg をロックした状態でカーネルに制御を渡すか（`CONFIG_BOOTLOADER_REGION_PROTECTION_ENABLE=n` の効果を含めて）。
 - [ ] mscratchcsw/mscratchcswl が v1.x にあるか。
-- [ ] ミスアラインのロード/ストアの扱い（mcause 4 が存在しない）。PMP の境界をまたぐミスアラインアクセスの挙動（C6/H2 には `SOC_CPU_MISALIGNED_ACCESS_ON_PMP_MISMATCH_ISSUE` があるが、P4 には定義なし）。
+- [ ] ミスアラインのロード/ストアの扱い（mcause 4 が存在しない）。→ **一部確認（11 §2.3）**: PMP で禁止された領域へのミスアラインのストアは 7（アクセスフォールト）になった（6 ではない）。ハードウェアがミスアラインを処理するという推測と矛盾しない。PMP の境界をまたぐミスアラインアクセスの挙動（C6/H2 には `SOC_CPU_MISALIGNED_ACCESS_ON_PMP_MISMATCH_ISSUE` があるが、P4 には定義なし）。
 - [ ] U モードから fxcr / cpu_gpio_* / jvt / uhwloop* / hpmcounter にアクセスできるか（CSR の特権チェック）。
 - [ ] CLINT の mtime のクロック周波数と、`time` CSR の源。
 - [ ] clicintattr.MODE が書き込み可能か（TRM は R/W、IDF ヘッダは RO 固定）。
