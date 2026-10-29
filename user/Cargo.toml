@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["rt", "apps/hello", "apps/fault"]
+
+[profile.release]
+opt-level = "s"
+debug = true
+panic = "abort"
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"

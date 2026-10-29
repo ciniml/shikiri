@@ -1,0 +1,6 @@
+target/
+/build/
+/boot/sdkconfig
+/boot/sdkconfig.old
+/boot/dependencies.lock
+/boot/managed_components/

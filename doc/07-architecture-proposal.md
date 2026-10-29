@@ -106,16 +106,17 @@
 こうすると、複数のアプリが同時に常駐でき、コンテキストスイッチで MMU を張り替える必要もない（04 §0 の指摘）。PSRAM を使うのでフラッシュの OTA 中も止まらず、SD からも読み込める（02 §6 の利点）。MMU の張り替えは、フラッシュ上のアセットを XIP する用途だけに残す。
 
 ### プロセスの配置と PMP（v1.x、16 エントリ）
-各プロセスは、2 のべき乗の大きさで、その大きさに整列した 2 つの領域を持つ。NAPOT 1 エントリで 1 領域を表せる。
+各プロセスのイメージは連続した 1 つの領域 `[base | text+rodata | data+bss | stack]` で、境界は PMP の粒度 128B に揃える（アプリのリンカスクリプト `user/rt/t5app.ld` が RW 部の先頭を 128B 境界にする）。TOR を 3 本つないで表す（M0 で実装。当初案の NAPOT 2 本だと、PIE の text と data の相対位置を保ったまま両方を 2 のべき乗に整列させられないため）。
 
-| PMP # | 用途 | 権限 |
-|---|---|---|
-| 0 | 予備。トラップベクタを U に X で見せる必要が出たとき用（Tock の ESP32-C3 移植で見つかった CPU バグの回避策。P4 での有無は未確認。03 §4.1） | – |
-| 1 | 実行中プロセスの text+rodata | NAPOT, R-X |
-| 2 | 実行中プロセスの data+bss+heap+stack | NAPOT, RW- |
-| 3 | 共有メモリ（`shm_map`、フレームバッファなど） | NAPOT, RW- |
-| 4–5 | IPC で貸すバッファ（Xous の Lend/Borrow 相当） | TOR ペア, R または RW |
-| 6–15 | 予約（ユーザ空間ドライバの MMIO 窓、追加の shm など） | – |
+| PMP # | pmpaddr | 用途 | 権限 |
+|---|---|---|---|
+| 0 | – | 予備。トラップベクタを U に X で見せる必要が出たとき用（Tock の ESP32-C3 移植で見つかった CPU バグの回避策。P4 での有無は未確認。03 §4.1） | OFF |
+| 1 | base | TOR の下端 | OFF |
+| 2 | base + text_size | text+rodata | TOR, R-X |
+| 3 | end | data+bss+stack | TOR, RW- |
+| 4 | – | 共有メモリ（`shm_map`、フレームバッファなど） | NAPOT, RW- |
+| 5–6 | – | IPC で貸すバッファ（Xous の Lend/Borrow 相当） | TOR ペア, R または RW |
+| 7–15 | – | 予約（ユーザ空間ドライバの MMIO 窓、追加の shm など） | – |
 
 コンテキストスイッチでは 1–5 だけを書き換える（Zephyr と同じく、プロセスごとに事前計算した値を書き込む。04 §4.3.3）。
 
@@ -236,8 +237,9 @@ doc/
 2. v1.x の U モードへ実際に入れるか。U モード実行中の M 割り込みとアクセスフォールトの mcause/mtval/mepc が正確か（01 §9）。
 3. Tock が ESP32-C3 で踏んだような「トラップベクタが U から実行可能でないとフォールトする」バグが P4 にもあるか（PMP#0 を予備にしてある）。
 4. ブートローダ直後に USB Serial/JTAG がそのまま使えるか（06 §7）。
-5. Rust の静的 PIE で、再配置が RELATIVE だけになるか（M0 で確認）。
-6. espflash の app image が v1.x を受け付けるか、`esp_app_desc_t` の要件。
+5. ~~Rust の静的 PIE で、再配置が RELATIVE だけになるか~~ → **M0 で確認済み**。nightly-2026-09-10 で `-Zbuild-std=core`、`-C relocation-model=pie`、`-pie --no-dynamic-linker -z text` を使うと、ELF は ET_DYN で、動的再配置は `R_RISCV_RELATIVE` だけ（hello 5 件、fault 6 件）。
+6. ~~espflash の app image が v1.x を受け付けるか~~ → **M0 で一部確認**。`.flash.appdesc` セクション（フラッシュ窓 0x4000_0020）に `esp_app_desc_t` を置けば、`espflash save-image --min-chip-rev 1.0` で、チップリビジョン v1.0〜v1.99 の有効なイメージになる（`esptool image-info` で検証）。実機のブートローダが受け付けるかは M1a で確認する。
+   - 注意: ブートローダは自分自身を 0x4FF2_9ED0 付近に置いて動く（既存ファームの boot.log）ため、カーネルのロードされるセグメントはそれより下に収める。
 7. fence.i が L1 I キャッシュに効くか。効かなければキャッシュコントローラで同期する（02 §2.2）。
 8. errata APM-560（DMA 側の APM。PSRAM やフラッシュへのアクセスを拒否する使い方は避ける。01 §3.5）。
 9. ディスプレイのパネル種別（ILI9881C / ST7123 / ST7121。06 §1.4）。M6 までに確認する。

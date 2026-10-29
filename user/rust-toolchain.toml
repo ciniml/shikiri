@@ -1,0 +1,4 @@
+# Apps are static PIEs, which needs core rebuilt with -Zbuild-std (nightly).
+[toolchain]
+channel = "nightly-2026-09-10"
+components = ["rust-src"]

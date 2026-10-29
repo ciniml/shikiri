@@ -1,0 +1,9 @@
+[package]
+name = "t5-rt"
+version = "0.1.0"
+edition = "2024"
+description = "User-mode runtime for tab5-os apps: entry point, syscall wrappers, panic handler"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+t5-abi = { path = "../../abi" }

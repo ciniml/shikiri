@@ -1,0 +1,29 @@
+[package]
+name = "t5-kernel"
+version = "0.1.0"
+edition = "2024"
+description = "tab5-os M-mode kernel"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "t5-kernel"
+test = false
+bench = false
+
+[features]
+default = []
+# Exactly one platform must be selected.
+platform-virt = []
+platform-esp32p4v1 = []
+
+[dependencies]
+t5-abi = { path = "../abi" }
+
+[profile.release]
+opt-level = "s"
+debug = true
+panic = "abort"
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"

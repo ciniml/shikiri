@@ -1,0 +1,78 @@
+# tab5-os build entry points. See doc/07 §7 for the milestones.
+
+BUILD      := build
+APPS_DIR   := $(BUILD)/apps
+APP_TARGET := user/target/riscv32imafc-unknown-none-elf/release
+ELF2T5A    := tools/target/release/elf2t5a
+APPS       := hello fault
+
+QEMU       ?= qemu-system-riscv32
+QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
+              -nographic -no-reboot
+
+.PHONY: all apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
+        backup-flash flash-p4 monitor clean
+
+all: kernel-virt image-p4 boot
+
+IDF_PATH_6 ?= $(HOME)/esp-idf/6.0
+IDF        := . $(IDF_PATH_6)/export.sh >/dev/null && idf.py
+PORT       ?= /dev/ttyACM0
+
+tools:
+	cd tools && cargo build --release
+
+apps: tools
+	cd user && cargo build --release
+	mkdir -p $(APPS_DIR)
+	for a in $(APPS); do $(ELF2T5A) $(APP_TARGET)/$$a $(APPS_DIR)/$$a.t5a || exit 1; done
+
+kernel-virt: apps
+	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
+	    --features platform-virt --target-dir target/virt
+	mkdir -p $(BUILD) && cp kernel/target/virt/riscv32imafc-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-virt.elf
+
+kernel-p4: apps
+	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
+	    --features platform-esp32p4v1 --target-dir target/esp32p4v1
+	mkdir -p $(BUILD) && cp kernel/target/esp32p4v1/riscv32imafc-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-esp32p4v1.elf
+
+# ESP app image for the 2nd stage bootloader (rev v1.x only).
+image-p4: kernel-p4
+	espflash save-image --chip esp32p4 --min-chip-rev 1.0 --flash-size 16mb \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf $(BUILD)/t5-kernel-esp32p4v1.bin
+
+# ESP-IDF bootloader + partition table (boot/sdkconfig.defaults, boot/partitions.csv).
+boot:
+	cd boot && bash -c '$(IDF) -B ../$(BUILD)/boot bootloader partition-table'
+
+# --- Targets below touch the device. Run them only deliberately. ---
+
+# Read the whole 16 MB flash into build/flash-backup.bin.
+backup-flash:
+	mkdir -p $(BUILD)
+	espflash read-flash --port $(PORT) 0 0x1000000 $(BUILD)/flash-backup.bin
+	sha256sum $(BUILD)/flash-backup.bin
+
+# Writes bootloader @0x2000, partition table @0x8000 and the kernel to ota_0.
+# otadata is erased so a selection left by the previous firmware cannot make
+# the bootloader pick ota_1.
+flash-p4: image-p4 boot
+	espflash erase-region --port $(PORT) 0xd000 0x2000
+	espflash write-bin --port $(PORT) 0x2000 $(BUILD)/boot/bootloader/bootloader.bin
+	espflash write-bin --port $(PORT) 0x8000 $(BUILD)/boot/partition_table/partition-table.bin
+	espflash write-bin --port $(PORT) 0x10000 $(BUILD)/t5-kernel-esp32p4v1.bin
+
+monitor:
+	espflash monitor --port $(PORT)
+
+# Interactive run (Ctrl-A X to quit QEMU).
+run-virt: kernel-virt
+	$(QEMU) $(QEMU_FLAGS) -kernel $(BUILD)/t5-kernel-virt.elf
+
+# CI-style run: the kernel exits QEMU with status 0 only if the self-test passes.
+test-virt: kernel-virt
+	timeout 20 $(QEMU) $(QEMU_FLAGS) -kernel $(BUILD)/t5-kernel-virt.elf
+
+clean:
+	rm -rf $(BUILD) kernel/target user/target tools/target
