@@ -4,8 +4,12 @@
 //!   t5log check ELF...              check schemas: id collisions, naming rules
 //!   t5log rtt --probe VID:PID:SERIAL --elf KERNEL [--elf APP]... [--schemas F]...
 //!             [--chip esp32p4] [--chip-description YAML] [--reset] [--json]
+//!             [--cmd COMMAND]... [--until-done]
 //!                                   read the log over RTT through probe-rs (used
-//!                                   as a library) and decode it as it arrives
+//!                                   as a library) and decode it as it arrives.
+//!                                   Commands (`list`, `ps`, `run NAME [A0 [A1]]`,
+//!                                   `kill PID`) from --cmd and from stdin go to
+//!                                   the kernel's control channel (doc/14 §3).
 //!   t5log decode [--schemas F]... [--elf E]... [--pretty] [--tcp HOST:PORT | INPUT]
 //!                                   decode a log stream to JSON Lines (default)
 //!                                   or one line per event (--pretty). INPUT is a
@@ -24,7 +28,8 @@ const USAGE: &str = "usage:
   t5log schemas -o OUT ELF...
   t5log check ELF...
   t5log rtt --probe VID:PID:SERIAL --elf KERNEL [--elf APP]... [--schemas FILE]... \
-            [--chip esp32p4] [--chip-description YAML] [--reset] [--json]
+            [--chip esp32p4] [--chip-description YAML] [--reset] [--json] \
+            [--cmd COMMAND]... [--until-done]
   t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]";
 
 fn main() -> ExitCode {
@@ -156,6 +161,8 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
     let mut chip_description = None;
     let mut reset = false;
     let mut pretty = true;
+    let mut cmds: Vec<String> = Vec::new();
+    let mut until_done = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
@@ -169,6 +176,12 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
             "--chip-description" => chip_description = Some(val()?),
             "--reset" => reset = true,
             "--json" => pretty = false,
+            "--cmd" => {
+                let v = val()?;
+                t5_abi::ctl::parse_line(&v).map_err(|e| format!("--cmd {v}: {e}"))?;
+                cmds.push(v);
+            }
+            "--until-done" => until_done = true,
             s => return Err(format!("unknown argument {s}\n{USAGE}")),
         }
     }
@@ -187,17 +200,122 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
         poll: std::time::Duration::from_millis(10),
         reset,
     };
+    // Lines typed on stdin become commands too.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    for c in cmds.iter() {
+        tx.send(c.clone()).unwrap();
+    }
+    let interactive = tx.clone();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            let line = line.trim().to_string();
+            if !line.is_empty() && interactive.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    drop(tx);
+
+    let ctl = std::cell::RefCell::new(Ctl {
+        // After a reset, commands written before the kernel sets up its
+        // control block would be lost: wait for `ctl.ready`.
+        ready: !reset,
+        queue: std::collections::VecDeque::new(),
+        next_id: 1,
+        pending: std::collections::BTreeSet::new(),
+        sent_any: false,
+        done_at: None,
+    });
     let mut d = StreamDecoder::new();
     let mut ctx = BootContext::new();
     let mut out = std::io::stdout().lock();
-    t5log::rtt::stream(&opts, |bytes| {
-        for item in d.push(bytes) {
-            if print_item(&mut out, &t, &mut ctx, &item, pretty).is_err() {
-                return false;
+    let wanted = cmds.len();
+    t5log::rtt::stream(
+        &opts,
+        |bytes| {
+            for item in d.push(bytes) {
+                if let Item::Event(e) = &item {
+                    ctl.borrow_mut().on_event(e, &t);
+                }
+                if print_item(&mut out, &t, &mut ctx, &item, pretty).is_err() {
+                    return false;
+                }
             }
+            out.flush().is_ok()
+        },
+        || {
+            let mut c = ctl.borrow_mut();
+            while let Ok(line) = rx.try_recv() {
+                c.queue.push_back(line);
+            }
+            // --until-done: every --cmd answered, then one more second of log.
+            if until_done && c.next_id as usize > wanted && c.pending.is_empty() && c.sent_any {
+                let t = *c.done_at.get_or_insert_with(std::time::Instant::now);
+                if t.elapsed() > std::time::Duration::from_secs(1) {
+                    return t5log::rtt::Turn::Stop;
+                }
+            }
+            match c.take_frames() {
+                Some(bytes) => t5log::rtt::Turn::Send(bytes),
+                None => t5log::rtt::Turn::Continue,
+            }
+        },
+    )
+}
+
+/// Control commands waiting to go to the kernel, and those not yet answered.
+struct Ctl {
+    ready: bool,
+    queue: std::collections::VecDeque<String>,
+    next_id: u32,
+    pending: std::collections::BTreeSet<u32>,
+    sent_any: bool,
+    done_at: Option<std::time::Instant>,
+}
+
+impl Ctl {
+    fn on_event(&mut self, e: &t5log::Event, t: &SchemaTable) {
+        match e.name(t) {
+            Some("ctl.ready") => self.ready = true,
+            Some("ctl.done" | "ctl.failed") => {
+                if let Some(t5log::Value::U(id)) = e.field(t, "request_id") {
+                    self.pending.remove(&(*id as u32));
+                }
+            }
+            _ => {}
         }
-        out.flush().is_ok()
-    })
+    }
+
+    /// COBS frames for the queued commands, once the kernel is ready.
+    fn take_frames(&mut self) -> Option<Vec<u8>> {
+        if !self.ready || self.queue.is_empty() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        while let Some(line) = self.queue.pop_front() {
+            let c = match t5_abi::ctl::parse_line(&line) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("t5log: {line}: {e}");
+                    continue;
+                }
+            };
+            let id = self.next_id;
+            self.next_id += 1;
+            let mut raw = [0u8; t5_abi::ctl::MAX_COMMAND];
+            let Some(n) = t5_abi::ctl::encode(id, &c, &mut raw) else {
+                eprintln!("t5log: {line}: too long");
+                continue;
+            };
+            let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND + 4];
+            let k = t5_abi::log::cobs_encode(&raw[..n], &mut frame).unwrap();
+            bytes.extend_from_slice(&frame[..k]);
+            eprintln!("t5log: -> #{id} {line}");
+            self.pending.insert(id);
+            self.sent_any = true;
+        }
+        (!bytes.is_empty()).then_some(bytes)
+    }
 }
 
 /// Turns "0a 1b ..." text into bytes. A token is two hex digits surrounded

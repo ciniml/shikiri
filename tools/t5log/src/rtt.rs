@@ -40,9 +40,23 @@ pub fn control_block_address(elf: &[u8]) -> Result<u64, String> {
     Err("no _SEGGER_RTT symbol (is this a tab5-os kernel ELF?)".into())
 }
 
+/// What the caller wants on each turn of the polling loop.
+pub enum Turn {
+    Continue,
+    /// Write these bytes to down-channel 0 (control commands, doc/14 §3).
+    Send(Vec<u8>),
+    Stop,
+}
+
 /// Attaches and calls `sink` with every chunk read from the up-channel until
-/// `sink` returns false or an error occurs. Ctrl-C ends the process.
-pub fn stream(opts: &Options, mut sink: impl FnMut(&[u8]) -> bool) -> Result<(), String> {
+/// `sink` returns false, `turn` returns `Stop`, or an error occurs. `turn`
+/// is called on every pass, whether or not data arrived. Ctrl-C ends the
+/// process.
+pub fn stream(
+    opts: &Options,
+    mut sink: impl FnMut(&[u8]) -> bool,
+    mut turn: impl FnMut() -> Turn,
+) -> Result<(), String> {
     probe_rs_espressif::register_plugin();
     let mut registry = Registry::from_builtin_families();
     if let Some(path) = &opts.chip_description {
@@ -68,6 +82,7 @@ pub fn stream(opts: &Options, mut sink: impl FnMut(&[u8]) -> bool) -> Result<(),
 
     let target = RttTarget::from(&core);
     let mut rtt = None;
+    let mut to_send: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 4096];
     let mut last_try = Instant::now() - Duration::from_secs(1);
     loop {
@@ -90,6 +105,21 @@ pub fn stream(opts: &Options, mut sink: impl FnMut(&[u8]) -> bool) -> Result<(),
             std::thread::sleep(opts.poll);
             continue;
         };
+        match turn() {
+            Turn::Continue => {}
+            Turn::Send(more) => to_send.extend(more),
+            Turn::Stop => return Ok(()),
+        }
+        if !to_send.is_empty()
+            && let Some(down) = r.down_channel(0)
+        {
+            match down.write(&mut core, &to_send) {
+                Ok(n) => {
+                    to_send.drain(..n);
+                }
+                Err(e) => eprintln!("t5log: RTT write failed: {e}"),
+            }
+        }
         let channel = r.up_channel(opts.channel).ok_or(format!("no RTT up-channel {}", opts.channel))?;
         let n = match channel.read(&mut core, &mut buf) {
             Ok(n) => n,

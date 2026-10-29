@@ -59,70 +59,134 @@ impl Fpu {
     }
 }
 
-/// Runs `procs` until all have exited or `limit_ms` has passed. Processes
-/// still alive at the limit are killed.
-pub fn run(procs: &mut [Process], limit_ms: u64) -> Stats {
-    assert!(procs.len() <= MAX_PROCS);
-    let mut fpu = Fpu { owner: None, dirty: false, saved: [FpState::default(); MAX_PROCS] };
-    let mut stats = Stats::default();
-    let limit = Current::now() + time::ms_to_ticks(limit_ms);
-    let mut next = 0;
+/// Processes in fixed slots (slot `i` uses pool slot `i` and FPU save area
+/// `i`). The kernel runs it in two ways: the self-test runs a set of
+/// processes until they exit, the service loop runs forever and starts and
+/// stops processes from `poll` (doc/14 §3).
+pub struct Scheduler {
+    pub slots: [Option<Process>; MAX_PROCS],
+    fpu: Fpu,
+    pub stats: Stats,
+    next: usize,
+}
 
-    loop {
-        Current::feed_watchdog();
-        let now = Current::now();
-        if now >= limit {
-            for p in procs.iter_mut() {
-                if p.exit().is_none() {
-                    p.state = State::Exited(Exit::Killed);
-                    log_exit(p, Exit::Killed);
-                }
-            }
-            break;
-        }
-        let mut wake = limit;
-        let mut woken = None;
-        for (i, p) in procs.iter_mut().enumerate() {
-            if let State::Sleeping { until } = p.state {
-                if until <= now {
-                    p.state = State::Ready;
-                    woken.get_or_insert(i);
-                } else {
-                    wake = wake.min(until);
-                }
-            }
-        }
+/// How often `run(None, ..)` calls `poll` while processes keep the CPU busy
+/// or everyone sleeps.
+pub const POLL_MS: u64 = 10;
 
-        // A process whose sleep just ended runs next instead of waiting for
-        // its round-robin turn (up to a slice per busy process).
-        if let Some(w) = woken {
-            next = w;
-        }
-        let n = procs.len();
-        let Some(i) = (0..n).map(|k| (next + k) % n).find(|&i| procs[i].state == State::Ready) else {
-            if procs.iter().all(|p| p.exit().is_some()) {
-                break;
-            }
-            // Everyone is asleep. Wake at least every second to feed the
-            // watchdog.
-            Current::set_alarm(wake.min(now + time::ms_to_ticks(1000)));
-            Current::wait_for_interrupt();
-            Current::clear_alarm();
-            stats.idle_waits += 1;
-            continue;
-        };
-        next = (i + 1) % n;
-
-        Current::set_alarm(wake.min(now + time::ms_to_ticks(SLICE_MS)));
-        run_slice(&mut procs[i], i, &mut fpu, &mut stats);
-        Current::clear_alarm();
-        if let Some(exit) = procs[i].exit() {
-            fpu.release(i);
-            log_exit(&procs[i], exit);
+impl Scheduler {
+    pub fn new() -> Scheduler {
+        Scheduler {
+            slots: [None, None, None, None],
+            fpu: Fpu { owner: None, dirty: false, saved: [FpState::default(); MAX_PROCS] },
+            stats: Stats::default(),
+            next: 0,
         }
     }
-    Current::clear_alarm();
-    stats
+
+    pub fn free_slot(&self) -> Option<usize> {
+        self.slots.iter().position(Option::is_none)
+    }
+
+    /// Stops the process with `pid`. Its slot is freed by `reap`.
+    pub fn kill(&mut self, pid: u32) -> bool {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if let Some(p) = slot
+                && p.pid == pid
+                && p.exit().is_none()
+            {
+                p.state = State::Exited(Exit::Killed);
+                self.fpu.release(i);
+                log_exit(p, Exit::Killed);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Frees the slots of processes that have exited.
+    pub fn reap(&mut self) {
+        for slot in self.slots.iter_mut() {
+            if slot.as_ref().is_some_and(|p| p.exit().is_some()) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// With `Some(limit_ms)`: runs until every process has exited or the
+    /// limit has passed (processes still alive then are killed). With
+    /// `None`: runs forever, calling `poll` at least every `POLL_MS`.
+    pub fn run(&mut self, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mut Scheduler)) {
+        let limit = limit_ms.map(|ms| Current::now() + time::ms_to_ticks(ms));
+        let mut next_poll = Current::now();
+
+        loop {
+            Current::feed_watchdog();
+            let now = Current::now();
+            if limit.is_none() && now >= next_poll {
+                poll(self);
+                next_poll = now + time::ms_to_ticks(POLL_MS);
+            }
+            if let Some(limit) = limit
+                && now >= limit
+            {
+                for slot in self.slots.iter_mut().flatten() {
+                    if slot.exit().is_none() {
+                        slot.state = State::Exited(Exit::Killed);
+                        log_exit(slot, Exit::Killed);
+                    }
+                }
+                break;
+            }
+            // The earliest of: the limit (self-test) or the next poll
+            // (service), and the wake-ups of sleeping processes.
+            let mut wake = limit.unwrap_or(next_poll.max(now));
+            let mut woken = None;
+            for (i, p) in self.slots.iter_mut().enumerate() {
+                if let Some(p) = p
+                    && let State::Sleeping { until } = p.state
+                {
+                    if until <= now {
+                        p.state = State::Ready;
+                        woken.get_or_insert(i);
+                    } else {
+                        wake = wake.min(until);
+                    }
+                }
+            }
+
+            // A process whose sleep just ended runs next instead of waiting
+            // for its round-robin turn (up to a slice per busy process).
+            if let Some(w) = woken {
+                self.next = w;
+            }
+            let n = MAX_PROCS;
+            let ready = |s: &Option<Process>| s.as_ref().is_some_and(|p| p.state == State::Ready);
+            let Some(i) = (0..n).map(|k| (self.next + k) % n).find(|&i| ready(&self.slots[i])) else {
+                if limit.is_some() && self.slots.iter().flatten().all(|p| p.exit().is_some()) {
+                    break;
+                }
+                // Everyone is asleep (or nothing runs). Wake at least every
+                // second to feed the watchdog.
+                Current::set_alarm(wake.min(now + time::ms_to_ticks(1000)));
+                Current::wait_for_interrupt();
+                Current::clear_alarm();
+                self.stats.idle_waits += 1;
+                continue;
+            };
+            self.next = (i + 1) % n;
+
+            Current::set_alarm(wake.min(now + time::ms_to_ticks(SLICE_MS)));
+            let p = self.slots[i].as_mut().unwrap();
+            run_slice(p, i, &mut self.fpu, &mut self.stats);
+            Current::clear_alarm();
+            if let Some(exit) = p.exit() {
+                self.fpu.release(i);
+                log_exit(p, exit);
+            }
+        }
+        Current::clear_alarm();
+    }
 }
 
 fn log_exit(p: &Process, exit: Exit) {

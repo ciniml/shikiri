@@ -1,0 +1,31 @@
+   1.840179 I kernel ctl.ready slots=4
+   1.860332 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+   1.860460 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00430000 length=7504 state=2 flags=0
+   1.860578 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+   1.860696 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+   1.860814 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+   1.860946 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+   1.861100 I kernel ctl.done request_id=1 cmd=list ok=true value=6
+   1.953701 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e verify_us=92415
+   1.954029 I kernel proc.start pid=101 name=ticker base=0x4ff40000 build_id=23dcbe01818507daf03ef6718e8b605e
+   1.954151 I kernel ctl.done request_id=2 cmd=run ok=true value=101
+   2.045819 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 verify_us=91493
+   2.046140 I kernel proc.start pid=102 name=spin base=0x4ff58000 build_id=a24822e2c6097d31431cf08bce1421e2
+   2.046248 I kernel ctl.done request_id=3 cmd=run ok=true value=102
+   2.046343 I kernel proc.info pid=101 name=ticker state=ready
+   2.046423 I kernel proc.info pid=102 name=spin state=ready
+   2.046501 I kernel ctl.done request_id=4 cmd=ps ok=true value=2
+   2.266665 I pid101 ticker.tick id=7 tick=0 slept_us=200024
+   2.476815 I pid101 ticker.tick id=7 tick=1 slept_us=200020
+   2.686960 I pid101 ticker.tick id=7 tick=2 slept_us=210041
+   2.887090 I pid101 ticker.tick id=7 tick=3 slept_us=200027
+   3.087220 I pid101 ticker.tick id=7 tick=4 slept_us=200026
+   3.087302 I kernel proc.exit pid=101 code=0
+--- interactive kill session ---
+ 193.258076 I kernel proc.start pid=104 name=spin base=0x4ff40000 build_id=a24822e2c6097d31431cf08bce1421e2
+ 193.258188 I kernel ctl.done request_id=1 cmd=run ok=true value=104
+ 197.101194 I kernel proc.info pid=104 name=spin state=ready
+ 197.101278 I kernel ctl.done request_id=2 cmd=ps ok=true value=1
+ 197.101363 W kernel proc.killed pid=104
+ 197.101428 I kernel ctl.done request_id=3 cmd=kill ok=true value=104
+ 198.101380 I kernel ctl.done request_id=4 cmd=ps ok=true value=0

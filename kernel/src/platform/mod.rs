@@ -19,6 +19,9 @@ pub trait Platform {
     const APP_POOL: core::ops::Range<usize>;
     /// An MMIO address U-mode must never reach (used by the self-test).
     const PROTECTED_MMIO: usize;
+    /// After the self-test: keep running and take control commands
+    /// (doc/14 §3), or end the run (QEMU in CI).
+    const SERVE: bool;
 
     /// Frequency of the monotonic counter returned by `now`.
     const TIMER_HZ: u64;

@@ -102,25 +102,19 @@ pub extern "C" fn kmain() -> ! {
     }
     pmp::reset();
 
-    let failures = match Current::map_flash() {
-        Some(window) => {
-            // A check that the window shows the flash: the CRC of the first
-            // 4 KiB of ota_0 (0x10000), which is the start of the kernel's
-            // own image file, so the host can compare.
-            let ota0 = unsafe { core::slice::from_raw_parts((window + 0x1_0000) as *const u8, 4096) };
-            event!(
-                Info,
-                "flash.mapped",
-                window = Addr(window as u32),
-                ota0_crc32 = t5_abi::store::crc32(ota0)
-            );
-            let store = store::Store::open(window);
-            store.log_contents();
-            match Apps::from_store(&store) {
-                Some(apps) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps),
-                None => 1,
-            }
-        }
+    let store = Current::map_flash().map(|window| {
+        // A check that the window shows the flash: the CRC of the first
+        // 4 KiB of ota_0 (0x10000), which is the start of the kernel's own
+        // image file, so the host can compare.
+        let ota0 = unsafe { core::slice::from_raw_parts((window + 0x1_0000) as *const u8, 4096) };
+        event!(Info, "flash.mapped", window = Addr(window as u32), ota0_crc32 = t5_abi::store::crc32(ota0));
+        let store = store::Store::open(window);
+        store.log_contents();
+        store
+    });
+    let failures = match store.as_ref().map(Apps::from_store) {
+        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps),
+        Some(None) => 1,
         None => {
             event!(Error, "selftest.no_flash");
             1
@@ -133,7 +127,101 @@ pub extern "C" fn kmain() -> ! {
     }
     #[cfg(feature = "test-lockup")]
     lockup_test();
-    Current::exit(failures)
+    match store {
+        Some(store) if Current::SERVE => serve(&store),
+        _ => Current::exit(failures),
+    }
+}
+
+/// Process ids handed out by the service loop (the self-test numbers its
+/// processes by slot).
+static mut NEXT_PID: u32 = 100;
+
+fn next_pid() -> u32 {
+    // Single core, interrupts off in the kernel.
+    unsafe {
+        let p = &mut *core::ptr::addr_of_mut!(NEXT_PID);
+        *p += 1;
+        *p
+    }
+}
+
+/// Runs apps for good: starts the autostart apps, then starts and stops
+/// apps on commands from the host (RTT down-channel, doc/14 §3). Results
+/// are log events.
+fn serve(store: &store::Store) -> ! {
+    let mut s = sched::Scheduler::new();
+    for e in store.entries().filter(|e| e.flags & t5_abi::t5a::tlv::FLAG_AUTOSTART as u8 != 0) {
+        let name = e.name();
+        if let Err(why) = start(&mut s, store, name, 0, 0) {
+            event!(Error, "ctl.autostart_failed", name = name, error = why);
+        }
+    }
+    event!(Info, "ctl.ready", slots = sched::MAX_PROCS as u32);
+    loop {
+        s.run(None, &mut |s| {
+            s.reap();
+            let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND];
+            while let Some(n) = log::read_command(&mut frame) {
+                handle(s, store, &frame[..n]);
+            }
+        });
+    }
+}
+
+fn handle(s: &mut sched::Scheduler, store: &store::Store, frame: &[u8]) {
+    use t5_abi::ctl::Command;
+    let Some((id, cmd)) = t5_abi::ctl::decode(frame) else {
+        event!(Warn, "ctl.bad_command", len = frame.len() as u32);
+        return;
+    };
+    let result: Result<u32, &'static str> = match cmd {
+        Command::List => {
+            store.log_contents();
+            Ok(store.entries().count() as u32)
+        }
+        Command::Ps => {
+            let mut n = 0;
+            for p in s.slots.iter().flatten() {
+                let state = match p.state {
+                    process::State::Ready => "ready",
+                    process::State::Sleeping { .. } => "sleeping",
+                    process::State::Exited(_) => "exited",
+                };
+                event!(Info, "proc.info", pid = p.pid, name = p.name, state = state);
+                n += 1;
+            }
+            Ok(n)
+        }
+        Command::Run { name, arg0, arg1 } => start(s, store, name, arg0, arg1),
+        Command::Kill { pid } => {
+            if s.kill(pid) {
+                Ok(pid)
+            } else {
+                Err("no such process")
+            }
+        }
+    };
+    match result {
+        Ok(value) => event!(Info, "ctl.done", request_id = id, cmd = cmd.name(), ok = true, value = value),
+        Err(error) => event!(Warn, "ctl.failed", request_id = id, cmd = cmd.name(), ok = false, error = error),
+    }
+}
+
+/// Loads `name` from the store into a free slot and makes it runnable.
+fn start(s: &mut sched::Scheduler, store: &store::Store, name: &str, arg0: u32, arg1: u32) -> Result<u32, &'static str> {
+    let slot_index = s.free_slot().ok_or("no free slot")?;
+    let image = store.image(name).ok_or("no such app")?;
+    let (base, size) = slot(slot_index);
+    let loaded = unsafe { loader::load(image, base, size) }.map_err(|e| {
+        let mut why = t5_abi::log::FmtBuf::<64>::new();
+        let _ = core::fmt::Write::write_fmt(&mut why, format_args!("{e:?}"));
+        event!(Error, "loader.failed", name = name, error = why.as_str());
+        "load failed"
+    })?;
+    let pid = next_pid();
+    s.slots[slot_index] = Some(Process::new(pid, loaded.name, &loaded, arg0 as usize, arg1 as usize));
+    Ok(pid)
 }
 
 /// L3 test (doc/12 §7): a kernel fault after the processes have run. The
@@ -162,7 +250,7 @@ fn slot(i: usize) -> (usize, usize) {
     (pool.start + i * size, size)
 }
 
-fn load(name: &'static str, image: &[u8], slot_index: usize, arg0: usize, arg1: usize) -> Option<Process> {
+fn load(name: &'static str, image: &'static [u8], slot_index: usize, arg0: usize, arg1: usize) -> Option<Process> {
     let (base, size) = slot(slot_index);
     match unsafe { loader::load(image, base, size) } {
         Ok(l) => Some(Process::new(slot_index as u32 + 1, name, &l, arg0, arg1)),
@@ -199,9 +287,10 @@ fn selftest_m1(apps: &Apps) -> u32 {
             failures += 1;
             continue;
         };
-        let mut procs = [p];
-        sched::run(&mut procs, 1000);
-        let [p] = procs;
+        let mut s = sched::Scheduler::new();
+        s.slots[0] = Some(p);
+        s.run(Some(1000), &mut |_| {});
+        let p = s.slots[0].take().unwrap();
         let exit = p.exit().unwrap();
         let ok = matches(&exit, &expected);
         log_case(&p, &exit, ok);
@@ -293,13 +382,15 @@ fn selftest_m2(apps: &Apps) -> u32 {
     let [Some(a), Some(b), Some(c), Some(d)] = loaded else {
         return 1;
     };
-    let mut procs = [a, b, c, d];
+    let mut s = sched::Scheduler::new();
+    s.slots = [Some(a), Some(b), Some(c), Some(d)];
 
     let start = Current::now();
-    let stats = sched::run(&mut procs, 3000);
+    s.run(Some(3000), &mut |_| {});
+    let stats = s.stats;
     let elapsed_ms = time::ticks_to_ns(Current::now() - start) / 1_000_000;
 
-    for p in &procs {
+    for p in s.slots.iter().flatten() {
         let exit = p.exit().unwrap();
         let ok = exit == Exit::Code(0);
         log_case(p, &exit, ok);

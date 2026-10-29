@@ -226,6 +226,7 @@ impl Platform for Esp32p4v1 {
     // Upper L2MEM region with a 128 KiB L2 cache (doc/02 §1.1, doc/07 §3).
     const APP_POOL: core::ops::Range<usize> = 0x4FF4_0000..0x4FFA_0000;
     const PROTECTED_MMIO: usize = USJ_BASE;
+    const SERVE: bool = true;
     const TIMER_HZ: u64 = 16_000_000;
     const TIMER_IRQ: usize = TIMER_CLIC_INDEX;
 

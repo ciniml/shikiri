@@ -25,6 +25,7 @@ impl Platform for Virt {
     // The kernel's 1 MiB is at 0x8000_0000 (link-virt.ld).
     const APP_POOL: core::ops::Range<usize> = 0x8010_0000..0x8020_0000;
     const PROTECTED_MMIO: usize = UART0;
+    const SERVE: bool = false;
     const TIMER_HZ: u64 = 10_000_000;
     const TIMER_IRQ: usize = 7; // machine timer interrupt
 

@@ -34,6 +34,8 @@ impl From<t5a::Error> for LoadError {
 
 #[derive(Debug)]
 pub struct Loaded {
+    /// From the signed `Name` TLV.
+    pub name: &'static str,
     pub region: Region,
     pub entry: usize,
     pub stack_top: usize,
@@ -61,7 +63,7 @@ pub fn verify(bytes: &[u8]) -> Result<&[u8], t5a::Error> {
 /// # Safety
 /// `[base, base + capacity)` must be memory the kernel owns and nothing else
 /// uses, and must not overlap `bytes`.
-pub unsafe fn load(bytes: &[u8], base: usize, capacity: usize) -> Result<Loaded, LoadError> {
+pub unsafe fn load(bytes: &'static [u8], base: usize, capacity: usize) -> Result<Loaded, LoadError> {
     let started = Current::now();
     let signed = verify(bytes)?;
     let verify_us = time::ticks_to_ns(Current::now() - started) / 1000;
@@ -117,6 +119,7 @@ pub unsafe fn load(bytes: &[u8], base: usize, capacity: usize) -> Result<Loaded,
     <Current as Platform>::sync_code(base, end_off);
 
     Ok(Loaded {
+        name: info.name,
         region: Region { base, text_end: base + text_size, end: base + end_off },
         entry: base + h.entry as usize,
         stack_top: base + mem_size + stack_size,

@@ -25,6 +25,7 @@ version = "0.1.0"
 name = "t5emu"
 version = "0.1.0"
 dependencies = [
+ "t5-abi",
  "t5log",
 ]
 

@@ -119,11 +119,14 @@ flash-p4: image-p4 boot
 # Read the log over RTT and decode it as it arrives: t5log uses probe-rs as a
 # library (doc/12 §8). Does not flash. Attaching halts the core briefly and
 # disables the watchdogs (doc/13); RESET=1 resets the chip first to show a
-# whole boot (RTT data is consumed when read). Ctrl-C to stop.
+# whole boot (RTT data is consumed when read). Commands typed on stdin go to
+# the kernel (list, ps, run NAME [A0 [A1]], kill PID; doc/14 §3); CMD="..."
+# sends one and exits when it is answered. Ctrl-C to stop.
 rtt: schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
-	    $(if $(RESET),--reset) --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
+	    $(if $(RESET),--reset) $(if $(CMD),--cmd "$(CMD)" --until-done) \
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
 
 probe-rs:
 	cargo install --locked --git https://github.com/probe-rs/probe-rs --rev $(PROBE_RS_REV) \
@@ -166,6 +169,13 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 
 test-p4emu: emu kernel-p4
 	$(T5EMU) $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Control commands after the self-test (doc/14 §3): start two apps, stop
+	@# one, and check the events.
+	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "list" --ctl "run ticker 7 20" --ctl "run spin 9 3000" --ctl "kill 102" \
+	    --ctl "run nosuchapp" --ctl "ps" \
+	    --expect-event ticker.tick --expect-event proc.killed --expect-event ctl.failed \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

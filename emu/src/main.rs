@@ -17,6 +17,73 @@ use t5emu::cache;
 use t5emu::machine::{Machine, Stop};
 use t5emu::periph;
 
+/// Watches the console while the kernel runs (the kernel no longer stops
+/// after its self-test, doc/14 §3). Without commands it ends the run once the
+/// self-test has reported; with `--ctl` commands it sends them over the RTT
+/// down-channel when the kernel says `ctl.ready`, waits for each one's
+/// `ctl.done`/`ctl.failed`, then lets the run go on for `linger_ms` to
+/// catch what follows (e.g. a started app's output).
+struct Monitor<'a> {
+    schemas: &'a t5log::SchemaTable,
+    decoder: t5log::StreamDecoder,
+    consumed: usize,
+    ctx: t5log::BootContext,
+    stop_after_selftest: bool,
+    selftest_done: bool,
+    commands: Vec<String>,
+    injected: bool,
+    pending: std::collections::BTreeSet<u32>,
+    linger_cycles: u64,
+    stop_at: Option<u64>,
+    /// Events (current boot) seen so far, by name.
+    seen: std::collections::BTreeSet<String>,
+}
+
+impl Monitor<'_> {
+    fn tick(&mut self, m: &mut Machine) -> bool {
+        let out = &m.bus.periph.usj.output;
+        let items = self.decoder.push(&out[self.consumed..]);
+        self.consumed = out.len();
+        for item in items {
+            let t5log::Item::Event(e) = item else { continue };
+            if self.ctx.classify(&e, self.schemas).is_some() {
+                continue; // replayed from a previous boot
+            }
+            let Some(name) = e.name(self.schemas) else { continue };
+            self.seen.insert(name.to_string());
+            match name {
+                "selftest.result" => self.selftest_done = true,
+                "ctl.ready" if !self.injected && !self.commands.is_empty() => {
+                    for (i, line) in self.commands.iter().enumerate() {
+                        let id = i as u32 + 1;
+                        let c = t5_abi::ctl::parse_line(line).expect("checked in parse_args");
+                        let mut raw = [0u8; t5_abi::ctl::MAX_COMMAND];
+                        let n = t5_abi::ctl::encode(id, &c, &mut raw).expect("command too long");
+                        let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND + 4];
+                        let k = t5_abi::log::cobs_encode(&raw[..n], &mut frame).unwrap();
+                        m.rtt_down_pending.extend(&frame[..k]);
+                        self.pending.insert(id);
+                    }
+                    self.injected = true;
+                }
+                "ctl.done" | "ctl.failed" => {
+                    if let Some(t5log::Value::U(id)) = e.field(self.schemas, "request_id") {
+                        self.pending.remove(&(*id as u32));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.commands.is_empty() {
+            return !(self.stop_after_selftest && self.selftest_done);
+        }
+        if self.injected && self.pending.is_empty() && self.stop_at.is_none() {
+            self.stop_at = Some(m.bus.cycles + self.linger_cycles);
+        }
+        self.stop_at.is_none_or(|t| m.bus.cycles < t)
+    }
+}
+
 /// Puts the ELF's loaded segments where the bootloader would.
 fn load_image(bus: &mut Bus, elf: &t5emu::elf::Elf) -> Result<(), String> {
     for s in &elf.segments {
@@ -31,7 +98,8 @@ fn load_image(bus: &mut Bus, elf: &t5emu::elf::Elf) -> Result<(), String> {
 const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [--seed N] \
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] \
-                     [--flash FILE@HEXOFFSET]... \
+                     [--flash FILE@HEXOFFSET]... [--ctl COMMAND]... [--expect-event NAME]... \
+                     [--linger-ms N] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -51,6 +119,9 @@ struct Opts {
     resets: u32,
     expect_prev_event: Option<String>,
     flash_images: Vec<(u32, String)>,
+    ctl: Vec<String>,
+    expect_events: Vec<String>,
+    linger_ms: u64,
     elf: String,
 }
 
@@ -72,6 +143,9 @@ fn parse_args() -> Result<Opts, String> {
         resets: 0,
         expect_prev_event: None,
         flash_images: Vec::new(),
+        ctl: Vec::new(),
+        expect_events: Vec::new(),
+        linger_ms: 300,
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -99,6 +173,13 @@ fn parse_args() -> Result<Opts, String> {
             "--log-from-rtt" => o.log_from_rtt = true,
             "--resets" => o.resets = val()?.parse().map_err(|e| format!("--resets: {e}"))?,
             "--expect-prev-event" => o.expect_prev_event = Some(val()?),
+            "--ctl" => {
+                let v = val()?;
+                t5_abi::ctl::parse_line(&v).map_err(|e| format!("--ctl {v}: {e}"))?;
+                o.ctl.push(v);
+            }
+            "--expect-event" => o.expect_events.push(val()?),
+            "--linger-ms" => o.linger_ms = val()?.parse().map_err(|e| format!("--linger-ms: {e}"))?,
             "--flash" => {
                 let v = val()?;
                 let (file, off) = v.rsplit_once('@').ok_or(format!("--flash FILE@OFFSET: {v}"))?;
@@ -175,8 +256,23 @@ fn main() -> ExitCode {
     let limit = o.max_ms * o.mhz * 1000;
     let mut resets_left = o.resets;
     let mut boots = 1;
+    let mut mon = Monitor {
+        schemas: &schemas,
+        decoder: t5log::StreamDecoder::new(),
+        consumed: 0,
+        ctx: t5log::BootContext::new(),
+        // The L3 test must run on into the lock-up after the self-test.
+        stop_after_selftest: o.expect_prev_event.is_none(),
+        selftest_done: false,
+        commands: o.ctl.clone(),
+        injected: false,
+        pending: Default::default(),
+        linger_cycles: o.linger_ms * o.mhz * 1000,
+        stop_at: None,
+        seen: Default::default(),
+    };
     let stop = loop {
-        let stop = m.run(limit);
+        let stop = m.run(limit, &mut |m| mon.tick(m));
         m.poll_rtt();
         // A locked-up core does nothing until the RWDT fires (judgement;
         // doc/12 §7 checks this on the Tab5).
@@ -285,9 +381,17 @@ fn main() -> ExitCode {
         );
         return if expected_seen && rtt_ok { ExitCode::SUCCESS } else { ExitCode::from(1) };
     }
+    let missing: Vec<&String> = o.expect_events.iter().filter(|n| !mon.seen.contains(*n)).collect();
+    if !missing.is_empty() {
+        eprintln!("t5emu: expected events not seen: {missing:?}");
+    }
+    if !mon.pending.is_empty() {
+        eprintln!("t5emu: commands without ctl.done/ctl.failed: {:?}", mon.pending);
+    }
+    let all_ok = passed && rtt_ok && missing.is_empty() && mon.pending.is_empty();
     match stop {
-        Stop::Halted { .. } if passed && rtt_ok => ExitCode::SUCCESS,
-        Stop::Halted { .. } => ExitCode::from(1),
+        Stop::Halted { .. } | Stop::Requested if all_ok => ExitCode::SUCCESS,
+        Stop::Halted { .. } | Stop::Requested => ExitCode::from(1),
         Stop::TimeLimit => ExitCode::from(3),
         _ => ExitCode::from(2),
     }
@@ -307,6 +411,7 @@ fn describe(s: &Stop) -> String {
         Stop::VectoredInterrupt { line } => format!("hardware-vectored CLIC interrupt {line} (not modelled)"),
         Stop::Watchdog => "RWDT expired (reset on real hardware)".into(),
         Stop::TimeLimit => "time limit reached".into(),
+        Stop::Requested => "done (the self-test reported, and the control commands finished)".into(),
         Stop::FlashWhileL2Suspended { addr, pc } => format!(
             "flash window access at {addr:#010x} (pc={pc:#010x}) while the L2 cache was suspended \
              (the real core would hang; the code must run from RAM)"

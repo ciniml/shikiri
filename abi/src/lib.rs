@@ -4,6 +4,7 @@
 
 #![no_std]
 
+pub mod ctl;
 pub mod log;
 pub mod store;
 pub mod t5a;

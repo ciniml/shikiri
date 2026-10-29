@@ -33,7 +33,8 @@ pub const KEEP: Level = Level::Trace;
 const FRAME_MAX: usize = wire::MAX_RECORD + wire::MAX_RECORD / 254 + 2;
 const RING_SIZE: usize = 16 * 1024;
 const RTT_UP_SIZE: usize = 8 * 1024;
-const RTT_DOWN_SIZE: usize = 16;
+/// The down-channel carries control commands from the host (doc/14 §3).
+const RTT_DOWN_SIZE: usize = 512;
 
 /// SEGGER RTT buffer descriptor (SEGGER_RTT_BUFFER_UP/DOWN in SEGGER_RTT.h).
 #[repr(C)]
@@ -127,7 +128,14 @@ struct State {
     console_dropped: u32,
     /// Set while reporting drops, so the report cannot recurse.
     reporting: bool,
+    /// A command frame being received from the down-channel, and whether
+    /// it overflowed (then it is discarded at its 0x00).
+    cmd: [u8; CMD_FRAME_MAX],
+    cmd_len: usize,
+    cmd_overflow: bool,
 }
+
+const CMD_FRAME_MAX: usize = t5_abi::ctl::MAX_COMMAND + t5_abi::ctl::MAX_COMMAND / 254 + 2;
 
 static mut STATE: State = State {
     ring_on: false,
@@ -138,6 +146,9 @@ static mut STATE: State = State {
     rtt_dropped: 0,
     console_dropped: 0,
     reporting: false,
+    cmd: [0; CMD_FRAME_MAX],
+    cmd_len: 0,
+    cmd_overflow: false,
 };
 
 fn state() -> &'static mut State {
@@ -312,6 +323,47 @@ pub fn record(source: u32, payload: &[u8]) -> bool {
     }
     report_drops(rtt_ok, console_ok);
     true
+}
+
+/// The next command frame from the host on the RTT down-channel, decoded
+/// from COBS into `out`, or `None` if no whole frame is waiting.
+pub fn read_command(out: &mut [u8; t5_abi::ctl::MAX_COMMAND]) -> Option<usize> {
+    let st = state();
+    unsafe {
+        let down = core::ptr::addr_of_mut!((*rtt()).down[0]);
+        let buf = core::ptr::addr_of!(RTT_DOWN).cast::<u8>();
+        let wr = core::ptr::read_volatile(core::ptr::addr_of!((*down).wr_off)) as usize;
+        let mut rd = core::ptr::read_volatile(core::ptr::addr_of!((*down).rd_off)) as usize;
+        if wr >= RTT_DOWN_SIZE || rd >= RTT_DOWN_SIZE {
+            return None; // corrupted by the host
+        }
+        let mut result = None;
+        while rd != wr && result.is_none() {
+            let b = core::ptr::read_volatile(buf.add(rd));
+            rd = (rd + 1) % RTT_DOWN_SIZE;
+            if b != 0 {
+                if st.cmd_len < CMD_FRAME_MAX {
+                    st.cmd[st.cmd_len] = b;
+                    st.cmd_len += 1;
+                } else {
+                    st.cmd_overflow = true;
+                }
+                continue;
+            }
+            let frame = &st.cmd[..st.cmd_len];
+            if !st.cmd_overflow && !frame.is_empty() {
+                result = wire::cobs_decode(frame, out);
+            }
+            if result.is_none() && (st.cmd_overflow || !frame.is_empty()) {
+                event!(Warn, "ctl.bad_frame", len = st.cmd_len as u32);
+            }
+            st.cmd_len = 0;
+            st.cmd_overflow = false;
+        }
+        fence(Ordering::SeqCst);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*down).rd_off), rd as u32);
+        result
+    }
 }
 
 fn ring_push(bytes: &[u8]) {

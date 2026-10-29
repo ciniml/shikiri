@@ -28,6 +28,8 @@ pub enum Stop {
     Watchdog,
     /// The emulated time limit was reached.
     TimeLimit,
+    /// The caller's `run` hook asked to stop (it saw what it waited for).
+    Requested,
     /// The flash window was read or fetched from while the L2 cache was
     /// suspended (a flash-map or flash-write routine not running from RAM).
     /// The real core would hang.
@@ -209,6 +211,8 @@ pub struct Machine {
     /// then plays the debugger and drains up-channel 0 into `rtt_output`.
     pub rtt_cb: Option<u32>,
     pub rtt_output: Vec<u8>,
+    /// Bytes the host still has to put into down-channel 0.
+    pub rtt_down_pending: std::collections::VecDeque<u8>,
     /// Instructions between RTT polls (0: no host attached).
     pub rtt_poll_interval: u32,
 }
@@ -225,11 +229,13 @@ impl Machine {
     }
 
     pub fn new(bus: Bus, entry: u32) -> Machine {
-        Machine { cpu: Cpu::new(entry), bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_poll_interval: 4096 }
+        Machine { cpu: Cpu::new(entry), bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_down_pending: Default::default(), rtt_poll_interval: 4096 }
     }
 
     /// Runs until something stops the emulator or `limit_cycles` is reached.
-    pub fn run(&mut self, limit_cycles: u64) -> Stop {
+    /// Runs until something stops the emulator, `limit_cycles` is reached,
+    /// or `hook` (called every 4096 instructions) returns false.
+    pub fn run(&mut self, limit_cycles: u64, hook: &mut dyn FnMut(&mut Machine) -> bool) -> Stop {
         let mut wdt_check = 0u32;
         loop {
             if let Err(s) = self.step() {
@@ -240,6 +246,9 @@ impl Machine {
                 self.poll_rtt();
             }
             if wdt_check % 4096 == 0 {
+                if !hook(self) {
+                    return Stop::Requested;
+                }
                 if self.bus.cycles >= limit_cycles {
                     return Stop::TimeLimit;
                 }
@@ -279,6 +288,22 @@ impl Machine {
             rd = (rd + 1) % size;
         }
         self.bus.write(up + 16, 4, rd);
+
+        // Down-channel 0 follows up-channel 0 (MaxNumUpBuffers = 1).
+        let max_up = rd32(&mut self.bus, cb + 16);
+        let down = up + 24 * max_up;
+        let (buf, size) = (rd32(&mut self.bus, down + 4), rd32(&mut self.bus, down + 8));
+        let mut wr = rd32(&mut self.bus, down + 12);
+        let rd = rd32(&mut self.bus, down + 16);
+        if size == 0 || wr >= size || rd >= size {
+            return;
+        }
+        while (wr + 1) % size != rd {
+            let Some(b) = self.rtt_down_pending.pop_front() else { break };
+            self.bus.write(buf + wr, 1, b as u32);
+            wr = (wr + 1) % size;
+        }
+        self.bus.write(down + 12, 4, wr);
     }
 
     pub fn step(&mut self) -> Result<(), Stop> {
