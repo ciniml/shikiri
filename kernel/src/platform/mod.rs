@@ -40,6 +40,14 @@ pub trait Platform {
     fn set_alarm(at: u64);
     /// Disarms the alarm and clears its pending interrupt.
     fn clear_alarm();
+    /// Logs platform details worth keeping (called once the log is up).
+    fn log_info() {}
+    /// Restarts the system watchdog (no-op where there is none).
+    fn feed_watchdog() {}
+    /// Why the chip last reset (ROM RESET_REASON on the ESP32-P4; 0 = unknown).
+    fn reset_cause() -> u32 {
+        0
+    }
     /// Waits until an interrupt is pending (MIE stays 0, so no trap is taken).
     fn wait_for_interrupt() {
         unsafe { core::arch::asm!("wfi") };

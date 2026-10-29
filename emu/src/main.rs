@@ -15,10 +15,22 @@ use std::process::ExitCode;
 use t5emu::bus::Bus;
 use t5emu::cache;
 use t5emu::machine::{Machine, Stop};
+use t5emu::periph;
+
+/// Puts the ELF's loaded segments where the bootloader would.
+fn load_image(bus: &mut Bus, elf: &t5emu::elf::Elf) -> Result<(), String> {
+    for s in &elf.segments {
+        if s.data.is_empty() {
+            continue; // NOLOAD (.bss, the text gap, .log_mem); the kernel sets them up
+        }
+        bus.load(s.vaddr, &s.data)?;
+    }
+    Ok(())
+}
 
 const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [--seed N] \
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
-                     [--rtt-poll N] [--log-from-rtt] \
+                     [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -35,6 +47,8 @@ struct Opts {
     console_out: Option<String>,
     rtt_poll: u32,
     log_from_rtt: bool,
+    resets: u32,
+    expect_prev_event: Option<String>,
     elf: String,
 }
 
@@ -53,6 +67,8 @@ fn parse_args() -> Result<Opts, String> {
         console_out: None,
         rtt_poll: 4096,
         log_from_rtt: false,
+        resets: 0,
+        expect_prev_event: None,
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -78,6 +94,8 @@ fn parse_args() -> Result<Opts, String> {
             "--console-out" => o.console_out = Some(val()?),
             "--rtt-poll" => o.rtt_poll = val()?.parse().map_err(|e| format!("--rtt-poll: {e}"))?,
             "--log-from-rtt" => o.log_from_rtt = true,
+            "--resets" => o.resets = val()?.parse().map_err(|e| format!("--resets: {e}"))?,
+            "--expect-prev-event" => o.expect_prev_event = Some(val()?),
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => o.elf = s.to_string(),
         }
@@ -128,15 +146,10 @@ fn main() -> ExitCode {
 
     let mut bus = Bus::new(o.mhz * 1_000_000, o.cache, o.seed);
     bus.periph.warn_unmodelled = o.warn_unmodelled;
-    for s in &elf.segments {
-        if s.data.is_empty() {
-            continue; // NOLOAD (.bss, the text gap); the kernel clears .bss itself
-        }
-        if let Err(e) = bus.load(s.vaddr, &s.data) {
-            eprintln!("t5emu: {e}");
-            return ExitCode::from(64);
-        }
-        let _ = s.memsz;
+    bus.periph.reset_cause = periph::reset_reason::POWERON;
+    if let Err(e) = load_image(&mut bus, &elf) {
+        eprintln!("t5emu: {e}");
+        return ExitCode::from(64);
     }
 
     let mut m = Machine::new(bus, elf.entry);
@@ -144,8 +157,35 @@ fn main() -> ExitCode {
     m.rtt_cb = elf.symbol("_SEGGER_RTT");
     m.rtt_poll_interval = o.rtt_poll;
     let limit = o.max_ms * o.mhz * 1000;
-    let stop = m.run(limit);
-    m.poll_rtt();
+    let mut resets_left = o.resets;
+    let mut boots = 1;
+    let stop = loop {
+        let stop = m.run(limit);
+        m.poll_rtt();
+        // A locked-up core does nothing until the RWDT fires (judgement;
+        // doc/12 §7 checks this on the Tab5).
+        let fires = matches!(stop, Stop::Watchdog)
+            || (matches!(stop, Stop::Lockup { .. }) && m.bus.periph.lp_wdt.enabled());
+        if !fires || resets_left == 0 {
+            break stop;
+        }
+        resets_left -= 1;
+        let action = m.bus.periph.lp_wdt.stage0_action();
+        let keep_lp = action == periph::STG_RESET_SYSTEM;
+        let cause = if keep_lp { periph::reset_reason::HP_SYS_LP_WDT } else { periph::reset_reason::CHIP_LP_WDT };
+        eprintln!(
+            "t5emu: boot {boots}: {} -> RWDT reset (stage action {action}, LP SRAM {})",
+            describe(&stop),
+            if keep_lp { "kept" } else { "lost" }
+        );
+        m.bus.reset_system(keep_lp, cause, o.seed.wrapping_add(boots));
+        if let Err(e) = load_image(&mut m.bus, &elf) {
+            eprintln!("t5emu: {e}");
+            return ExitCode::from(64);
+        }
+        m.reset_cpu(elf.entry);
+        boots += 1;
+    };
 
     // The RTT channel must carry exactly the frames the console carried (the
     // console has one extra 0x00 that separates the bootloader's text).
@@ -155,8 +195,10 @@ fn main() -> ExitCode {
         // the streams are only compared with the default polling.
         Some(_) if o.rtt_poll != 4096 => true,
         Some(_) => {
-            let trim = |b: &[u8]| b.iter().position(|&x| x != 0).map_or(Vec::new(), |i| b[i..].to_vec());
-            let same = trim(usj) == trim(&m.rtt_output);
+            // Compare frame by frame: each boot starts the console (only) with
+            // an empty frame.
+            let frames = |b: &[u8]| b.split(|&x| x == 0).filter(|f| !f.is_empty()).map(<[u8]>::to_vec).collect::<Vec<_>>();
+            let same = frames(usj) == frames(&m.rtt_output);
             if same {
                 eprintln!("t5emu: RTT stream matches the console ({} bytes)", m.rtt_output.len());
             } else {
@@ -184,14 +226,24 @@ fn main() -> ExitCode {
     let mut items = decoder.push(console);
     items.extend(decoder.finish());
     let mut passed = false;
+    let mut expected_seen = false;
+    let mut ctx = t5log::BootContext::new();
     for item in &items {
         match item {
             t5log::Item::Event(e) => {
+                let prev = ctx.classify(e, &schemas);
                 if !o.quiet {
-                    println!("{}", if o.json { e.to_json(&schemas) } else { e.to_pretty(&schemas) });
+                    println!(
+                        "{}",
+                        if o.json { e.to_json_in(&schemas, prev) } else { e.to_pretty_in(&schemas, prev) }
+                    );
                 }
-                if e.name(&schemas) == Some("selftest.result") {
-                    passed = e.field(&schemas, "pass") == Some(&t5log::Value::Bool(true));
+                match (e.name(&schemas), prev) {
+                    (Some("selftest.result"), None) => {
+                        passed = e.field(&schemas, "pass") == Some(&t5log::Value::Bool(true));
+                    }
+                    (Some(n), Some(_)) if o.expect_prev_event.as_deref() == Some(n) => expected_seen = true,
+                    _ => {}
                 }
             }
             t5log::Item::Text(t) if !o.quiet => println!("| {t}"),
@@ -208,6 +260,15 @@ fn main() -> ExitCode {
         o.mhz,
         describe(&stop)
     );
+    if let Some(name) = &o.expect_prev_event {
+        // L3 test: the event must have come back as a replayed record.
+        eprintln!(
+            "t5emu: {} boot(s); {name} {} replayed from a previous boot",
+            boots,
+            if expected_seen { "was" } else { "was NOT" }
+        );
+        return if expected_seen && rtt_ok { ExitCode::SUCCESS } else { ExitCode::from(1) };
+    }
     match stop {
         Stop::Halted { .. } if passed && rtt_ok => ExitCode::SUCCESS,
         Stop::Halted { .. } => ExitCode::from(1),

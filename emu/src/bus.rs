@@ -82,6 +82,28 @@ impl Bus {
         }
     }
 
+    /// A system reset as the RWDT does it: peripherals and the cache return
+    /// to their reset state and time restarts. L2MEM keeps its contents (the
+    /// bootloader reloads the image into it); LP SRAM keeps them only if the
+    /// RTC domain is not reset. The console output carries on.
+    pub fn reset_system(&mut self, keep_lp_sram: bool, cause: u32, seed: u32) {
+        let old = std::mem::take(&mut self.periph);
+        self.periph.usj = old.usj;
+        self.periph.warn_unmodelled = old.warn_unmodelled;
+        self.periph.reset_cause = cause;
+        self.cycles = 0;
+        self.cache = Cache::new(self.cache.mode, L2MEM_BASE, L2MEM_SIZE);
+        if !keep_lp_sram {
+            let mut x = seed | 1;
+            for b in self.lp_sram.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                *b = x as u8;
+            }
+        }
+    }
+
     /// SYSTIMER ticks since reset.
     pub fn ticks(&self) -> u64 {
         (self.cycles as u128 * SYSTIMER_HZ as u128 / self.cpu_hz as u128) as u64

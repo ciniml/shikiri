@@ -210,6 +210,11 @@ fn sext(v: u32, bits: u32) -> u32 {
 }
 
 impl Machine {
+    /// The CPU state after a reset (the bus is reset separately).
+    pub fn reset_cpu(&mut self, entry: u32) {
+        self.cpu = Cpu::new(entry);
+    }
+
     pub fn new(bus: Bus, entry: u32) -> Machine {
         Machine { cpu: Cpu::new(entry), bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_poll_interval: 4096 }
     }

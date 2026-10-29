@@ -27,7 +27,38 @@ pub struct Schema {
 }
 
 /// Field names that would clash with the record's own keys in JSON.
-pub const RESERVED_FIELDS: &[&str] = &["seq", "t_us", "src", "level", "event"];
+pub const RESERVED_FIELDS: &[&str] = &["seq", "t_us", "src", "level", "event", "prev_boot"];
+
+/// Tells which events were replayed from a previous boot: the kernel sends
+/// them between `log.prev_begin` and `log.prev_end` (doc/12 L3).
+#[derive(Default)]
+pub struct BootContext {
+    prev: Option<u32>,
+}
+
+impl BootContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The previous boot's id if `e` is a replayed record.
+    pub fn classify(&mut self, e: &Event, t: &SchemaTable) -> Option<u32> {
+        match e.name(t) {
+            Some("log.prev_begin") => {
+                self.prev = match e.field(t, "boot_id") {
+                    Some(Value::U(id)) => Some(*id as u32),
+                    _ => Some(0),
+                };
+                None
+            }
+            Some("log.prev_end") => {
+                self.prev = None;
+                None
+            }
+            _ => self.prev,
+        }
+    }
+}
 
 /// Splits a `.t5log` section (or a schema file) into schemas. Each schema
 /// starts with `t5log/1\n` and ends with an empty line.
@@ -327,8 +358,17 @@ impl Event {
     /// One JSON object: `seq`, `t_us`, `src`, `level`, `event`, then the
     /// fields by name (or `id` and `values` if the schema is unknown).
     pub fn to_json(&self, table: &SchemaTable) -> String {
+        self.to_json_in(table, None)
+    }
+
+    /// `to_json` with `"prev_boot":ID` for records replayed from boot ID.
+    pub fn to_json_in(&self, table: &SchemaTable, prev_boot: Option<u32>) -> String {
         let mut o = String::new();
-        write!(o, "{{\"seq\":{},\"t_us\":{},\"src\":", self.seq, self.t_us).unwrap();
+        write!(o, "{{\"seq\":{},\"t_us\":{},", self.seq, self.t_us).unwrap();
+        if let Some(b) = prev_boot {
+            write!(o, "\"prev_boot\":{b},").unwrap();
+        }
+        o.push_str("\"src\":");
         json_str(&mut o, &self.source_name());
         write!(o, ",\"level\":\"{}\"", self.level.name()).unwrap();
         match table.get(self.id) {
@@ -360,6 +400,14 @@ impl Event {
 
     /// One line for people: time, level, source, name, then the message
     /// template if the schema has one, else `key=value` pairs.
+    /// `to_pretty` with a `prev#ID` mark for records replayed from boot ID.
+    pub fn to_pretty_in(&self, table: &SchemaTable, prev_boot: Option<u32>) -> String {
+        match prev_boot {
+            Some(b) => format!("prev#{b} {}", self.to_pretty(table)),
+            None => self.to_pretty(table),
+        }
+    }
+
     pub fn to_pretty(&self, table: &SchemaTable) -> String {
         let lvl = match self.level {
             Level::Error => "E",

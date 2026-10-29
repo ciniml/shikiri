@@ -14,7 +14,7 @@
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use t5log::{Item, SchemaTable, StreamDecoder};
+use t5log::{BootContext, Item, SchemaTable, StreamDecoder};
 
 const USAGE: &str = "usage:
   t5log schemas -o OUT ELF...
@@ -112,6 +112,7 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     };
 
     let mut d = StreamDecoder::new();
+    let mut ctx = BootContext::new();
     let mut hexd = HexDecoder::default();
     let mut out = std::io::stdout().lock();
     let mut buf = [0u8; 4096];
@@ -124,12 +125,12 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         };
         let bytes = if hex { hexd.push(&buf[..n]) } else { buf[..n].to_vec() };
         for item in d.push(&bytes) {
-            print_item(&mut out, &t, &item, pretty)?;
+            print_item(&mut out, &t, &mut ctx, &item, pretty)?;
         }
         out.flush().map_err(|e| e.to_string())?;
     }
     if let Some(item) = d.finish() {
-        print_item(&mut out, &t, &item, pretty)?;
+        print_item(&mut out, &t, &mut ctx, &item, pretty)?;
     }
     Ok(())
 }
@@ -159,10 +160,16 @@ impl HexDecoder {
     }
 }
 
-fn print_item(out: &mut impl Write, t: &SchemaTable, item: &Item, pretty: bool) -> Result<(), String> {
+fn print_item(
+    out: &mut impl Write,
+    t: &SchemaTable,
+    ctx: &mut BootContext,
+    item: &Item,
+    pretty: bool,
+) -> Result<(), String> {
     let line = match (item, pretty) {
-        (Item::Event(e), true) => e.to_pretty(t),
-        (Item::Event(e), false) => e.to_json(t),
+        (Item::Event(e), true) => e.to_pretty_in(t, ctx.classify(e, t)),
+        (Item::Event(e), false) => e.to_json_in(t, ctx.classify(e, t)),
         (Item::Text(s), true) => s.lines().map(|l| format!("| {l}")).collect::<Vec<_>>().join("\n"),
         (Item::Text(s), false) => {
             let mut j = String::from("{\"text\":");

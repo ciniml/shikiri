@@ -15,6 +15,8 @@ default = []
 # Exactly one platform must be selected.
 platform-virt = []
 platform-esp32p4v1 = []
+# L3 test: lock the core up after the self-test (doc/12 §7). Never ship.
+test-lockup = []
 
 [dependencies]
 t5-abi = { path = "../abi" }

@@ -19,8 +19,26 @@ const USJ_TIMEOUT_POLLS: u32 = 50_000;
 const LP_WDT_BASE: usize = 0x5011_6000;
 const LP_WDT_CONFIG0: usize = LP_WDT_BASE;
 const LP_WDT_WPROTECT: usize = LP_WDT_BASE + 0x18;
+const LP_WDT_CONFIG1: usize = LP_WDT_BASE + 0x4;
+const LP_WDT_FEED: usize = LP_WDT_BASE + 0x14;
+/// CONFIG1.WDT_STG0_HOLD for about 4 s. Measured on the Tab5 (doc/12 §7):
+/// the bootloader's 1,224,000 (9 s at 136 kHz) gave 18 s, i.e. the timeout
+/// is 2 * hold / 136 kHz on this chip (inferred from one data point).
+const LP_WDT_STG0_HOLD: u32 = 272_000;
 const LP_WDT_WKEY: u32 = 0x50D8_3AA1;
 const LP_WDT_EN: u32 = 1 << 31;
+const LP_WDT_FEED_BIT: u32 = 1 << 31;
+/// CONFIG0.WDT_STG0, bits [30:28]; 3 = reset the HP system but not the RTC
+/// (LP) domain, so LP SRAM and the log ring survive
+/// (esp_hal_wdt/esp32p4/include/hal/lpwdt_ll.h:39-43). The bootloader sets 4,
+/// which also resets the RTC domain (bootloader_init.c:93).
+const LP_WDT_STG0_SHIFT: u32 = 28;
+const LP_WDT_STG0_MASK: u32 = 0b111 << LP_WDT_STG0_SHIFT;
+const LP_WDT_STG_RESET_SYSTEM: u32 = 3;
+
+// Reset cause (lp_clkrst_reg.h LP_CLKRST_RESET_CAUSE_REG, HPCORE0 bits
+// [12:7]); values are RESET_REASON in esp_rom/esp32p4/include/esp32p4/rom/rtc.h.
+const LP_CLKRST_RESET_CAUSE: usize = 0x5011_1010;
 
 // Timer group MWDTs: timer_group_reg.h
 const TIMG_BASES: [usize; 2] = [0x500C_2000, 0x500C_3000];
@@ -154,9 +172,14 @@ impl Platform for Esp32p4v1 {
 
     fn init() {
         unsafe {
-            // The 2nd stage bootloader leaves RWDT running (9 s by default).
+            // The 2nd stage bootloader leaves RWDT running. Shorten its
+            // timeout to ~4 s and reset only the HP system on expiry, so LP
+            // SRAM survives a lock-up; the scheduler feeds it (doc/12 L3).
             wr(LP_WDT_WPROTECT, LP_WDT_WKEY);
-            wr(LP_WDT_CONFIG0, rd(LP_WDT_CONFIG0) & !LP_WDT_EN);
+            wr(LP_WDT_CONFIG1, LP_WDT_STG0_HOLD);
+            let c = rd(LP_WDT_CONFIG0) & !LP_WDT_STG0_MASK;
+            wr(LP_WDT_CONFIG0, c | (LP_WDT_STG_RESET_SYSTEM << LP_WDT_STG0_SHIFT) | LP_WDT_EN);
+            wr(LP_WDT_FEED, LP_WDT_FEED_BIT);
             wr(LP_WDT_WPROTECT, 0);
             for base in TIMG_BASES {
                 wr(base + TIMG_WDTWPROTECT, TIMG_WDT_WKEY);
@@ -243,7 +266,33 @@ impl Platform for Esp32p4v1 {
         }
     }
 
+    fn log_info() {
+        // The RWDT timeout is in RTC slow clock cycles (CONFIG1.WDT_STG0_HOLD,
+        // shifted by eFuse WDT_DELAY_SEL); logging it relates the measured
+        // timeout to the setting (doc/12 §7).
+        let (config0, hold) = unsafe { (rd(LP_WDT_CONFIG0), rd(LP_WDT_CONFIG1)) };
+        t5_abi::event!(Info, "boot.rwdt", config0 = config0, stg0_hold = hold);
+    }
+
+    fn feed_watchdog() {
+        unsafe {
+            wr(LP_WDT_WPROTECT, LP_WDT_WKEY);
+            wr(LP_WDT_FEED, LP_WDT_FEED_BIT);
+            wr(LP_WDT_WPROTECT, 0);
+        }
+    }
+
+    fn reset_cause() -> u32 {
+        unsafe { (rd(LP_CLKRST_RESET_CAUSE) >> 7) & 0x3F }
+    }
+
     fn exit(_code: u32) -> ! {
+        // A deliberate stop: the watchdog must not reset the chip.
+        unsafe {
+            wr(LP_WDT_WPROTECT, LP_WDT_WKEY);
+            wr(LP_WDT_CONFIG0, rd(LP_WDT_CONFIG0) & !LP_WDT_EN);
+            wr(LP_WDT_WPROTECT, 0);
+        }
         loop {
             unsafe { core::arch::asm!("wfi") };
         }

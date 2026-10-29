@@ -8,8 +8,14 @@
 //!
 //! The ring, the RTT control block and its buffer live in `.log_mem`, which
 //! the linker puts in LP SRAM on the ESP32-P4 (uncached, readable by a
-//! debugger without halting the core, kept across resets) and in RAM on
-//! QEMU virt. The section is not loaded, so `init` sets everything up.
+//! debugger without halting the core, kept across system resets) and in RAM
+//! on QEMU virt. The section is not loaded, so `init` sets everything up.
+//!
+//! The ring has a header (`RingHeader`). If the header left by the previous
+//! boot is intact, `init` replays that boot's frames to the outputs between
+//! `log.prev_begin` and `log.prev_end` before starting a new ring, so the
+//! records leading up to a crash, lock-up or watchdog reset are recovered
+//! (doc/12 L3).
 
 use core::mem::MaybeUninit;
 use core::sync::atomic::{Ordering, fence};
@@ -68,8 +74,51 @@ static mut RTT_DOWN: MaybeUninit<[u8; RTT_DOWN_SIZE]> = MaybeUninit::uninit();
 #[unsafe(link_section = ".log_mem")]
 static mut RING: MaybeUninit<[u8; RING_SIZE]> = MaybeUninit::uninit();
 
+/// Header of the ring, updated with every record. `check` covers the other
+/// fields, so power-on garbage is not mistaken for a ring.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RingHeader {
+    magic: u32,
+    boot_id: u32,
+    write: u32,
+    wrapped: u32,
+    check: u32,
+}
+
+const RING_MAGIC: u32 = u32::from_le_bytes(*b"T5LR");
+
+impl RingHeader {
+    fn checksum(&self) -> u32 {
+        let mut b = [0u8; 16];
+        for (i, v) in [self.magic, self.boot_id, self.write, self.wrapped].iter().enumerate() {
+            b[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        wire::fnv1a(&b)
+    }
+
+    fn valid(&self) -> bool {
+        self.magic == RING_MAGIC
+            && (self.write as usize) < RING_SIZE
+            && self.wrapped <= 1
+            && self.check == self.checksum()
+    }
+}
+
+#[unsafe(link_section = ".log_mem")]
+static mut HEADER: MaybeUninit<RingHeader> = MaybeUninit::uninit();
+
+fn header() -> *mut RingHeader {
+    core::ptr::addr_of_mut!(HEADER).cast()
+}
+
 struct State {
+    /// False while the previous boot's frames are being replayed: the ring
+    /// still holds them.
+    ring_on: bool,
+    boot_id: u32,
     ring_write: usize,
+    ring_wrapped: bool,
     seq: u64,
     /// Frames the RTT channel had no room for, not yet reported.
     rtt_dropped: u32,
@@ -77,7 +126,15 @@ struct State {
     reporting: bool,
 }
 
-static mut STATE: State = State { ring_write: 0, seq: 0, rtt_dropped: 0, reporting: false };
+static mut STATE: State = State {
+    ring_on: false,
+    boot_id: 0,
+    ring_write: 0,
+    ring_wrapped: false,
+    seq: 0,
+    rtt_dropped: 0,
+    reporting: false,
+};
 
 fn state() -> &'static mut State {
     // Single core, interrupts off in the kernel: no concurrent access.
@@ -88,9 +145,10 @@ fn rtt() -> *mut RttControlBlock {
     core::ptr::addr_of_mut!(_SEGGER_RTT).cast()
 }
 
-/// Sets up the ring and the RTT control block. Call once, before the first
-/// event.
-pub fn init() {
+/// Sets up the RTT control block, replays the previous boot's ring if it
+/// survived, and starts a new ring. Call once, before the first event.
+/// Returns this boot's id (1 after power-on, then counting up).
+pub fn init() -> u32 {
     unsafe {
         let name = core::ptr::addr_of_mut!(RTT_NAME).cast::<u8>();
         core::ptr::copy_nonoverlapping(b"t5log\0".as_ptr(), name, 6);
@@ -128,6 +186,76 @@ pub fn init() {
     // A lone 0x00 ends whatever came before on the console (the bootloader's
     // text), so the first record starts a clean frame.
     Current::console_write(&[0]);
+
+    let prev = unsafe { core::ptr::read_volatile(header()) };
+    let boot_id = if prev.valid() {
+        replay(&prev);
+        prev.boot_id.wrapping_add(1)
+    } else {
+        1
+    };
+    let st = state();
+    st.boot_id = boot_id;
+    st.ring_write = 0;
+    st.ring_wrapped = false;
+    st.ring_on = true;
+    save_header();
+    boot_id
+}
+
+/// Sends the previous boot's frames, oldest first, to the outputs (not to
+/// the ring, which still holds them).
+fn replay(prev: &RingHeader) {
+    let base = core::ptr::addr_of!(RING).cast::<u8>();
+    let (start, len) = if prev.wrapped != 0 {
+        (prev.write as usize, RING_SIZE)
+    } else {
+        (0, prev.write as usize)
+    };
+    event!(Info, "log.prev_begin", boot_id = prev.boot_id, bytes = len as u32);
+    let mut frames = 0u32;
+    // After a wrap the oldest frame is cut; skip to its terminator.
+    let mut synced = prev.wrapped == 0;
+    let mut chunk = [0u8; 64];
+    let mut n = 0;
+    for i in 0..len {
+        let b = unsafe { core::ptr::read_volatile(base.add((start + i) % RING_SIZE)) };
+        if !synced {
+            synced = b == 0;
+            continue;
+        }
+        chunk[n] = b;
+        n += 1;
+        if b == 0 {
+            frames += 1;
+        }
+        if n == chunk.len() || i + 1 == len {
+            output(&chunk[..n]);
+            n = 0;
+        }
+    }
+    event!(Info, "log.prev_end", boot_id = prev.boot_id, frames = frames);
+}
+
+fn save_header() {
+    let st = state();
+    let mut h = RingHeader {
+        magic: RING_MAGIC,
+        boot_id: st.boot_id,
+        write: st.ring_write as u32,
+        wrapped: st.ring_wrapped as u32,
+        check: 0,
+    };
+    h.check = h.checksum();
+    unsafe { core::ptr::write_volatile(header(), h) };
+}
+
+/// Raw bytes to RTT and the console, as whole frames (replay only).
+fn output(bytes: &[u8]) {
+    // Replayed frames are already COBS-encoded; RTT takes them unsplit only
+    // if they fit, so a partial chunk at the end of a frame is fine here.
+    let _ = rtt_write(bytes);
+    Current::console_write(bytes);
 }
 
 /// The sink of `event!` inside the kernel.
@@ -167,7 +295,9 @@ pub fn record(source: u32, payload: &[u8]) -> bool {
     let mut frame = [0u8; FRAME_MAX];
     let n = wire::cobs_encode(&rec[..o], &mut frame).unwrap();
     let frame = &frame[..n];
-    ring_push(frame);
+    if st.ring_on {
+        ring_push(frame);
+    }
     if rtt_write(frame) {
         report_rtt_drops();
     } else {
@@ -182,8 +312,13 @@ fn ring_push(bytes: &[u8]) {
     let base = core::ptr::addr_of_mut!(RING).cast::<u8>();
     for &b in bytes {
         unsafe { core::ptr::write_volatile(base.add(st.ring_write), b) };
-        st.ring_write = (st.ring_write + 1) % RING_SIZE;
+        st.ring_write += 1;
+        if st.ring_write == RING_SIZE {
+            st.ring_write = 0;
+            st.ring_wrapped = true;
+        }
     }
+    save_header();
 }
 
 /// Appends a whole frame to the RTT up-buffer, or nothing if it does not fit

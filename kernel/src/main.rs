@@ -48,12 +48,14 @@ const MODE_BAD_LOG: usize = 5;
 pub extern "C" fn kmain() -> ! {
     Current::init();
     rv::init_trap_vector(Current::MTVEC_MODE);
-    log::init();
+    let boot_id = log::init();
 
     event!(
         Info,
         "boot.start",
         platform = Current::NAME,
+        boot_id = boot_id,
+        reset_cause = Current::reset_cause(),
         abi_major = t5_abi::ABI_MAJOR,
         abi_minor = t5_abi::ABI_MINOR
     );
@@ -64,6 +66,7 @@ pub extern "C" fn kmain() -> ! {
         mstatus = read_csr!("mstatus"),
         mtvec = Addr(read_csr!("mtvec") as u32)
     );
+    Current::log_info();
     dump_pmp();
     if let Some(i) = pmp::first_locked() {
         // Locked entries apply to U-mode too, so isolation cannot hold.
@@ -77,7 +80,19 @@ pub extern "C" fn kmain() -> ! {
     } else {
         event!(Error, "selftest.result", failures = failures, pass = false);
     }
+    #[cfg(feature = "test-lockup")]
+    lockup_test();
     Current::exit(failures)
+}
+
+/// L3 test (doc/12 §7): a kernel fault after the processes have run. The
+/// kernel is still inside the trap taken from the last process (it never
+/// mret'ed), so on the ESP32-P4 the core locks up instead of reaching the
+/// panic handler (doc/11 §4). The next boot must replay this event.
+#[cfg(feature = "test-lockup")]
+fn lockup_test() {
+    event!(Warn, "selftest.lockup_now");
+    unsafe { core::ptr::read_volatile(4 as *const u32) };
 }
 
 fn dump_pmp() {

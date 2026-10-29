@@ -309,21 +309,36 @@ impl Clic {
 }
 
 /// LP_WDT (RWDT). The 2nd stage bootloader leaves it running with a 9 s
-/// timeout (CONFIG_BOOTLOADER_WDT_TIME_MS=9000 in boot/sdkconfig); writes to
-/// the config registers take effect only while WPROTECT holds the key.
+/// timeout (CONFIG_BOOTLOADER_WDT_TIME_MS=9000 in boot/sdkconfig) and stage 0
+/// set to reset the RTC domain too (4, bootloader_init.c:93); writes to the
+/// config registers take effect only while WPROTECT holds the key.
 pub struct LpWdt {
     regs: [u32; 16],
     started_at_ms: u64,
-    pub timeout_ms: u64,
 }
 
+/// RTC slow clock the RWDT counts (RC_SLOW, ~136 kHz).
+const RTC_SLOW_HZ: u64 = 136_000;
+
 const LP_WDT_KEY: u32 = 0x50D8_3AA1;
+/// WDT_STG0 actions (esp_hal_wdt/esp32p4/include/hal/lpwdt_ll.h:39-43).
+pub const STG_RESET_SYSTEM: u32 = 3;
+pub const STG_RESET_RTC: u32 = 4;
+/// LP_CLKRST_RESET_CAUSE_REG (lp_clkrst_reg.h); HPCORE0 cause in [12:7].
+pub const LP_CLKRST_RESET_CAUSE: u32 = 0x5011_1010;
+/// RESET_REASON values (esp_rom/esp32p4/include/esp32p4/rom/rtc.h).
+pub mod reset_reason {
+    pub const POWERON: u32 = 1;
+    pub const HP_SYS_LP_WDT: u32 = 9;
+    pub const CHIP_LP_WDT: u32 = 16;
+}
 
 impl Default for LpWdt {
     fn default() -> Self {
         let mut regs = [0; 16];
-        regs[0] = 1 << 31; // CONFIG0.WDT_EN
-        LpWdt { regs, started_at_ms: 0, timeout_ms: 9000 }
+        regs[0] = (1 << 31) | (STG_RESET_RTC << 28); // CONFIG0: WDT_EN, WDT_STG0
+        regs[1] = 1_224_000; // CONFIG1.WDT_STG0_HOLD as the bootloader leaves it
+        LpWdt { regs, started_at_ms: 0 }
     }
 }
 
@@ -332,8 +347,18 @@ impl LpWdt {
         self.regs[0] & (1 << 31) != 0
     }
 
+    /// Stage 0 timeout. Measured on the Tab5: 2 * hold / 136 kHz (the
+    /// bootloader's 9 s setting fires after ~18 s; doc/12 §7).
+    pub fn timeout_ms(&self) -> u64 {
+        self.regs[1] as u64 * 2 * 1000 / RTC_SLOW_HZ
+    }
+
     pub fn expired(&self, now_ms: u64) -> bool {
-        self.enabled() && now_ms - self.started_at_ms >= self.timeout_ms
+        self.enabled() && now_ms.saturating_sub(self.started_at_ms) >= self.timeout_ms()
+    }
+
+    pub fn stage0_action(&self) -> u32 {
+        (self.regs[0] >> 28) & 7
     }
 
     fn read(&mut self, off: u32) -> u32 {
@@ -343,7 +368,7 @@ impl LpWdt {
     fn write(&mut self, off: u32, v: u32, now_ms: u64) {
         let i = (off / 4) as usize;
         match off {
-            0x14 => self.started_at_ms = now_ms, // FEED
+            0x14 if self.regs[6] == LP_WDT_KEY => self.started_at_ms = now_ms, // FEED
             0x18 => self.regs[i] = v,            // WPROTECT
             _ if i < self.regs.len() => {
                 if self.regs[6] == LP_WDT_KEY {
@@ -364,6 +389,8 @@ pub struct Peripherals {
     pub intmtx: Intmtx,
     pub clic: Clic,
     pub lp_wdt: LpWdt,
+    /// HPCORE0 reset cause reported by LP_CLKRST.
+    pub reset_cause: u32,
     other: std::collections::HashMap<u32, u32>,
     warned: std::collections::HashSet<u32>,
     pub warn_unmodelled: bool,
@@ -377,6 +404,7 @@ impl Peripherals {
             a if (INTMTX_BASE..INTMTX_BASE + 0x200).contains(&a) => self.intmtx.map[((a - INTMTX_BASE) / 4) as usize],
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.read(a - LP_WDT_BASE),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.read(a),
+            LP_CLKRST_RESET_CAUSE => self.reset_cause << 7,
             a => {
                 self.warn(a, "read");
                 self.other.get(&a).copied().unwrap_or(0)

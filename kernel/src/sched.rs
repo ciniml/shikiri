@@ -69,6 +69,7 @@ pub fn run(procs: &mut [Process], limit_ms: u64) -> Stats {
     let mut next = 0;
 
     loop {
+        Current::feed_watchdog();
         let now = Current::now();
         if now >= limit {
             for p in procs.iter_mut() {
@@ -102,8 +103,9 @@ pub fn run(procs: &mut [Process], limit_ms: u64) -> Stats {
             if procs.iter().all(|p| p.exit().is_some()) {
                 break;
             }
-            // Everyone is asleep.
-            Current::set_alarm(wake);
+            // Everyone is asleep. Wake at least every second to feed the
+            // watchdog.
+            Current::set_alarm(wake.min(now + time::ms_to_ticks(1000)));
             Current::wait_for_interrupt();
             Current::clear_alarm();
             stats.idle_waits += 1;
