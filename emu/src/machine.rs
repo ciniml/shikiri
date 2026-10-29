@@ -28,6 +28,10 @@ pub enum Stop {
     Watchdog,
     /// The emulated time limit was reached.
     TimeLimit,
+    /// The flash window was read or fetched from while the L2 cache was
+    /// suspended (a flash-map or flash-write routine not running from RAM).
+    /// The real core would hang.
+    FlashWhileL2Suspended { addr: u32, pc: u32 },
 }
 
 /// An exception (cause, tval) or a reason to stop emulation.
@@ -71,6 +75,9 @@ pub const MISA: u32 = 0x4090_1125;
 /// ROM cache functions (esp_rom/esp32p4/ld/esp32p4.rom.ld:186,190).
 const ROM_CACHE_INVALIDATE_ADDR: u32 = 0x4FC0_03E4;
 const ROM_CACHE_WRITEBACK_ADDR: u32 = 0x4FC0_03F4;
+/// esp32p4.rom.ld:259-260.
+const ROM_CACHE_SUSPEND_L2: u32 = 0x4FC0_0508;
+const ROM_CACHE_RESUME_L2: u32 = 0x4FC0_050C;
 const CACHE_MAP_L1_ICACHE_MASK: u32 = 0b11;
 const CACHE_MAP_L1_DCACHE: u32 = 1 << 4;
 
@@ -106,6 +113,7 @@ pub struct Cpu {
     /// Between trap entry and `mret` (mexstatus.EXPT_VLD on the P4).
     pub in_trap: bool,
     pub instret: u64,
+    pub mhcr: u32,
 }
 
 impl Cpu {
@@ -132,6 +140,7 @@ impl Cpu {
             reservation: None,
             in_trap: false,
             instret: 0,
+            mhcr: 0,
         }
     }
 
@@ -281,6 +290,9 @@ impl Machine {
         self.bus.cycles += 1;
         let pc = self.cpu.pc;
         let r = if Bus::is_rom(pc) { self.rom_call(pc) } else { self.fetch_and_execute(pc) };
+        if let Some(addr) = self.bus.flash_violation.take() {
+            return Err(Stop::FlashWhileL2Suspended { addr, pc });
+        }
         match r {
             Ok(()) => {
                 self.cpu.instret += 1;
@@ -420,6 +432,12 @@ impl Machine {
                 if a0 & CACHE_MAP_L1_DCACHE != 0 {
                     self.bus.cache.writeback_d(a1, a2);
                 }
+            }
+            ROM_CACHE_SUSPEND_L2 => {
+                self.bus.l2_suspended = true;
+            }
+            ROM_CACHE_RESUME_L2 => {
+                self.bus.l2_suspended = false;
             }
             _ => return Err(Ex::Stop(Stop::UnknownRom { pc })),
         }
@@ -745,6 +763,8 @@ impl Machine {
             0x344 => 0,
             // mintstatus is at 0x346 on rev v1.x, not 0xFB1 (doc/01 §0).
             0x346 => (c.mil as u32) << 24,
+            // MHCR: branch prediction control (riscv/include/riscv/rv_utils.h:48-52).
+            0x7C1 => c.mhcr,
             0x3A0..=0x3A3 => c.pmp.read_cfg((csr - 0x3A0) as usize),
             0x3B0..=0x3BF => c.pmp.read_addr((csr - 0x3B0) as usize),
             0xF11..=0xF14 => 0,
@@ -774,6 +794,7 @@ impl Machine {
             0x342 => c.write_mcause(v),
             0x343 => c.mtval = v,
             0x344 => {}
+            0x7C1 => c.mhcr = v,
             0x3A0..=0x3A3 => c.pmp.write_cfg((csr - 0x3A0) as usize, v),
             0x3B0..=0x3BF => c.pmp.write_addr((csr - 0x3B0) as usize, v),
             _ => return None,

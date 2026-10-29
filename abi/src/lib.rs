@@ -5,6 +5,7 @@
 #![no_std]
 
 pub mod log;
+pub mod store;
 pub mod t5a;
 
 /// ABI version carried by every app image. The kernel accepts an image when

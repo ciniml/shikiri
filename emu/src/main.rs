@@ -31,6 +31,7 @@ fn load_image(bus: &mut Bus, elf: &t5emu::elf::Elf) -> Result<(), String> {
 const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [--seed N] \
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] \
+                     [--flash FILE@HEXOFFSET]... \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -49,6 +50,7 @@ struct Opts {
     log_from_rtt: bool,
     resets: u32,
     expect_prev_event: Option<String>,
+    flash_images: Vec<(u32, String)>,
     elf: String,
 }
 
@@ -69,6 +71,7 @@ fn parse_args() -> Result<Opts, String> {
         log_from_rtt: false,
         resets: 0,
         expect_prev_event: None,
+        flash_images: Vec::new(),
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -96,6 +99,12 @@ fn parse_args() -> Result<Opts, String> {
             "--log-from-rtt" => o.log_from_rtt = true,
             "--resets" => o.resets = val()?.parse().map_err(|e| format!("--resets: {e}"))?,
             "--expect-prev-event" => o.expect_prev_event = Some(val()?),
+            "--flash" => {
+                let v = val()?;
+                let (file, off) = v.rsplit_once('@').ok_or(format!("--flash FILE@OFFSET: {v}"))?;
+                let off = u32::from_str_radix(off.trim_start_matches("0x"), 16).map_err(|e| format!("--flash {v}: {e}"))?;
+                o.flash_images.push((off, file.to_string()));
+            }
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => o.elf = s.to_string(),
         }
@@ -150,6 +159,13 @@ fn main() -> ExitCode {
     if let Err(e) = load_image(&mut bus, &elf) {
         eprintln!("t5emu: {e}");
         return ExitCode::from(64);
+    }
+    for (off, file) in &o.flash_images {
+        let r = std::fs::read(file).map_err(|e| format!("{file}: {e}")).and_then(|d| bus.load_phys_flash(*off, &d));
+        if let Err(e) = r {
+            eprintln!("t5emu: {e}");
+            return ExitCode::from(64);
+        }
     }
 
     let mut m = Machine::new(bus, elf.entry);
@@ -291,5 +307,9 @@ fn describe(s: &Stop) -> String {
         Stop::VectoredInterrupt { line } => format!("hardware-vectored CLIC interrupt {line} (not modelled)"),
         Stop::Watchdog => "RWDT expired (reset on real hardware)".into(),
         Stop::TimeLimit => "time limit reached".into(),
+        Stop::FlashWhileL2Suspended { addr, pc } => format!(
+            "flash window access at {addr:#010x} (pc={pc:#010x}) while the L2 cache was suspended \
+             (the real core would hang; the code must run from RAM)"
+        ),
     }
 }

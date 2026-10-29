@@ -18,6 +18,7 @@ mod log;
 mod platform;
 mod process;
 mod sched;
+mod store;
 mod time;
 
 use arch::riscv32::csr::{cause, read_csr};
@@ -27,14 +28,37 @@ use process::{Exit, Process};
 use t5_abi::event;
 use t5_abi::log::Addr;
 
-static HELLO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.t5a"));
-static FAULT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault.t5a"));
-static TICKER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ticker.t5a"));
-static SPIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spin.t5a"));
-/// Signed by a key the kernel does not trust.
-static HELLO_UNTRUSTED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello-untrusted.t5a"));
-/// Correctly signed, but for ABI 9.0.
-static HELLO_BADABI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello-badabi.t5a"));
+/// The self-test's apps, read from the app store in flash (doc/14 §2).
+struct Apps {
+    hello: &'static [u8],
+    fault: &'static [u8],
+    ticker: &'static [u8],
+    spin: &'static [u8],
+    /// Signed by a key the kernel does not trust.
+    hello_untrusted: &'static [u8],
+    /// Correctly signed, but for ABI 9.0.
+    hello_badabi: &'static [u8],
+}
+
+impl Apps {
+    fn from_store(s: &store::Store) -> Option<Apps> {
+        let get = |name: &'static str| {
+            let image = s.image(name);
+            if image.is_none() {
+                event!(Error, "selftest.missing_app", name = name);
+            }
+            image
+        };
+        Some(Apps {
+            hello: get("hello")?,
+            fault: get("fault")?,
+            ticker: get("ticker")?,
+            spin: get("spin")?,
+            hello_untrusted: get("hello-untrusted")?,
+            hello_badabi: get("hello-badabi")?,
+        })
+    }
+}
 
 /// Kernel data the fault test tries to read and overwrite: one in read-only
 /// data (flash on ESP32-P4) and one in RAM.
@@ -78,7 +102,30 @@ pub extern "C" fn kmain() -> ! {
     }
     pmp::reset();
 
-    let failures = selftest_m3a() + selftest_m1() + selftest_m2();
+    let failures = match Current::map_flash() {
+        Some(window) => {
+            // A check that the window shows the flash: the CRC of the first
+            // 4 KiB of ota_0 (0x10000), which is the start of the kernel's
+            // own image file, so the host can compare.
+            let ota0 = unsafe { core::slice::from_raw_parts((window + 0x1_0000) as *const u8, 4096) };
+            event!(
+                Info,
+                "flash.mapped",
+                window = Addr(window as u32),
+                ota0_crc32 = t5_abi::store::crc32(ota0)
+            );
+            let store = store::Store::open(window);
+            store.log_contents();
+            match Apps::from_store(&store) {
+                Some(apps) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps),
+                None => 1,
+            }
+        }
+        None => {
+            event!(Error, "selftest.no_flash");
+            1
+        }
+    };
     if failures == 0 {
         event!(Info, "selftest.result", failures = failures, pass = true);
     } else {
@@ -128,21 +175,21 @@ fn load(name: &'static str, image: &[u8], slot_index: usize, arg0: usize, arg1: 
     }
 }
 
-fn selftest_m1() -> u32 {
+fn selftest_m1(apps: &Apps) -> u32 {
     let kernel_addr = &KERNEL_SECRET as *const u32 as usize;
     let kernel_ram = core::ptr::addr_of!(KERNEL_RAM_CANARY) as usize;
     unsafe { core::ptr::write_volatile(kernel_ram as *mut u32, 0xC0FFEE) };
     let cases: [(&'static str, &'static [u8], usize, usize, Exit); 10] = [
-        ("hello", HELLO, 0, 0, Exit::Code(0)),
-        ("fault/ok", FAULT, MODE_OK, 0, Exit::Code(0)),
-        ("fault/load-mmio", FAULT, MODE_LOAD, Current::PROTECTED_MMIO, fault(cause::LOAD_ACCESS)),
-        ("fault/load-kernel", FAULT, MODE_LOAD, kernel_addr, fault(cause::LOAD_ACCESS)),
-        ("fault/store-kernel", FAULT, MODE_STORE, kernel_addr, fault(cause::STORE_ACCESS)),
-        ("fault/load-kernel-ram", FAULT, MODE_LOAD, kernel_ram, fault(cause::LOAD_ACCESS)),
-        ("fault/store-kernel-ram", FAULT, MODE_STORE, kernel_ram, fault(cause::STORE_ACCESS)),
-        ("fault/exec-data", FAULT, MODE_EXEC_DATA, 0, fault(cause::INSN_ACCESS)),
-        ("fault/store-text", FAULT, MODE_STORE_TEXT, 0, fault(cause::STORE_ACCESS)),
-        ("fault/bad-log", FAULT, MODE_BAD_LOG, kernel_addr, Exit::Code(0)),
+        ("hello", apps.hello, 0, 0, Exit::Code(0)),
+        ("fault/ok", apps.fault, MODE_OK, 0, Exit::Code(0)),
+        ("fault/load-mmio", apps.fault, MODE_LOAD, Current::PROTECTED_MMIO, fault(cause::LOAD_ACCESS)),
+        ("fault/load-kernel", apps.fault, MODE_LOAD, kernel_addr, fault(cause::LOAD_ACCESS)),
+        ("fault/store-kernel", apps.fault, MODE_STORE, kernel_addr, fault(cause::STORE_ACCESS)),
+        ("fault/load-kernel-ram", apps.fault, MODE_LOAD, kernel_ram, fault(cause::LOAD_ACCESS)),
+        ("fault/store-kernel-ram", apps.fault, MODE_STORE, kernel_ram, fault(cause::STORE_ACCESS)),
+        ("fault/exec-data", apps.fault, MODE_EXEC_DATA, 0, fault(cause::INSN_ACCESS)),
+        ("fault/store-text", apps.fault, MODE_STORE_TEXT, 0, fault(cause::STORE_ACCESS)),
+        ("fault/bad-log", apps.fault, MODE_BAD_LOG, kernel_addr, Exit::Code(0)),
     ];
 
     let mut failures = 0;
@@ -184,24 +231,24 @@ fn selftest_m1() -> u32 {
 }
 
 /// Images the loader must reject before running anything (doc/14 §1.4).
-fn selftest_m3a() -> u32 {
+fn selftest_m3a(apps: &Apps) -> u32 {
     use loader::LoadError;
     use t5_abi::t5a::Error;
 
     // A copy of a good image with one byte of the app's code flipped. The
     // copy lives in the last pool slot, which nothing else uses yet.
     let (scratch, scratch_size) = slot(sched::MAX_PROCS - 1);
-    assert!(HELLO.len() <= scratch_size);
+    assert!(apps.hello.len() <= scratch_size);
     let tampered = unsafe {
-        core::ptr::copy_nonoverlapping(HELLO.as_ptr(), scratch as *mut u8, HELLO.len());
-        let b = core::slice::from_raw_parts_mut(scratch as *mut u8, HELLO.len());
-        b[HELLO.len() / 2] ^= 0x01;
+        core::ptr::copy_nonoverlapping(apps.hello.as_ptr(), scratch as *mut u8, apps.hello.len());
+        let b = core::slice::from_raw_parts_mut(scratch as *mut u8, apps.hello.len());
+        b[apps.hello.len() / 2] ^= 0x01;
         &*b
     };
     let cases: [(&'static str, &[u8], fn(&LoadError) -> bool); 3] = [
         ("verify/tampered", tampered, |e| matches!(e, LoadError::Image(Error::BadSignature))),
-        ("verify/untrusted-key", HELLO_UNTRUSTED, |e| matches!(e, LoadError::Image(Error::UnknownKey))),
-        ("verify/abi-mismatch", HELLO_BADABI, |e| matches!(e, LoadError::Image(Error::AbiMismatch { .. }))),
+        ("verify/untrusted-key", apps.hello_untrusted, |e| matches!(e, LoadError::Image(Error::UnknownKey))),
+        ("verify/abi-mismatch", apps.hello_badabi, |e| matches!(e, LoadError::Image(Error::AbiMismatch { .. }))),
     ];
     let mut failures = 0;
     for (name, image, expected) in cases {
@@ -228,13 +275,13 @@ fn selftest_m3a() -> u32 {
 
 /// Two tickers sleep on different periods while two spinners compete for the
 /// CPU with all FP registers in use.
-fn selftest_m2() -> u32 {
+fn selftest_m2(apps: &Apps) -> u32 {
     event!(Info, "selftest.m2_start", processes = 4u32, slice_ms = sched::SLICE_MS);
     let specs: [(&'static str, &'static [u8], usize, usize); 4] = [
-        ("ticker1", TICKER, 1, 30),
-        ("ticker2", TICKER, 2, 45),
-        ("spin1", SPIN, 1, 100),
-        ("spin2", SPIN, 2, 100),
+        ("ticker1", apps.ticker, 1, 30),
+        ("ticker2", apps.ticker, 2, 45),
+        ("spin1", apps.spin, 1, 100),
+        ("spin2", apps.spin, 2, 100),
     ];
     let mut failures = 0;
     let mut slot_index = 0;

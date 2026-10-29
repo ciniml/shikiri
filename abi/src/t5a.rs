@@ -280,6 +280,15 @@ pub struct Image<'a> {
 /// Parses the signed part of an image. Call only on bytes whose signature
 /// has been verified (`Signed::message`).
 pub fn parse(signed: &[u8], abi_major: u16, abi_minor: u16) -> Result<Image<'_>, Error> {
+    parse_inner(signed, Some((abi_major, abi_minor)))
+}
+
+/// `parse` without the ABI check, for tools that only describe images.
+pub fn parse_any_abi(signed: &[u8]) -> Result<Image<'_>, Error> {
+    parse_inner(signed, None)
+}
+
+fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>, Error> {
     let h = Header::from_bytes(signed).ok_or(Error::BadHeader)?;
     let image_off = h.image_offset();
     let relocs_off = h.relocs_offset();
@@ -333,7 +342,9 @@ pub fn parse(signed: &[u8], abi_major: u16, abi_minor: u16) -> Result<Image<'_>,
     let version = version.ok_or(Error::MissingTlv(tlv::VERSION))?;
     let abi = abi.ok_or(Error::MissingTlv(tlv::ABI_VERSION))?;
     let build_id = build_id.ok_or(Error::MissingTlv(tlv::BUILD_ID))?;
-    if abi.0 != abi_major || abi.1 > abi_minor {
+    if let Some((major, minor)) = want_abi
+        && (abi.0 != major || abi.1 > minor)
+    {
         return Err(Error::AbiMismatch { major: abi.0, minor: abi.1 });
     }
     Ok(Image {

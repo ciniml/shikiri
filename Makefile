@@ -5,6 +5,9 @@ APPS_DIR   := $(BUILD)/apps
 APP_TARGET := user/target/riscv32imafc-unknown-none-elf/release
 ELF2T5A    := tools/target/release/elf2t5a
 T5LOG      := tools/target/release/t5log
+T5STORE    := tools/target/release/t5store
+# App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
+STORE_DIR  := $(BUILD)/store
 APPS       := hello fault ticker spin
 APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS))
 # All log schemas (doc/12): every event! call site in the kernel and the apps.
@@ -13,9 +16,13 @@ SCHEMAS    := $(BUILD)/t5log.schemas
 QEMU       ?= qemu-system-riscv32
 QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
               -no-reboot
+# The app store in place of flash: RAM at 0x8400_0000 + flash offset
+# (platform/virt.rs FLASH_IMAGE).
+QEMU_STORE := -device loader,file=$(BUILD)/store/appmeta.bin,addr=0x84410000,force-raw=on \
+              -device loader,file=$(BUILD)/store/apps.bin,addr=0x84420000,force-raw=on
 
 .PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
-        schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 monitor \
+        schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 flash-store monitor \
         probe-rs rtt clean
 
 all: kernel-virt image-p4 boot
@@ -59,11 +66,14 @@ apps: tools $(UNTRUSTED_KEY)
 	for a in $(APPS); do \
 	    $(ELF2T5A) build $(APP_TARGET)/$$a $(APPS_DIR)/$$a.t5a --key $(DEV_KEY) || exit 1; done
 	@# Images the kernel must reject (self-test, doc/14 §1.4).
-	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-untrusted.t5a --key $(UNTRUSTED_KEY)
-	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-badabi.t5a --key $(DEV_KEY) --abi 9.0
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-untrusted.t5a --key $(UNTRUSTED_KEY) \
+	    --name hello-untrusted
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-badabi.t5a --key $(DEV_KEY) --abi 9.0 \
+	    --name hello-badabi
+	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi))
 
 kernel-virt: apps
-	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
+	cd kernel && cargo build --release \
 	    --features platform-virt --target-dir target/virt
 	mkdir -p $(BUILD) && cp kernel/target/virt/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-virt.elf
 
@@ -75,7 +85,7 @@ schemas-p4: kernel-p4
 	$(T5LOG) schemas -o $(SCHEMAS) $(BUILD)/t5-kernel-esp32p4v1.elf $(APP_ELFS)
 
 kernel-p4: apps
-	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
+	cd kernel && cargo build --release \
 	    --features platform-esp32p4v1 --target-dir target/esp32p4v1
 	mkdir -p $(BUILD) && cp kernel/target/esp32p4v1/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-esp32p4v1.elf
 
@@ -119,19 +129,25 @@ probe-rs:
 	cargo install --locked --git https://github.com/probe-rs/probe-rs --rev $(PROBE_RS_REV) \
 	    probe-rs-tools --root $(BUILD)/probe-rs
 
+# Writes the app store (appmeta @0x410000, apps @0x420000; doc/14 §2). This
+# overwrites whatever is in those partitions.
+flash-store: apps
+	espflash write-bin --port $(PORT) 0x410000 $(STORE_DIR)/appmeta.bin
+	espflash write-bin --port $(PORT) 0x420000 $(STORE_DIR)/apps.bin
+
 monitor: schemas-p4
 	stty -F $(PORT) raw -echo
 	$(PRETTY) $(PORT)
 
 # Run on QEMU virt with the decoded log on stdout.
 run-virt: schemas-virt
-	$(QEMU) $(QEMU_FLAGS) -display none -monitor none -serial stdio \
+	$(QEMU) $(QEMU_FLAGS) $(QEMU_STORE) -display none -monitor none -serial stdio \
 	    -kernel $(BUILD)/t5-kernel-virt.elf | $(PRETTY)
 
 # CI-style run: the kernel exits QEMU with status 0 only if the self-test
 # passes; the raw log is kept in build/virt-console.bin and shown decoded.
 test-virt: schemas-virt
-	timeout 20 $(QEMU) $(QEMU_FLAGS) -display none -monitor none \
+	timeout 20 $(QEMU) $(QEMU_FLAGS) $(QEMU_STORE) -display none -monitor none \
 	    -serial file:$(BUILD)/virt-console.bin -kernel $(BUILD)/t5-kernel-virt.elf; \
 	    s=$$?; $(PRETTY) $(BUILD)/virt-console.bin; exit $$s
 
@@ -145,8 +161,11 @@ emu:
 test-emu:
 	cd emu && cargo test --release
 
+# The app store goes into the emulated flash at its partition offsets.
+EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.bin@420000
+
 test-p4emu: emu kernel-p4
-	$(T5EMU) $(addprefix --elf ,$(APP_ELFS)) $(BUILD)/t5-kernel-esp32p4v1.elf
+	$(T5EMU) $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

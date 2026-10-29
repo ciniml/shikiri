@@ -91,6 +91,57 @@ const CLIC_CTRL_BASE: usize = 0x2080_1000;
 /// Priority 1 (ctl = 1 << 5 | 0x1F), level-triggered, non-vectored, enabled.
 const CLIC_TIMER_CTRL: u32 = (0x3F << 24) | (1 << 8);
 
+// Flash MMU (doc/14 §5.1, doc/research/m3-flash-access.md §1): one entry per
+// 64 KiB page of the window 0x4000_0000-0x43FF_FFFF. Write the entry number to
+// ITEM_INDEX, then `(paddr >> 16) | VALID` to ITEM_CONTENT (spi_mem_c_reg.h:
+// 2630,2642; ext_mem_defs.h:57). The bootloader uses entries 0-31 for the
+// kernel and 1023; the kernel maps the whole 16 MiB flash linearly at
+// 0x4100_0000 (entries 256-511).
+const MMU_ITEM_CONTENT: usize = 0x5008_C37C;
+const MMU_ITEM_INDEX: usize = 0x5008_C380;
+const MMU_VALID: u32 = 1 << 12;
+const FLASH_WINDOW: usize = 0x4100_0000;
+const FLASH_SIZE: usize = 16 << 20;
+const MMU_PAGE: usize = 64 << 10;
+// esp32p4.rom.ld:259-260
+const ROM_CACHE_SUSPEND_L2: usize = 0x4FC0_0508;
+const ROM_CACHE_RESUME_L2: usize = 0x4FC0_050C;
+const CACHE_MAP_L2_CACHE: u32 = 1 << 5;
+/// MHCR (0x7C1): return stack, predictive jumps, branch target prediction
+/// (riscv/include/riscv/rv_utils.h:48-52). Off while the map changes.
+const MHCR_BRANCH_PREDICTION: usize = (1 << 4) | (1 << 5) | (1 << 12);
+
+/// Maps the flash at `FLASH_WINDOW`, following ESP-IDF's sequence for P4:
+/// branch prediction off, L2 suspended, entries written, the range
+/// invalidated in L1 I/D and L2, L2 resumed. Runs from RAM: the flash window
+/// (where the rest of the kernel lives) is unusable while L2 is suspended.
+/// Interrupts are off in the kernel.
+#[unsafe(link_section = ".ram_text")]
+#[inline(never)]
+unsafe fn map_flash_linear() {
+    unsafe {
+        let suspend: unsafe extern "C" fn() -> u32 = core::mem::transmute(ROM_CACHE_SUSPEND_L2);
+        let resume: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_CACHE_RESUME_L2);
+        let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
+        let mhcr: usize;
+        core::arch::asm!("csrrc {0}, 0x7c1, {1}", out(reg) mhcr, in(reg) MHCR_BRANCH_PREDICTION);
+        let autoload = suspend();
+        let first = (FLASH_WINDOW & 0x03FF_FFFF) / MMU_PAGE;
+        let mut page = 0;
+        while page < FLASH_SIZE / MMU_PAGE {
+            core::ptr::write_volatile(MMU_ITEM_INDEX as *mut u32, (first + page) as u32);
+            core::ptr::write_volatile(MMU_ITEM_CONTENT as *mut u32, page as u32 | MMU_VALID);
+            page += 1;
+        }
+        let (a, n) = (FLASH_WINDOW as u32, FLASH_SIZE as u32);
+        invalidate(CACHE_MAP_L1_ICACHE_MASK, a, n);
+        invalidate(CACHE_MAP_L1_DCACHE, a, n);
+        invalidate(CACHE_MAP_L2_CACHE, a, n);
+        resume(autoload);
+        core::arch::asm!("csrw 0x7c1, {0}", in(reg) mhcr);
+    }
+}
+
 // ROM cache functions (esp_rom/esp32p4/ld/esp32p4.rom.ld,
 // esp_rom/esp32p4/include/esp32p4/rom/cache.h). ESP-IDF uses these rather than
 // fence.i to make written code fetchable (doc/02 §2.2).
@@ -276,6 +327,11 @@ impl Platform for Esp32p4v1 {
             invalidate(CACHE_MAP_L1_ICACHE_MASK, addr as u32, len as u32);
             core::arch::asm!("fence.i");
         }
+    }
+
+    fn map_flash() -> Option<usize> {
+        unsafe { map_flash_linear() };
+        Some(FLASH_WINDOW)
     }
 
     fn log_info() {

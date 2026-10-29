@@ -26,6 +26,18 @@ SECTIONS
         *(.text .text.*)
     } > REGION_TEXT
 
+    /* Code that must not run from flash: on the ESP32-P4 it runs while the
+     * L2 cache, and with it the flash window, is suspended (doc/14 §5).
+     * Loaded into RAM by the bootloader (P4) or QEMU (virt). Both ends are
+     * on 64-byte (L1 cache line) boundaries, so writes to the data next to
+     * it never share a line with code. */
+    .ram_text : ALIGN(64) {
+        __ram_text_start = .;
+        KEEP(*(.ram_text .ram_text.*))
+        . = ALIGN(64);
+        __ram_text_end = .;
+    } > RAM
+
     .data : ALIGN(4) {
         *(.data .data.* .sdata .sdata.*)
     } > RAM

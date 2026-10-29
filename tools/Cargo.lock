@@ -1474,6 +1474,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "t5store"
+version = "0.1.0"
+dependencies = [
+ "t5-abi",
+]
+
+[[package]]
 name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

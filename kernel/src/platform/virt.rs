@@ -10,6 +10,9 @@ const UART_THR: usize = 0;
 const UART_LSR: usize = 5;
 const UART_LSR_THRE: u8 = 1 << 5;
 const SIFIVE_TEST: usize = 0x0010_0000;
+/// Stand-in for the flash on virt: RAM at 0x8400_0000 (within QEMU's
+/// default 128 MiB) holds an image of the flash layout.
+const FLASH_IMAGE: usize = 0x8400_0000;
 // CLINT (hw/riscv/virt.c, hw/intc/riscv_aclint.c): 10 MHz mtime.
 const CLINT_MTIMECMP: usize = 0x0200_4000;
 const CLINT_MTIME: usize = 0x0200_BFF8;
@@ -62,6 +65,12 @@ impl Platform for Virt {
                 core::ptr::write_volatile((UART0 + UART_THR) as *mut u8, b);
             }
         }
+    }
+
+    fn map_flash() -> Option<usize> {
+        // `make test-virt` loads the app store images here with QEMU's
+        // generic loader, at FLASH_IMAGE + their flash offsets.
+        Some(FLASH_IMAGE)
     }
 
     fn sync_code(_addr: usize, _len: usize) {

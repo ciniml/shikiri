@@ -1,3 +1,3 @@
 [workspace]
 resolver = "3"
-members = ["elf2t5a", "t5log"]
+members = ["elf2t5a", "t5log", "t5store"]

@@ -40,6 +40,11 @@ pub trait Platform {
     fn set_alarm(at: u64);
     /// Disarms the alarm and clears its pending interrupt.
     fn clear_alarm();
+    /// Makes the whole flash readable and returns the address of flash
+    /// offset 0, or `None` without flash (doc/14 §5.1). Called once.
+    fn map_flash() -> Option<usize> {
+        None
+    }
     /// Logs platform details worth keeping (called once the log is up).
     fn log_info() {}
     /// Restarts the system watchdog (no-op where there is none).

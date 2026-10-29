@@ -17,18 +17,6 @@ fn main() {
     println!("cargo:rustc-link-arg=-Tlink.ld");
     println!("cargo:rerun-if-changed={script}");
 
-    // App images built by `make apps` (user/ + tools/elf2t5a) are embedded into
-    // the kernel until app loading from flash arrives in M3.
-    let apps = PathBuf::from(env::var("T5_APPS_DIR").unwrap_or_else(|_| "../build/apps".into()));
-    println!("cargo:rerun-if-env-changed=T5_APPS_DIR");
-    for app in ["hello", "fault", "ticker", "spin", "hello-untrusted", "hello-badabi"] {
-        let src = apps.join(format!("{app}.t5a"));
-        println!("cargo:rerun-if-changed={}", src.display());
-        fs::copy(&src, out.join(format!("{app}.t5a"))).unwrap_or_else(|e| {
-            panic!("{}: {e} (run `make apps` first)", src.display())
-        });
-    }
-
     // Trusted app-signing keys (doc/14 §1.3): keys/*.pub, 64 hex digits each.
     let mut keys = String::from("/// Public keys whose signatures the loader accepts.\npub static TRUSTED_KEYS: &[[u8; 32]] = &[\n");
     let mut found = 0;

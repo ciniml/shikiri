@@ -222,3 +222,25 @@ entry: name[32] | extent_first (u16) | extent_count (u16) | length (u32) | versi
   - 実機は t5emu の 40MHz 換算より約 1.9 倍速い。CPU が 40MHz より速く動いている可能性がある（推測）。M4 でクロックを 360MHz にしてから測り直す。
   - 自己試験全体（14 回のロード）は 1.8 秒になった。
 - 実機、QEMU、t5emu のすべてで `selftest.result pass=true`。実機のログは [logs/m3a-tab5-20261030.txt](logs/m3a-tab5-20261030.txt)。
+
+## 9. M3b の実装記録（2026-10-30、実機でのストアの書き込みは未実施）
+
+### 9.1 実装したもの
+- `abi/src/store.rs`: カタログのセクタ（ヘッダ 16 バイト、エントリ 64 バイト × 最大 63、末尾に CRC-32）、`active`（A/B のうち、有効で seq が新しいほう。seq は循環してよい）、`build_sector`。単体テストでは、新しいほうが壊れていれば古いほうに戻ること、消去済み（0xFF）はカタログとみなさないこと、範囲外のエントリを捨てることを確かめた。
+- `tools/t5store build | list`: 署名済みの T5A から、`appmeta.bin`（64KiB、セクタ A、seq 1）と `apps.bin`（エクステント単位）を作る。`make apps` が `build/store/` に作る。
+- カーネル:
+  - `Platform::map_flash`。P4 では、フラッシュ全体を 0x4100_0000 に線形に対応付ける（`map_flash_linear`）。§5.1 の手順で行い、関数は `.ram_text`（L2MEM）に置く。virt では、QEMU の generic loader が置いた 0x8400_0000 を返す。
+  - `store.rs`: カタログを開き、名前でイメージを引く。`store.open`、`store.app`、`store.empty` を出す。
+  - **自己試験のアプリは、カーネルに埋め込むのをやめて、ストアから読む**（`Apps::from_store`）。
+- `.ram_text` セクション: L2MEM の先頭に置き、両端を 64 バイト（L1 のキャッシュライン）にそろえる。そろえる前は、t5emu が「.bss と同じキャッシュラインのコードを取得した」と報告した。実機では害がないが、コードとデータが同じ行に載らないようにした。
+- t5emu:
+  - フラッシュの MMU のレジスタと物理フラッシュ（16MiB、`--flash FILE@OFFSET`）を模す。
+  - ROM の `Cache_Suspend_L2_Cache` と `Cache_Resume_L2_Cache` を模す。CSR の MHCR（0x7C1）も扱う。
+  - **L2 を止めている間にフラッシュの窓を読むか、そこから命令を取得したら、エラーで止める。** 試しに `map_flash_linear` を `.ram_text` から外すと、`flash window access at 0x40004c4a ... while the L2 cache was suspended` で止まった。
+- `make flash-store`（espflash で 0x410000 と 0x420000 に書く）。
+
+### 9.2 確認したこと
+- QEMU と t5emu で、ストアから読んだアプリで自己試験が通った（`store.open catalog_seq=1 apps=6` → `selftest.result pass=true`）。
+- **実機: MMU による線形の窓は正しかった。** カーネルが窓から読んだ ota_0 の先頭 4KiB の CRC-32 は `0x100E876E` だった。ホストで計算した、書き込んだイメージファイルの先頭 4KiB の CRC-32 と一致した。L2 を止めて対応付ける手順（RAM から実行）でも、固まらなかった。
+- 実機の `appmeta` には旧ファームの残りがあり、カタログとしては無効だった（`store.empty`）。期待どおり。
+- **ストアの書き込み（`make flash-store`）は、Claude Code の権限の判定で実行できなかった。** ユーザーに実行を依頼する。
