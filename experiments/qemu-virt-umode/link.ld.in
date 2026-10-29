@@ -1,0 +1,11 @@
+ENTRY(_start)
+SECTIONS {
+  . = BASE;
+  .text : { *(.text.start) *(.text*) *(.rodata*) }
+  . = ALIGN(4096);
+  .utext : { *(.utext) }
+  . = ALIGN(4096);
+  .udata : { *(.udata) }
+  . = ALIGN(4096);
+  .kdata : { *(.kdata) *(.data*) *(.bss*) }
+}

@@ -39,6 +39,12 @@
 6. **ドライバはカーネル内に置く（Tock 型）。** アプリとサービスの間は、ハンドル＋チャネル（Xous 風）でつなぐ（03 §0、判断）。
    - ユーザ空間ドライバは PMP の窓と APM の UM ビットで将来の選択肢として残す（01 §3.6）。
 7. **最初はシングルコア。** Core1 は起動しない。LP コアは使わない。
+8. **エミュレータを最初から使う（08）。** ESP32-P4 を模すエミュレータは存在しない（Espressif QEMU も P4 非対応）。そこで次の 3 層で検証する。
+   - 純ロジック: Linux 上の `cargo test`（Hosted）
+   - アーキ層: 上流 QEMU `-M virt`（トラップ、PMP、U モード、ecall、ローダ）
+   - SoC 層: 実機。補助として Wokwi の P4 v1.0（beta）
+
+   そのため、カーネルの SoC 依存部（Console / Timer / IrqCtrl / Mpu）を trait で切り替える（08 §3.3）。
 
 ## 2. ブート → カーネル → アプリ起動の流れ
 
@@ -172,8 +178,9 @@
 ```
 Cargo.toml            workspace
 kernel/               M モードカーネル（bin, riscv32imafc-unknown-none-elf）
-  src/arch/riscv/     起動、トラップ入口（asm）、コンテキスト、PMP/PMA、CLIC
-  src/soc/esp32p4v1/  hw_ver1 から手書きしたレジスタ定義、WDT、USJ、SYSTIMER、キャッシュ/MMU
+  src/arch/riscv32/   起動、トラップ入口（asm）、コンテキスト、PMP（virt と P4 で共通）
+  src/platform/virt/  QEMU virt 用（NS16550 UART、CLINT、sifive_test で終了）
+  src/platform/esp32p4v1/  hw_ver1 から手書きしたレジスタ定義、WDT、USJ、SYSTIMER、CLIC、PMA、キャッシュ/MMU
   src/loader/         T5A の検証、再配置
   memory-v1.x         リンカスクリプト（v3.x 用は別ファイル）
 abi/                  syscall 番号と型（no_std。カーネルとアプリで共有）
@@ -194,6 +201,7 @@ doc/
 | # | 内容 | 完了条件 | 実機書き込み |
 |---|---|---|---|
 | **M0** | 準備。workspace、カーネルの雛形とリンカスクリプト、`esp_app_desc_t`、bootloader の設定とビルド、パーティションテーブル。**静的 PIE の実験**（ホストで `readelf -r` を見て再配置が RELATIVE だけになるか確認。04 §6 の未確認事項） | ビルドが通る。PIE の結論が出る | なし |
+| **M1-virt** | M1b と同じ内容（U モードのアプリが ecall で `dbg_write` と `exit`、保護テスト 3 種類）を、Rust のカーネルで QEMU virt 上で先に通す。CI で自動実行できるようにする。トラップ入口は最初から P4 と同じ書き方にする（mcause の上位ビットをマスクして判定、64B 整列、mscratch=0 でカーネル実行中を示す）（08 §5）。同じ内容は、調査時に asm の試作で virt 上で通ることを確認済み（08 §4） | QEMU で U モードの hello と 3 種類のフォールトを確認 | なし |
 | **M0.5** | 実機のフラッシュ 16MB 全体をバックアップ（`espflash read-flash`）。いまの portable_terminal に戻せるようにする | バックアップを取得し、ハッシュを記録 | 読み出しのみ（要確認） |
 | **M1a** | bootloader、パーティションテーブル、カーネルを書き込む。M モードで "hello" を出し、診断（chip rev、PMP/PMA、misa）をダンプ、RWDT を停止 | USB Serial/JTAG にログが出る。ロック済み PMP がない | **あり（要確認）** |
 | **M1b** | **U モードのアプリが ecall で出力する。** カーネルに埋め込んだアプリ（PIE を L2MEM 上側へ再配置、M0 の実験が失敗したら固定アドレスでリンク）を、PMP の 2 領域で U モード実行し、`dbg_write` → USB Serial/JTAG、`exit`。あわせて**保護テスト**: アプリが ① 0x500D_2000 を読む、② カーネル領域に書く、③ data 領域を実行する → それぞれカーネルがアクセスフォールトを捕まえてプロセスを終了させ、カーネルは動き続ける | 正常系と 3 種類の異常系がすべて期待どおり | あり |
@@ -223,6 +231,7 @@ doc/
 
 ## 8. リスクと未確認事項（実機で早めに潰す順）
 
+0. virt では再現できない差（CLIC、PMP の粒度 128B、ロックされた PMP、ネストした例外での lock-up、PMA、キャッシュ同期）。M1a/M1b の最終判定は実機で行う（08 §3.2）。
 1. ブートローダを作り直したとき、ロックされた PMP/PMA が残っていないか（M1a の診断ダンプで確認）。PMA の空きエントリ数。
 2. v1.x の U モードへ実際に入れるか。U モード実行中の M 割り込みとアクセスフォールトの mcause/mtval/mepc が正確か（01 §9）。
 3. Tock が ESP32-C3 で踏んだような「トラップベクタが U から実行可能でないとフォールトする」バグが P4 にもあるか（PMP#0 を予備にしてある）。

@@ -1,0 +1,19 @@
+
+[M] hello from M-mode
+[M] misa=401411ad
+[M] mtvec=80000200
+[M] mtvec after writing MODE=3: 80000200
+[M] mstatus=00000000
+[M] pmpaddr15 after writing ~0 = ffffffff
+[M] pmpcfg0=00001b1d
+[M] pmpaddr0=200005ff
+[M] mret -> U
+[M] trap mcause=00000008 mepc=80001004 mtval=00000000 MPP=00000000
+[M] trap mcause=00000005 mepc=80001010 mtval=80004000 MPP=00000000
+[M] trap mcause=00000007 mepc=80001014 mtval=80004000 MPP=00000000
+[M] trap mcause=00000001 mepc=800003a0 mtval=800003a0 MPP=00000000
+[M] trap mcause=00000007 mepc=80001040 mtval=10000000 MPP=00000000
+[M] trap mcause=00000007 mepc=8000104c mtval=80001000 MPP=00000000
+[M] trap mcause=00000001 mepc=80003000 mtval=80003000 MPP=00000000
+[M] trap mcause=00000008 mepc=80001060 mtval=00000000 MPP=00000000
+[M] U exit(ecall a7=99): DONE
