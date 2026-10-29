@@ -19,8 +19,10 @@ use process::{Exit, Process};
 static HELLO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.t5a"));
 static FAULT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault.t5a"));
 
-/// A kernel variable the fault test tries to read and overwrite.
+/// Kernel data the fault test tries to read and overwrite: one in read-only
+/// data (flash on ESP32-P4) and one in RAM.
 static KERNEL_SECRET: u32 = 0x5EC2_E7;
+static mut KERNEL_RAM_CANARY: u32 = 0;
 
 // Modes understood by user/apps/fault.
 const MODE_OK: usize = 0;
@@ -67,12 +69,16 @@ fn dump_pmp() {
 
 fn selftest() -> u32 {
     let kernel_addr = &KERNEL_SECRET as *const u32 as usize;
-    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 7] = [
+    let kernel_ram = core::ptr::addr_of!(KERNEL_RAM_CANARY) as usize;
+    unsafe { core::ptr::write_volatile(kernel_ram as *mut u32, 0xC0FFEE) };
+    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 9] = [
         ("hello", HELLO, 0, 0, Exit::Code(0)),
         ("fault/ok", FAULT, MODE_OK, 0, Exit::Code(0)),
         ("fault/load-mmio", FAULT, MODE_LOAD, Current::PROTECTED_MMIO, fault(cause::LOAD_ACCESS)),
         ("fault/load-kernel", FAULT, MODE_LOAD, kernel_addr, fault(cause::LOAD_ACCESS)),
         ("fault/store-kernel", FAULT, MODE_STORE, kernel_addr, fault(cause::STORE_ACCESS)),
+        ("fault/load-kernel-ram", FAULT, MODE_LOAD, kernel_ram, fault(cause::LOAD_ACCESS)),
+        ("fault/store-kernel-ram", FAULT, MODE_STORE, kernel_ram, fault(cause::STORE_ACCESS)),
         ("fault/exec-data", FAULT, MODE_EXEC_DATA, 0, fault(cause::INSN_ACCESS)),
         ("fault/store-text", FAULT, MODE_STORE_TEXT, 0, fault(cause::STORE_ACCESS)),
     ];
@@ -95,7 +101,18 @@ fn selftest() -> u32 {
         let (what, v) = process::describe(&exit);
         match exit {
             Exit::Fault { pc, tval, .. } => {
-                kprintln!("[{}] {} ({}) pc={:#x} tval={:#x}: {}", p.name, what, v, pc, tval, verdict(ok))
+                kprintln!("[{}] {} ({}) pc={:#x} tval={:#x}: {}", p.name, what, v, pc, tval, verdict(ok));
+                if !ok {
+                    let f = &p.frame;
+                    kprintln!(
+                        "    mcause={:#010x} mstatus={:#010x} sp={:#x} ra={:#x} a0={:#x}",
+                        f.mcause,
+                        read_csr!("mstatus"),
+                        f.regs[2],
+                        f.regs[1],
+                        f.regs[10]
+                    );
+                }
             }
             Exit::Code(_) => kprintln!("[{}] {} {}: {}", p.name, what, v, verdict(ok)),
         }
@@ -103,8 +120,10 @@ fn selftest() -> u32 {
             failures += 1;
         }
     }
-    // The kernel variable must be untouched.
-    if unsafe { core::ptr::read_volatile(&KERNEL_SECRET) } != 0x5EC2_E7 {
+    // Kernel data must be untouched.
+    if unsafe { core::ptr::read_volatile(&KERNEL_SECRET) } != 0x5EC2_E7
+        || unsafe { core::ptr::read_volatile(kernel_ram as *const u32) } != 0xC0FFEE
+    {
         kprintln!("kernel memory was modified by U-mode: FAIL");
         failures += 1;
     }

@@ -5,6 +5,7 @@
 use t5_abi::t5a;
 
 use crate::arch::riscv32::pmp::{GRANULE, Region};
+use crate::platform::{Current, Platform};
 
 // Fields are only read through Debug when a load failure is reported.
 #[allow(dead_code)]
@@ -82,9 +83,9 @@ pub unsafe fn load(image: &[u8], base: usize, capacity: usize) -> Result<Loaded,
         }
     }
 
-    // TODO(M4): when loading into PSRAM, write back the D-cache and invalidate
-    // the I-cache here (doc/02 §2.2). L2MEM and QEMU need nothing.
-    unsafe { core::arch::asm!("fence.i") };
+    // On ESP32-P4 the copy sits in the L1 D-cache; without this the core
+    // fetches stale bytes from L2MEM (seen on hardware in M1b).
+    <Current as Platform>::sync_code(base, end_off);
 
     Ok(Loaded {
         region: Region { base, text_end: base + text_size, end: base + end_off },

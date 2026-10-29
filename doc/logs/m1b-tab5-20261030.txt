@@ -1,0 +1,54 @@
+ESP-ROM:esp32p4-eco2-20240710
+Build:Jul 10 2024
+rst:0x17 (CHIP_USB_UART_RESET),boot:0x20c (SPI_FAST_FLASH_BOOT)
+Core0 Saved PC:0x4000297c
+SPI mode:DIO, clock div:1
+load:0x4ff33ce0,len:0x16f8
+load:0x4ff29ed0,len:0xb38
+load:0x4ff2cbd0,len:0x36c4
+entry 0x4ff29eda
+I (25) boot: ESP-IDF v6.0-beta1-624-g6534932340 2nd stage bootloader
+I (25) boot: compile time Oct 30 2026 00:16:39
+I (26) boot: Multicore bootloader
+I (27) boot: chip revision: v1.0
+I (27) boot: efuse block revision: v0.3
+I (28) boot.esp32p4: SPI Speed      : 80MHz
+I (28) boot.esp32p4: SPI Mode       : DIO
+I (28) boot.esp32p4: SPI Flash Size : 16MB
+I (28) boot: Enabling RNG early entropy source...
+I (29) boot: Partition Table:
+I (29) boot: ## Label            Usage          Type ST Offset   Length
+I (29) boot:  0 nvs              WiFi data        01 02 00009000 00004000
+I (30) boot:  1 otadata          OTA data         01 00 0000d000 00002000
+I (30) boot:  2 ota_0            OTA app          00 10 00010000 00200000
+I (31) boot:  3 ota_1            OTA app          00 11 00210000 00200000
+I (31) boot:  4 appmeta          unknown          40 00 00410000 00010000
+I (32) boot:  5 apps             unknown          40 01 00420000 00800000
+I (32) boot:  6 userdata         unknown          40 02 00c20000 003e0000
+I (34) boot: End of partition table
+I (35) esp_image: segment 0: paddr=00010020 vaddr=40000020 size=01d64h (  7524) map
+I (39) esp_image: segment 1: paddr=00011d8c vaddr=00000000 size=0002ch (    44) 
+I (40) esp_image: segment 2: paddr=00011dc0 vaddr=40001dc0 size=02884h ( 10372) map
+I (44) boot: Loaded app from partition at offset 0x10000
+I (44) boot: Disabling RNG early entropy source...
+tab5-os kernel (esp32p4-v1.x)
+misa=0x40901125 mstatus=0x00000000 mtvec=0x40001ec3
+hello from U-mode
+[hello] exit 0: ok
+fault test: mode=0 addr=0x0
+[fault/ok] exit 0: ok
+fault test: mode=1 addr=0x500d2000
+[fault/load-mmio] load access fault (5) pc=0x4ff40066 tval=0x500d2000: ok
+fault test: mode=1 addr=0x4000040c
+[fault/load-kernel] load access fault (5) pc=0x4ff40066 tval=0x4000040c: ok
+fault test: mode=2 addr=0x4000040c
+[fault/store-kernel] store access fault (7) pc=0x4ff400a4 tval=0x4000040c: ok
+fault test: mode=1 addr=0x4ff00000
+[fault/load-kernel-ram] load access fault (5) pc=0x4ff40066 tval=0x4ff00000: ok
+fault test: mode=2 addr=0x4ff00000
+[fault/store-kernel-ram] store access fault (7) pc=0x4ff400a4 tval=0x4ff00000: ok
+fault test: mode=3 addr=0x0
+[fault/exec-data] instruction access fault (1) pc=0x4ff40b78 tval=0x4ff40b78: ok
+fault test: mode=4 addr=0x0
+[fault/store-text] store access fault (7) pc=0x4ff40098 tval=0x4ff4000a: ok
+selftest: PASS

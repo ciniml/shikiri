@@ -23,6 +23,9 @@ pub trait Platform {
     /// Early hardware setup: watchdogs, console.
     fn init();
     fn console_write(bytes: &[u8]);
+    /// Makes code the kernel just wrote to `[addr, addr + len)` visible to
+    /// instruction fetch.
+    fn sync_code(addr: usize, len: usize);
     /// Ends the run. On QEMU this exits the emulator with `code`.
     fn exit(code: u32) -> !;
 }

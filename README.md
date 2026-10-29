@@ -3,7 +3,7 @@
 M5Stack Tab5（ESP32-P4 rev v1.x）向けの Rust 製の自作 OS（開発中）。カーネルは M モード、アプリは U モードで動かし、PMP で分離する。
 
 - 設計と調査: [doc/](doc/README.md)（結論は [doc/07](doc/07-architecture-proposal.md)）
-- 進捗: M0（雛形、静的 PIE、ブートローダ）と M1-virt（QEMU virt での U モードと保護テスト）
+- 進捗: M0（雛形、静的 PIE、ブートローダ）、M1-virt（QEMU virt）、**M1a/M1b（実機の Tab5 で U モードの hello と保護テスト 7 件）**。記録は [doc/09](doc/09-bringup-m1.md)
 
 ## 構成
 

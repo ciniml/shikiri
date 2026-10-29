@@ -29,6 +29,16 @@ const TIMG_WDTWPROTECT: usize = 0x64;
 const TIMG_WDT_WKEY: u32 = 0x50D8_3AA1;
 const TIMG_WDT_EN: u32 = 1 << 31;
 
+// ROM cache functions (esp_rom/esp32p4/ld/esp32p4.rom.ld,
+// esp_rom/esp32p4/include/esp32p4/rom/cache.h). ESP-IDF uses these rather than
+// fence.i to make written code fetchable (doc/02 §2.2).
+const ROM_CACHE_INVALIDATE_ADDR: usize = 0x4FC0_03E4;
+const ROM_CACHE_WRITEBACK_ADDR: usize = 0x4FC0_03F4;
+const CACHE_MAP_L1_ICACHE_MASK: u32 = (1 << 0) | (1 << 1);
+const CACHE_MAP_L1_DCACHE: u32 = 1 << 4;
+
+type RomCacheFn = unsafe extern "C" fn(map: u32, addr: u32, size: u32) -> i32;
+
 pub struct Esp32p4v1;
 
 /// ESP-IDF `esp_app_desc_t` (esp_app_format/include/esp_app_desc.h). The
@@ -129,6 +139,18 @@ impl Platform for Esp32p4v1 {
             }
         }
         unsafe { wr(USJ_EP1_CONF, USJ_WR_DONE) };
+    }
+
+    fn sync_code(addr: usize, len: usize) {
+        // L2MEM is only behind the L1 caches. PSRAM/flash would also need the
+        // L2 cache (CACHE_MAP_L2_CACHE) once apps are loaded there (M4).
+        unsafe {
+            let writeback: RomCacheFn = core::mem::transmute(ROM_CACHE_WRITEBACK_ADDR);
+            let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
+            writeback(CACHE_MAP_L1_DCACHE, addr as u32, len as u32);
+            invalidate(CACHE_MAP_L1_ICACHE_MASK, addr as u32, len as u32);
+            core::arch::asm!("fence.i");
+        }
     }
 
     fn exit(_code: u32) -> ! {

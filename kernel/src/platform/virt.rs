@@ -31,6 +31,10 @@ impl Platform for Virt {
         }
     }
 
+    fn sync_code(_addr: usize, _len: usize) {
+        unsafe { core::arch::asm!("fence.i") };
+    }
+
     fn exit(code: u32) -> ! {
         // sifive_test: 0x5555 = pass, (code << 16) | 0x3333 = fail with code.
         let v = if code == 0 { 0x5555 } else { (code << 16) | 0x3333 };

@@ -1,15 +1,30 @@
+/* Shared kernel layout. Platform scripts define the RAM region and the
+ * REGION_TEXT / REGION_RODATA aliases before including this file. */
 ENTRY(_start)
 
 SECTIONS
 {
-    .text : {
-        KEEP(*(.text._start))
-        *(.text .text.*)
-    } > RAM
+    /* ESP-IDF app descriptor; must start the first flash segment (empty on
+     * platforms that do not use the ESP-IDF bootloader). */
+    .flash.appdesc : ALIGN(4) {
+        KEEP(*(.flash.appdesc))
+    } > REGION_RODATA
 
     .rodata : ALIGN(4) {
         *(.rodata .rodata.* .srodata .srodata.*)
-    } > RAM
+    } > REGION_RODATA
+
+    /* The ESP32-P4 bootloader requires exactly two flash-mapped segments
+     * (bootloader_utility.c unpack_load_app), so keep rodata and text apart. */
+    .text_gap (NOLOAD) : {
+        . = . + 8;
+        . = ALIGN(4) + 0x20;
+    } > REGION_RODATA
+
+    .text : ALIGN(4) {
+        KEEP(*(.text._start))
+        *(.text .text.*)
+    } > REGION_TEXT
 
     .data : ALIGN(4) {
         *(.data .data.* .sdata .sdata.*)
