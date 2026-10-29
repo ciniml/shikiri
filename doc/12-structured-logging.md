@@ -231,7 +231,7 @@ record :=
 - `make probe-rs`: probe-rs を、13 で読んだコミット `dd4909231da2` に固定して `build/probe-rs` に入れる（全体にインストールされている 0.27 は置き換えない）。
 - `tools/probe-rs/esp32p4-tab5.yaml`: 上流の `esp32p4.yaml` に LP SRAM（0x5010_8000〜0x5010_FA80）を足した独自のチップ記述。
   - 変種の名前は `esp32p4` のままにした。probe-rs は、名前が `esp32p4` と完全に一致するときだけ P4 のデバッグシーケンスを使う（`probe-rs-espressif/src/lib.rs:121`）。
-- `make rtt PROBE=303a:1001:<MAC>`（中身は `tools/probe-rs/rtt.sh`）。
+- `make rtt PROBE=303a:1001:<MAC>`（中身は `tools/probe-rs/rtt.sh`。**§8 で `t5log rtt` に置き換えた**）。
   - probe-rs はバイナリのチャネルを、改行なしの 16 進テキスト（`"0a 1b "`）で出力する（`probe-rs-tools/.../stream_decoder.rs:206-209`）。パイプにすると出力がバッファに溜まったまま流れない。そのため `--target-output-file` に書かせ、`tail -F` で追いかけて `t5log decode --hex` で解読する。
   - probe-rs はフォアグラウンドで動かし、Ctrl-C で止まるようにした。プロセスグループに SIGINT を送る試験で、probe-rs、tail、t5log がすべて終了することを確認した。
 - `PROBE` は必須にした。この PC には ESP のデバッグプローブが 2 つつながっているため（`probe-rs list`）。
@@ -289,3 +289,28 @@ record :=
 - RTC ドメインのリセット（電源投入、stage 0 = 4）の後は、ヘッダが無効になって boot_id が 1 に戻ることを想定している。実機では試していない。
 - 再送するとき、RTT の空きが足りないとフレームの途中で切れることがある（64 バイト単位で書くため）。解読側は 0x00 で同期し直すので、壊れたフレームは 1 件の「解読できないフレーム」として出る。
 - 時刻は起動ごとに 0 から始まる（SYSTIMER がリセットされる）。起動をまたいで時刻を比べたいときは boot_id と組にする。
+
+## 8. `t5log rtt`: probe-rs をライブラリとして使う（2026-10-30）
+
+§6 の構成（probe-rs の CLI → 16 進テキストのファイル → `tail -F` → `t5log decode --hex`）は不便だった。そのため、ユーザーの指示（「probe-rs を直すか、probe-rs 自体を使って t5log が直接 RTT を取得する」）を受けて、後者にした。CLI を直すと、上流が取り込むまでフォークを保守することになるため（判断）。
+
+### 8.1 実装
+- `t5log rtt --probe VID:PID:SERIAL --elf KERNEL [--elf APP]... [--chip-description YAML] [--reset] [--json]`（`tools/t5log/src/rtt.rs`）。
+  - probe-rs を、doc/13 で読んだコミット `dd4909231da2` に git で固定して依存させた。`probe_rs_espressif::register_plugin()` を呼んでから、独自のチップ記述をレジストリに足して接続する。
+  - カーネルの ELF から `_SEGGER_RTT` を探し、`Rtt::attach_at` で接続する。up チャネル 0 を 10ms ごとに読み、そのバイト列を `StreamDecoder` に直接渡す。16 進テキストは経由しない。
+  - 制御ブロックがまだ（またはもう）ないときは、200ms ごとに接続し直す。チップがリセットされると probe-rs が `ReadPointerChanged` を返すので、それをきっかけに接続し直す。
+  - `--reset`: 制御ブロックの id を 0 で消してからチップをリセットする。前の起動の読み残しを、新しい起動のログと取り違えないため。
+  - Ctrl-C でそのまま終わる（コアは動いたまま残る）。
+- probe-rs への依存は、cargo のフィーチャ `rtt` にまとめた（t5log では既定で有効）。解読だけを使う t5emu は `default-features = false` にして、probe-rs を引き込まない。
+- `make rtt PROBE=303a:1001:<MAC> [RESET=1]` は `t5log rtt` を呼ぶ。`tools/probe-rs/rtt.sh` は削除した。`make probe-rs`（CLI）は任意の補助として残した。
+
+### 8.2 見つかった問題と修正: USB の CDC を誰も開いていないとシステムが遅くなる
+- RTT だけで読んでいたとき、自己試験が 0.31 秒ではなく 1.26 秒かかった。
+- 原因は `console_write` だった。USB Serial/JTAG の FIFO が空かないと、1 バイトごとに最大 5 万回ポーリングしてから諦めていた。ホストが CDC を開いていないと、すべてのイベントでこの待ちが起きていた。
+- 修正: 一度タイムアウトしたら「詰まり」とみなし、FIFO に空きができるまでは待たずにバイトを捨てる（`USJ_STALLED`）。USB 側のストリームは欠けるが、解読側は 0x00 で同期し直す。ログは RTT とリングに残る。
+- 修正後、CDC を開かずに RTT だけで読んだときも 0.33 秒で終わった（[logs/l2-tab5-t5log-rtt-20261030.txt](logs/l2-tab5-t5log-rtt-20261030.txt)）。
+
+### 8.3 実機で確かめたこと
+- `t5log rtt --reset` で、リセット（`reset_cause=24`、JTAG_RESET）から自己試験の終わりまでを、その場で解読して表示できた。前回の起動の再送（`prev#N`）も含む。
+- JTAG によるリセットでも、LP SRAM の内容は残った（前回の起動のログが再送された）。
+- Ctrl-C の後に t5log のプロセスは残らなかった。

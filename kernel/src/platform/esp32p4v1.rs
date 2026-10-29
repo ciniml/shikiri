@@ -14,6 +14,11 @@ const USJ_SERIAL_IN_EP_DATA_FREE: u32 = 1 << 1;
 /// Polls before giving up on a byte, so output does not hang when no host has
 /// the CDC port open.
 const USJ_TIMEOUT_POLLS: u32 = 50_000;
+/// Set after a timeout: until the FIFO has room again, bytes are dropped
+/// without waiting. Otherwise every byte would wait the full timeout while
+/// nobody reads the port, slowing the whole system down several times
+/// (seen while logs were read over RTT only, doc/12 §8).
+static mut USJ_STALLED: bool = false;
 
 // LP_WDT / RWDT (doc/06 §2): lp_wdt_reg.h, lpwdt_ll.h
 const LP_WDT_BASE: usize = 0x5011_6000;
@@ -239,15 +244,22 @@ impl Platform for Esp32p4v1 {
     }
 
     fn console_write(bytes: &[u8]) {
+        // Single core, interrupts off in the kernel.
+        let stalled = unsafe { &mut *core::ptr::addr_of_mut!(USJ_STALLED) };
         for &b in bytes {
             let mut polls = 0;
             unsafe {
                 while rd(USJ_EP1_CONF) & USJ_SERIAL_IN_EP_DATA_FREE == 0 {
                     polls += 1;
-                    if polls >= USJ_TIMEOUT_POLLS {
-                        return;
+                    if *stalled || polls >= USJ_TIMEOUT_POLLS {
+                        *stalled = true;
+                        break;
                     }
                 }
+                if *stalled && rd(USJ_EP1_CONF) & USJ_SERIAL_IN_EP_DATA_FREE == 0 {
+                    continue;
+                }
+                *stalled = false;
                 wr(USJ_EP1, b as u32);
             }
         }

@@ -5,6 +5,15 @@ edition = "2024"
 description = "Decoder for tab5-os structured logs (doc/12)"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["rtt"]
+# `t5log rtt`: read the log over RTT with probe-rs as a library (doc/12 §8).
+# Library users that only decode (t5emu) turn it off.
+rtt = ["dep:probe-rs", "dep:probe-rs-espressif"]
+
 [dependencies]
 t5-abi = { path = "../../abi" }
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+# Pinned to the commit reviewed in doc/13 (the same as `make probe-rs`).
+probe-rs = { git = "https://github.com/probe-rs/probe-rs", rev = "dd4909231da2e17bea25c9277196d9fdf3ade53d", optional = true, default-features = false, features = ["builtin-targets"] }
+probe-rs-espressif = { git = "https://github.com/probe-rs/probe-rs", rev = "dd4909231da2e17bea25c9277196d9fdf3ade53d", optional = true }

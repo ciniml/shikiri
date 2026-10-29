@@ -22,8 +22,8 @@ M5Stack Tab5（ESP32-P4 rev v1.x）向けの Rust 製の自作 OS（開発中）
 ```sh
 make test-p4emu    # 実機用カーネルを自作エミュレータ t5emu で実行（doc/11）。成功で終了コード 0
 make monitor PORT=/dev/ttyACM3   # 実機のログを USB から解読して表示（doc/12）
-make probe-rs      # probe-rs（コミット固定）を build/probe-rs に入れる（doc/13）
-make rtt PROBE=303a:1001:<MAC>   # 実機のログを RTT（probe-rs）で回収して表示（doc/12 §6）
+make rtt PROBE=303a:1001:<MAC> [RESET=1]   # 実機のログを RTT で読み、その場で解読（t5log が probe-rs をライブラリとして使う。doc/12 §8）
+make probe-rs      # （任意）probe-rs の CLI をコミット固定で build/probe-rs に入れる（doc/13）
 make test-emu      # t5emu の単体テスト
 make test-virt     # QEMU virt でセルフテスト（M1: U モードと保護テスト 10 件、M2: 4 プロセスの並行実行）。ログを解読して表示し、成功で終了コード 0
 make image-p4      # ESP32-P4 v1.x 用のカーネル app image（build/t5-kernel-esp32p4v1.bin）

@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Log decoding for the verdict and the console view (doc/12).
-t5log = { path = "../tools/t5log" }
+t5log = { path = "../tools/t5log", default-features = false }
 
 [profile.release]
 debug = true

@@ -2,6 +2,10 @@
 //!
 //!   t5log schemas -o OUT ELF...     collect schemas into a file (and check them)
 //!   t5log check ELF...              check schemas: id collisions, naming rules
+//!   t5log rtt --probe VID:PID:SERIAL --elf KERNEL [--elf APP]... [--schemas F]...
+//!             [--chip esp32p4] [--chip-description YAML] [--reset] [--json]
+//!                                   read the log over RTT through probe-rs (used
+//!                                   as a library) and decode it as it arrives
 //!   t5log decode [--schemas F]... [--elf E]... [--pretty] [--tcp HOST:PORT | INPUT]
 //!                                   decode a log stream to JSON Lines (default)
 //!                                   or one line per event (--pretty). INPUT is a
@@ -19,6 +23,8 @@ use t5log::{BootContext, Item, SchemaTable, StreamDecoder};
 const USAGE: &str = "usage:
   t5log schemas -o OUT ELF...
   t5log check ELF...
+  t5log rtt --probe VID:PID:SERIAL --elf KERNEL [--elf APP]... [--schemas FILE]... \
+            [--chip esp32p4] [--chip-description YAML] [--reset] [--json]
   t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]";
 
 fn main() -> ExitCode {
@@ -27,6 +33,7 @@ fn main() -> ExitCode {
         Some("schemas") => cmd_schemas(&args[1..]),
         Some("check") => cmd_check(&args[1..]),
         Some("decode") => cmd_decode(&args[1..]),
+        Some("rtt") => cmd_rtt(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match r {
@@ -133,6 +140,64 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         print_item(&mut out, &t, &mut ctx, &item, pretty)?;
     }
     Ok(())
+}
+
+#[cfg(not(feature = "rtt"))]
+fn cmd_rtt(_: &[String]) -> Result<(), String> {
+    Err("this t5log was built without the `rtt` feature".into())
+}
+
+#[cfg(feature = "rtt")]
+fn cmd_rtt(args: &[String]) -> Result<(), String> {
+    let mut t = SchemaTable::new();
+    let mut elfs = Vec::new();
+    let mut probe = None;
+    let mut chip = "esp32p4".to_string();
+    let mut chip_description = None;
+    let mut reset = false;
+    let mut pretty = true;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--probe" => probe = Some(val()?),
+            "--elf" => elfs.push(val()?),
+            "--schemas" => {
+                t.add_file(&val()?)?;
+            }
+            "--chip" => chip = val()?,
+            "--chip-description" => chip_description = Some(val()?),
+            "--reset" => reset = true,
+            "--json" => pretty = false,
+            s => return Err(format!("unknown argument {s}\n{USAGE}")),
+        }
+    }
+    let probe = probe.ok_or("--probe is required (see `probe-rs list`)")?;
+    let kernel = elfs.first().ok_or("--elf KERNEL is required (it locates _SEGGER_RTT)")?;
+    for e in &elfs {
+        t.add_elf(e)?;
+    }
+    let image = std::fs::read(kernel).map_err(|e| format!("{kernel}: {e}"))?;
+    let opts = t5log::rtt::Options {
+        probe,
+        chip,
+        chip_description,
+        control_block: t5log::rtt::control_block_address(&image).map_err(|e| format!("{kernel}: {e}"))?,
+        channel: 0,
+        poll: std::time::Duration::from_millis(10),
+        reset,
+    };
+    let mut d = StreamDecoder::new();
+    let mut ctx = BootContext::new();
+    let mut out = std::io::stdout().lock();
+    t5log::rtt::stream(&opts, |bytes| {
+        for item in d.push(bytes) {
+            if print_item(&mut out, &t, &mut ctx, &item, pretty).is_err() {
+                return false;
+            }
+        }
+        out.flush().is_ok()
+    })
 }
 
 /// Turns "0a 1b ..." text into bytes. A token is two hex digits surrounded

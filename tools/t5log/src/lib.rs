@@ -7,6 +7,9 @@
 //!   bytes that are not frames (the bootloader's text) come out as text.
 //! - [`Event::to_json`] / [`Event::to_pretty`] render one record.
 
+#[cfg(feature = "rtt")]
+pub mod rtt;
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
