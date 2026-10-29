@@ -2,9 +2,11 @@
 name = "elf2t5a"
 version = "0.1.0"
 edition = "2024"
-description = "Checks a static-PIE app ELF and converts it into a T5A image"
+description = "Checks a static-PIE app ELF and converts it into a signed T5A image"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 t5-abi = { path = "../../abi" }
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+ed25519-compact = { version = "2.6", default-features = false, features = ["std"] }
+sha2 = "0.10"

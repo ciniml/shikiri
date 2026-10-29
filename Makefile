@@ -14,7 +14,7 @@ QEMU       ?= qemu-system-riscv32
 QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
               -no-reboot
 
-.PHONY: all apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
+.PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
         schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 monitor \
         probe-rs rtt clean
 
@@ -37,10 +37,30 @@ PROBE        ?=
 tools:
 	cd tools && cargo build --release
 
-apps: tools
+# App signing (doc/14 §1.3). The secret key stays outside the repository; the
+# kernel embeds the public key in keys/. `make keys` creates a pair once.
+DEV_KEY       ?= $(HOME)/.config/tab5-os/dev-ed25519.key
+DEV_PUB       := keys/dev-ed25519.pub
+# A key the kernel does not trust, for the rejection test. Not a secret.
+UNTRUSTED_KEY := $(BUILD)/keys/untrusted.key
+
+keys: tools
+	@if [ -f $(DEV_KEY) ]; then echo "$(DEV_KEY) exists; not overwriting"; \
+	else $(ELF2T5A) keygen --secret $(DEV_KEY) --public $(DEV_PUB); fi
+
+$(UNTRUSTED_KEY): | tools
+	$(ELF2T5A) keygen --secret $@ --public $(BUILD)/keys/untrusted.pub \
+	    --seed 4242424242424242424242424242424242424242424242424242424242424242
+
+apps: tools $(UNTRUSTED_KEY)
+	@test -f $(DEV_KEY) || { echo "no signing key $(DEV_KEY): run make keys"; exit 1; }
 	cd user && cargo build --release
 	mkdir -p $(APPS_DIR)
-	for a in $(APPS); do $(ELF2T5A) $(APP_TARGET)/$$a $(APPS_DIR)/$$a.t5a || exit 1; done
+	for a in $(APPS); do \
+	    $(ELF2T5A) build $(APP_TARGET)/$$a $(APPS_DIR)/$$a.t5a --key $(DEV_KEY) || exit 1; done
+	@# Images the kernel must reject (self-test, doc/14 §1.4).
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-untrusted.t5a --key $(UNTRUSTED_KEY)
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-badabi.t5a --key $(DEV_KEY) --abi 9.0
 
 kernel-virt: apps
 	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \

@@ -31,6 +31,10 @@ static HELLO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.t5a"));
 static FAULT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fault.t5a"));
 static TICKER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ticker.t5a"));
 static SPIN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spin.t5a"));
+/// Signed by a key the kernel does not trust.
+static HELLO_UNTRUSTED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello-untrusted.t5a"));
+/// Correctly signed, but for ABI 9.0.
+static HELLO_BADABI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello-badabi.t5a"));
 
 /// Kernel data the fault test tries to read and overwrite: one in read-only
 /// data (flash on ESP32-P4) and one in RAM.
@@ -74,7 +78,7 @@ pub extern "C" fn kmain() -> ! {
     }
     pmp::reset();
 
-    let failures = selftest_m1() + selftest_m2();
+    let failures = selftest_m3a() + selftest_m1() + selftest_m2();
     if failures == 0 {
         event!(Info, "selftest.result", failures = failures, pass = true);
     } else {
@@ -175,6 +179,49 @@ fn selftest_m1() -> u32 {
     {
         event!(Error, "selftest.kernel_memory_modified");
         failures += 1;
+    }
+    failures
+}
+
+/// Images the loader must reject before running anything (doc/14 §1.4).
+fn selftest_m3a() -> u32 {
+    use loader::LoadError;
+    use t5_abi::t5a::Error;
+
+    // A copy of a good image with one byte of the app's code flipped. The
+    // copy lives in the last pool slot, which nothing else uses yet.
+    let (scratch, scratch_size) = slot(sched::MAX_PROCS - 1);
+    assert!(HELLO.len() <= scratch_size);
+    let tampered = unsafe {
+        core::ptr::copy_nonoverlapping(HELLO.as_ptr(), scratch as *mut u8, HELLO.len());
+        let b = core::slice::from_raw_parts_mut(scratch as *mut u8, HELLO.len());
+        b[HELLO.len() / 2] ^= 0x01;
+        &*b
+    };
+    let cases: [(&'static str, &[u8], fn(&LoadError) -> bool); 3] = [
+        ("verify/tampered", tampered, |e| matches!(e, LoadError::Image(Error::BadSignature))),
+        ("verify/untrusted-key", HELLO_UNTRUSTED, |e| matches!(e, LoadError::Image(Error::UnknownKey))),
+        ("verify/abi-mismatch", HELLO_BADABI, |e| matches!(e, LoadError::Image(Error::AbiMismatch { .. }))),
+    ];
+    let mut failures = 0;
+    for (name, image, expected) in cases {
+        let (base, size) = slot(0);
+        let result = unsafe { loader::load(image, base, size) };
+        let mut why = t5_abi::log::FmtBuf::<64>::new();
+        let ok = match &result {
+            Ok(_) => {
+                let _ = core::fmt::Write::write_str(&mut why, "loaded");
+                false
+            }
+            Err(e) => {
+                let _ = core::fmt::Write::write_fmt(&mut why, format_args!("{e:?}"));
+                expected(e)
+            }
+        };
+        event!(Info, "selftest.case", name = name, ok = ok, result = why.as_str());
+        if !ok {
+            failures += 1;
+        }
     }
     failures
 }

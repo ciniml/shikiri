@@ -21,11 +21,31 @@ fn main() {
     // the kernel until app loading from flash arrives in M3.
     let apps = PathBuf::from(env::var("T5_APPS_DIR").unwrap_or_else(|_| "../build/apps".into()));
     println!("cargo:rerun-if-env-changed=T5_APPS_DIR");
-    for app in ["hello", "fault", "ticker", "spin"] {
+    for app in ["hello", "fault", "ticker", "spin", "hello-untrusted", "hello-badabi"] {
         let src = apps.join(format!("{app}.t5a"));
         println!("cargo:rerun-if-changed={}", src.display());
         fs::copy(&src, out.join(format!("{app}.t5a"))).unwrap_or_else(|e| {
             panic!("{}: {e} (run `make apps` first)", src.display())
         });
     }
+
+    // Trusted app-signing keys (doc/14 §1.3): keys/*.pub, 64 hex digits each.
+    let mut keys = String::from("/// Public keys whose signatures the loader accepts.\npub static TRUSTED_KEYS: &[[u8; 32]] = &[\n");
+    let mut found = 0;
+    for entry in fs::read_dir("../keys").expect("../keys") {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "pub") {
+            println!("cargo:rerun-if-changed={}", path.display());
+            let hex = fs::read_to_string(&path).unwrap();
+            let hex = hex.trim();
+            assert_eq!(hex.len(), 64, "{}: expected 64 hex digits", path.display());
+            let bytes: Vec<String> = (0..32).map(|i| format!("0x{}", &hex[i * 2..i * 2 + 2])).collect();
+            keys.push_str(&format!("    [{}], // {}\n", bytes.join(", "), path.display()));
+            found += 1;
+        }
+    }
+    assert!(found > 0, "no keys/*.pub: run `make keys`");
+    keys.push_str("];\n");
+    println!("cargo:rerun-if-changed=../keys");
+    fs::write(out.join("keys.rs"), keys).unwrap();
 }

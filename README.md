@@ -3,7 +3,7 @@
 M5Stack Tab5（ESP32-P4 rev v1.x）向けの Rust 製の自作 OS（開発中）。カーネルは M モード、アプリは U モードで動かし、PMP で分離する。
 
 - 設計と調査: [doc/](doc/README.md)（結論は [doc/07](doc/07-architecture-proposal.md)）
-- 進捗: M0（雛形、静的 PIE、ブートローダ）、M1-virt（QEMU virt）、M1a/M1b（実機の Tab5 で U モードの hello と保護テスト 7 件。記録は [doc/09](doc/09-bringup-m1.md)）、**M2（タイマ割り込みによるプリエンプション、sleep/yield/time、FPU の遅延切り替え。QEMU と実機で PASS。記録は [doc/10](doc/10-m2-scheduling.md)）**、エミュレータ t5emu 初版（実機用カーネルが無改造で PASS。[doc/11](doc/11-emulator.md)）、**構造化ログ L1〜L3（テキストログを廃止。USB と RTT（probe-rs）で回収。lock-up の後も次の起動で回収できる。[doc/12](doc/12-structured-logging.md)）**
+- 進捗: M0（雛形、静的 PIE、ブートローダ）、M1-virt（QEMU virt）、M1a/M1b（実機の Tab5 で U モードの hello と保護テスト 7 件。記録は [doc/09](doc/09-bringup-m1.md)）、**M2（タイマ割り込みによるプリエンプション、sleep/yield/time、FPU の遅延切り替え。QEMU と実機で PASS。記録は [doc/10](doc/10-m2-scheduling.md)）**、エミュレータ t5emu 初版（実機用カーネルが無改造で PASS。[doc/11](doc/11-emulator.md)）、**M3a（Ed25519 で署名した T5A v1、検証してから起動）**、**構造化ログ L1〜L3（テキストログを廃止。USB と RTT（probe-rs）で回収。lock-up の後も次の起動で回収できる。[doc/12](doc/12-structured-logging.md)）**
 
 ## 構成
 
@@ -29,6 +29,8 @@ make test-virt     # QEMU virt でセルフテスト（M1: U モードと保護�
 make image-p4      # ESP32-P4 v1.x 用のカーネル app image（build/t5-kernel-esp32p4v1.bin）
 make boot          # ESP-IDF ブートローダとパーティションテーブル（要 ~/esp-idf/6.0）
 ```
+
+アプリは署名が必要（doc/14 §1.3）。最初に一度だけ `make keys` で開発用の鍵を作る（秘密鍵は `~/.config/tab5-os/`、公開鍵は `keys/`）。
 
 必要なもの: rustup（stable と nightly-2026-09-10、アプリ用の `riscv32imafc-unknown-none-elf` とカーネル用の `riscv32imac-unknown-none-elf`）、`qemu-system-riscv32`、espflash 4.4 以上、ESP-IDF 6.0。
 

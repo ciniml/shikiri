@@ -52,7 +52,14 @@ impl Process {
         frame.regs[reg::SP] = loaded.stack_top;
         frame.regs[reg::A0] = arg0;
         frame.regs[reg::A1] = arg1;
-        event!(Info, "proc.start", pid = pid, name = name, base = Addr(loaded.region.base as u32));
+        event!(
+            Info,
+            "proc.start",
+            pid = pid,
+            name = name,
+            base = Addr(loaded.region.base as u32),
+            build_id = &loaded.build_id[..]
+        );
         Process { pid, name, frame, region: loaded.region, state: State::Ready }
     }
 
