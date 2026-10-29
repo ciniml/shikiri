@@ -1,0 +1,231 @@
+| ESP-ROM:esp32p4-eco2-20240710
+| Build:Jul 10 2024
+| rst:0x17 (CHIP_USB_UART_RESET),boot:0x20c (SPI_FAST_FLASH_BOOT)
+| Core0 Saved PC:0x40003754
+| SPI mode:DIO, clock div:1
+| load:0x4ff33ce0,len:0x16f8
+| load:0x4ff29ed0,len:0xb38
+| load:0x4ff2cbd0,len:0x36c4
+| entry 0x4ff29eda
+| I (25) boot: ESP-IDF v6.0-beta1-624-g6534932340 2nd stage bootloader
+| I (25) boot: compile time Oct 30 2026 00:16:39
+| I (26) boot: Multicore bootloader
+| I (27) boot: chip revision: v1.0
+| I (27) boot: efuse block revision: v0.3
+| I (28) boot.esp32p4: SPI Speed      : 80MHz
+| I (28) boot.esp32p4: SPI Mode       : DIO
+| I (28) boot.esp32p4: SPI Flash Size : 16MB
+| I (28) boot: Enabling RNG early entropy source...
+| I (29) boot: Partition Table:
+| I (29) boot: ## Label            Usage          Type ST Offset   Length
+| I (29) boot:  0 nvs              WiFi data        01 02 00009000 00004000
+| I (30) boot:  1 otadata          OTA data         01 00 0000d000 00002000
+| I (30) boot:  2 ota_0            OTA app          00 10 00010000 00200000
+| I (31) boot:  3 ota_1            OTA app          00 11 00210000 00200000
+| I (31) boot:  4 appmeta          unknown          40 00 00410000 00010000
+| I (32) boot:  5 apps             unknown          40 01 00420000 00800000
+| I (32) boot:  6 userdata         unknown          40 02 00c20000 003e0000
+| I (34) boot: End of partition table
+| I (35) esp_image: segment 0: paddr=00010020 vaddr=40000020 size=01ae8h (  6888) map
+| I (39) esp_image: segment 1: paddr=00011b10 vaddr=4ff00000 size=00028h (    40) load
+| I (40) esp_image: segment 2: paddr=00011b40 vaddr=40001b40 size=0cdb0h ( 52656) map
+| I (51) esp_image: segment 3: paddr=0001e8f8 vaddr=4ff00028 size=00098h (   152) load
+| I (53) boot: Loaded app from partition at offset 0x10000
+| I (53) boot: Disabling RNG early entropy source...
+   0.055684 I kernel log.prev_begin boot_id=37 bytes=4223
+prev#37    0.060651 I kernel boot.start platform=esp32p4-v1.x boot_id=37 reset_cause=23 abi_major=0 abi_minor=4
+prev#37    0.060753 I kernel boot.cpu misa=1083183397 mstatus=0 mtvec=0x40001d43
+prev#37    0.060828 I kernel boot.rwdt config0=2953309696 stg0_hold=272000
+prev#37    0.064078 I kernel flash.mapped window=0x41000000 ota0_crc32=4053434388
+prev#37    0.067197 I kernel store.open window=0x41000000 catalog_seq=1 apps=6
+prev#37    0.101357 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+prev#37    0.101486 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00430000 length=7504 state=2 flags=0
+prev#37    0.101601 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+prev#37    0.101717 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+prev#37    0.101833 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+prev#37    0.101961 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+prev#37    0.194861 I kernel selftest.case name=verify/tampered ok=true result=Image(BadSignature)
+prev#37    0.195006 I kernel selftest.case name=verify/untrusted-key ok=true result=Image(UnknownKey)
+prev#37    0.284992 I kernel selftest.case name=verify/abi-mismatch ok=true result=Image(AbiMismatch { major: 9, minor: 0 })
+prev#37    0.375672 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 verify_us=90391
+prev#37    0.376001 I kernel proc.start pid=1 name=hello base=0x4ff40000 build_id=a6b2b9658434ae960f4736e9d51704c5
+prev#37    0.376248 I pid1   hello.greet text=hello from U-mode
+prev#37    0.376354 I kernel proc.exit pid=1 code=0
+prev#37    0.376461 I kernel selftest.case name=hello ok=true result=exit code=0
+prev#37    0.467937 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91349
+prev#37    0.468250 I kernel proc.start pid=1 name=fault/ok base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    0.468396 I pid1   fault.start mode=0 addr=0x00000000
+prev#37    0.468466 I kernel proc.exit pid=1 code=0
+prev#37    0.468544 I kernel selftest.case name=fault/ok ok=true result=exit code=0
+prev#37    0.559730 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91059
+prev#37    0.560045 I kernel proc.start pid=1 name=fault/load-mmio base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    0.560201 I pid1   fault.start mode=1 addr=0x500d2000
+prev#37    0.560297 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+prev#37    0.560419 I kernel selftest.case name=fault/load-mmio ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x500d2000
+prev#37    0.651702 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+prev#37    0.652013 I kernel proc.start pid=1 name=fault/load-kernel base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    0.652171 I pid1   fault.start mode=1 addr=0x400007b0
+prev#37    0.652249 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+prev#37    0.652368 I kernel selftest.case name=fault/load-kernel ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x400007b0
+prev#37    0.743661 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+prev#37    0.743972 I kernel proc.start pid=1 name=fault/store-kernel base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    0.744131 I pid1   fault.start mode=2 addr=0x400007b0
+prev#37    0.744211 W kernel proc.fault: 1 killed by store access fault at 0x4ff400de
+prev#37    0.744333 I kernel selftest.case name=fault/store-kernel ok=true result=store access fault code=7 pc=0x4ff400de tval=0x400007b0
+prev#37    0.835620 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+prev#37    0.835934 I kernel proc.start pid=1 name=fault/load-kernel-ram base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    0.836097 I pid1   fault.start mode=1 addr=0x4ff000cc
+prev#37    0.836175 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+prev#37    0.836295 I kernel selftest.case name=fault/load-kernel-ram ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x4ff000cc
+prev#37    0.927583 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91062
+prev#37    0.927896 I kernel proc.start pid=1 name=fault/store-kernel-ram base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    0.928061 I pid1   fault.start mode=2 addr=0x4ff000cc
+prev#37    0.928139 W kernel proc.fault: 1 killed by store access fault at 0x4ff400de
+prev#37    0.928260 I kernel selftest.case name=fault/store-kernel-ram ok=true result=store access fault code=7 pc=0x4ff400de tval=0x4ff000cc
+prev#37    1.019549 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+prev#37    1.019861 I kernel proc.start pid=1 name=fault/exec-data base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    1.020016 I pid1   fault.start mode=3 addr=0x00000000
+prev#37    1.020096 W kernel proc.fault: 1 killed by instruction access fault at 0x4ff41ae8
+prev#37    1.020225 I kernel selftest.case name=fault/exec-data ok=true result=instruction access fault code=1 pc=0x4ff41ae8 tval=0x4ff41ae8
+prev#37    1.111512 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+prev#37    1.111823 I kernel proc.start pid=1 name=fault/store-text base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    1.111980 I pid1   fault.start mode=4 addr=0x00000000
+prev#37    1.112070 W kernel proc.fault: 1 killed by store access fault at 0x4ff400d2
+prev#37    1.112191 I kernel selftest.case name=fault/store-text ok=true result=store access fault code=7 pc=0x4ff400d2 tval=0x4ff4000a
+prev#37    1.203475 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+prev#37    1.203787 I kernel proc.start pid=1 name=fault/bad-log base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+prev#37    1.203940 I pid1   fault.start mode=5 addr=0x400007b0
+prev#37    1.204016 W kernel log.rejected pid=1 len=5
+prev#37    1.204087 W kernel log.rejected pid=1 len=7
+prev#37    1.204160 I kernel proc.exit pid=1 code=0
+prev#37    1.204237 I kernel selftest.case name=fault/bad-log ok=true result=exit code=0
+prev#37    1.204333 I kernel selftest.m2_start processes=4 slice_ms=10
+prev#37    1.297261 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e verify_us=92805
+prev#37    1.297579 I kernel proc.start pid=1 name=ticker1 base=0x4ff40000 build_id=23dcbe01818507daf03ef6718e8b605e
+prev#37    1.390247 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e verify_us=92516
+prev#37    1.390570 I kernel proc.start pid=2 name=ticker2 base=0x4ff58000 build_id=23dcbe01818507daf03ef6718e8b605e
+prev#37    1.482612 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 verify_us=91890
+prev#37    1.482930 I kernel proc.start pid=3 name=spin1 base=0x4ff70000 build_id=a24822e2c6097d31431cf08bce1421e2
+prev#37    1.574674 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 verify_us=91595
+prev#37    1.574991 I kernel proc.start pid=4 name=spin2 base=0x4ff88000 build_id=a24822e2c6097d31431cf08bce1421e2
+prev#37    1.625239 I pid1   ticker.tick id=1 tick=0 slept_us=30020
+prev#37    1.640277 I pid2   ticker.tick id=2 tick=0 slept_us=45025
+prev#37    1.655371 I pid1   ticker.tick id=1 tick=1 slept_us=30028
+prev#37    1.675524 I pid3   spin.done id=1 iterations=6418 gaps=5 fp_mismatches=0
+prev#37    1.675607 I kernel proc.exit pid=3 code=0
+prev#37    1.685234 I pid4   spin.done id=2 iterations=5256 gaps=4 fp_mismatches=0
+prev#37    1.685316 I kernel proc.exit pid=4 code=0
+prev#37    1.685410 I pid2   ticker.tick id=2 tick=1 slept_us=45028
+prev#37    1.685519 I pid1   ticker.tick id=1 tick=2 slept_us=30045
+prev#37    1.715636 I pid1   ticker.tick id=1 tick=3 slept_us=30018
+prev#37    1.730662 I pid2   ticker.tick id=2 tick=2 slept_us=45018
+prev#37    1.745754 I pid1   ticker.tick id=1 tick=4 slept_us=30018
+prev#37    1.745834 I kernel proc.exit pid=1 code=0
+prev#37    1.775780 I pid2   ticker.tick id=2 tick=3 slept_us=45018
+prev#37    1.820898 I pid2   ticker.tick id=2 tick=4 slept_us=45018
+prev#37    1.820977 I kernel proc.exit pid=2 code=0
+prev#37    1.821079 I kernel selftest.case name=ticker1 ok=true result=exit code=0
+prev#37    1.821163 I kernel selftest.case name=ticker2 ok=true result=exit code=0
+prev#37    1.821247 I kernel selftest.case name=spin1 ok=true result=exit code=0
+prev#37    1.821328 I kernel selftest.case name=spin2 ok=true result=exit code=0
+prev#37    1.821414 I kernel selftest.m2_stats elapsed_ms=245 preemptions=12 fpu_switches=4 fpu_saves=2 idle_waits=5
+prev#37    1.821515 I kernel selftest.result failures=0 pass=true
+   0.061303 I kernel log.prev_end boot_id=37 frames=97
+   0.061435 I kernel boot.start platform=esp32p4-v1.x boot_id=38 reset_cause=23 abi_major=0 abi_minor=4
+   0.101189 I kernel boot.cpu misa=1083183397 mstatus=0 mtvec=0x40001d43
+   0.101265 I kernel boot.rwdt config0=2953309696 stg0_hold=272000
+   0.104514 I kernel flash.mapped window=0x41000000 ota0_crc32=4053434388
+   0.107634 I kernel store.open window=0x41000000 catalog_seq=1 apps=6
+   0.107829 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+   0.107957 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00430000 length=7504 state=2 flags=0
+   0.108072 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+   0.108188 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+   0.108304 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+   0.108433 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+   0.201343 I kernel selftest.case name=verify/tampered ok=true result=Image(BadSignature)
+   0.201487 I kernel selftest.case name=verify/untrusted-key ok=true result=Image(UnknownKey)
+   0.291772 I kernel selftest.case name=verify/abi-mismatch ok=true result=Image(AbiMismatch { major: 9, minor: 0 })
+   0.382464 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 verify_us=90403
+   0.382793 I kernel proc.start pid=1 name=hello base=0x4ff40000 build_id=a6b2b9658434ae960f4736e9d51704c5
+   0.383040 I pid1   hello.greet text=hello from U-mode
+   0.383147 I kernel proc.exit pid=1 code=0
+   0.383254 I kernel selftest.case name=hello ok=true result=exit code=0
+   0.474730 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91349
+   0.475042 I kernel proc.start pid=1 name=fault/ok base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   0.475188 I pid1   fault.start mode=0 addr=0x00000000
+   0.475259 I kernel proc.exit pid=1 code=0
+   0.475335 I kernel selftest.case name=fault/ok ok=true result=exit code=0
+   0.566525 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91063
+   0.566840 I kernel proc.start pid=1 name=fault/load-mmio base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   0.566996 I pid1   fault.start mode=1 addr=0x500d2000
+   0.567092 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+   0.567215 I kernel selftest.case name=fault/load-mmio ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x500d2000
+   0.658495 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+   0.658807 I kernel proc.start pid=1 name=fault/load-kernel base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   0.658965 I pid1   fault.start mode=1 addr=0x400007b0
+   0.659043 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+   0.659162 I kernel selftest.case name=fault/load-kernel ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x400007b0
+   0.750449 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+   0.750761 I kernel proc.start pid=1 name=fault/store-kernel base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   0.750921 I pid1   fault.start mode=2 addr=0x400007b0
+   0.751001 W kernel proc.fault: 1 killed by store access fault at 0x4ff400de
+   0.751122 I kernel selftest.case name=fault/store-kernel ok=true result=store access fault code=7 pc=0x4ff400de tval=0x400007b0
+   0.842412 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91062
+   0.842726 I kernel proc.start pid=1 name=fault/load-kernel-ram base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   0.842890 I pid1   fault.start mode=1 addr=0x4ff000cc
+   0.842967 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+   0.843088 I kernel selftest.case name=fault/load-kernel-ram ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x4ff000cc
+   0.934370 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91058
+   0.934683 I kernel proc.start pid=1 name=fault/store-kernel-ram base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   0.934848 I pid1   fault.start mode=2 addr=0x4ff000cc
+   0.934925 W kernel proc.fault: 1 killed by store access fault at 0x4ff400de
+   0.935047 I kernel selftest.case name=fault/store-kernel-ram ok=true result=store access fault code=7 pc=0x4ff400de tval=0x4ff000cc
+   1.026334 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91059
+   1.026646 I kernel proc.start pid=1 name=fault/exec-data base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   1.026801 I pid1   fault.start mode=3 addr=0x00000000
+   1.026880 W kernel proc.fault: 1 killed by instruction access fault at 0x4ff41ae8
+   1.027009 I kernel selftest.case name=fault/exec-data ok=true result=instruction access fault code=1 pc=0x4ff41ae8 tval=0x4ff41ae8
+   1.118300 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91064
+   1.118611 I kernel proc.start pid=1 name=fault/store-text base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   1.118768 I pid1   fault.start mode=4 addr=0x00000000
+   1.118845 W kernel proc.fault: 1 killed by store access fault at 0x4ff400d2
+   1.118966 I kernel selftest.case name=fault/store-text ok=true result=store access fault code=7 pc=0x4ff400d2 tval=0x4ff4000a
+   1.210249 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=a6288ba22b14cef9dc629612079bacac verify_us=91062
+   1.210560 I kernel proc.start pid=1 name=fault/bad-log base=0x4ff40000 build_id=a6288ba22b14cef9dc629612079bacac
+   1.210713 I pid1   fault.start mode=5 addr=0x400007b0
+   1.210790 W kernel log.rejected pid=1 len=5
+   1.210862 W kernel log.rejected pid=1 len=7
+   1.210935 I kernel proc.exit pid=1 code=0
+   1.211011 I kernel selftest.case name=fault/bad-log ok=true result=exit code=0
+   1.211107 I kernel selftest.m2_start processes=4 slice_ms=10
+   1.304035 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e verify_us=92805
+   1.304353 I kernel proc.start pid=1 name=ticker1 base=0x4ff40000 build_id=23dcbe01818507daf03ef6718e8b605e
+   1.397027 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e verify_us=92521
+   1.397351 I kernel proc.start pid=2 name=ticker2 base=0x4ff58000 build_id=23dcbe01818507daf03ef6718e8b605e
+   1.489392 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 verify_us=91890
+   1.489709 I kernel proc.start pid=3 name=spin1 base=0x4ff70000 build_id=a24822e2c6097d31431cf08bce1421e2
+   1.581453 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 verify_us=91595
+   1.581770 I kernel proc.start pid=4 name=spin2 base=0x4ff88000 build_id=a24822e2c6097d31431cf08bce1421e2
+   1.632018 I pid1   ticker.tick id=1 tick=0 slept_us=30025
+   1.647051 I pid2   ticker.tick id=2 tick=0 slept_us=45024
+   1.662147 I pid1   ticker.tick id=1 tick=1 slept_us=30024
+   1.682299 I pid3   spin.done id=1 iterations=6413 gaps=5 fp_mismatches=0
+   1.682383 I kernel proc.exit pid=3 code=0
+   1.692003 I pid4   spin.done id=2 iterations=5251 gaps=4 fp_mismatches=0
+   1.692085 I kernel proc.exit pid=4 code=0
+   1.692179 I pid2   ticker.tick id=2 tick=1 slept_us=45025
+   1.692288 I pid1   ticker.tick id=1 tick=2 slept_us=30038
+   1.722406 I pid1   ticker.tick id=1 tick=3 slept_us=30018
+   1.737432 I pid2   ticker.tick id=2 tick=2 slept_us=45018
+   1.752525 I pid1   ticker.tick id=1 tick=4 slept_us=30018
+   1.752594 I kernel proc.exit pid=1 code=0
+   1.752662 W kernel log.dropped sink=rtt count=1
+   1.782551 I pid2   ticker.tick id=2 tick=3 slept_us=45018
+   1.827658 I pid2   ticker.tick id=2 tick=4 slept_us=45018
+   1.827725 I kernel proc.exit pid=2 code=0
+   1.827811 I kernel selftest.case name=ticker1 ok=true result=exit code=0
+   1.827884 I kernel selftest.case name=ticker2 ok=true result=exit code=0
+   1.827955 I kernel selftest.case name=spin1 ok=true result=exit code=0
+   1.828057 I kernel selftest.case name=spin2 ok=true result=exit code=0
+   1.828131 I kernel selftest.m2_stats elapsed_ms=245 preemptions=12 fpu_switches=4 fpu_saves=2 idle_waits=5
+   1.828216 I kernel selftest.result failures=0 pass=true

@@ -122,6 +122,9 @@ struct State {
     seq: u64,
     /// Frames the RTT channel had no room for, not yet reported.
     rtt_dropped: u32,
+    /// Frames the console could not take whole (no reader), not yet
+    /// reported.
+    console_dropped: u32,
     /// Set while reporting drops, so the report cannot recurse.
     reporting: bool,
 }
@@ -133,6 +136,7 @@ static mut STATE: State = State {
     ring_wrapped: false,
     seq: 0,
     rtt_dropped: 0,
+    console_dropped: 0,
     reporting: false,
 };
 
@@ -185,7 +189,7 @@ pub fn init() -> u32 {
     }
     // A lone 0x00 ends whatever came before on the console (the bootloader's
     // text), so the first record starts a clean frame.
-    Current::console_write(&[0]);
+    let _ = Current::console_write(&[0]);
 
     let prev = unsafe { core::ptr::read_volatile(header()) };
     let boot_id = if prev.valid() {
@@ -255,7 +259,7 @@ fn output(bytes: &[u8]) {
     // Replayed frames are already COBS-encoded; RTT takes them unsplit only
     // if they fit, so a partial chunk at the end of a frame is fine here.
     let _ = rtt_write(bytes);
-    Current::console_write(bytes);
+    let _ = Current::console_write(bytes);
 }
 
 /// The sink of `event!` inside the kernel.
@@ -298,12 +302,15 @@ pub fn record(source: u32, payload: &[u8]) -> bool {
     if st.ring_on {
         ring_push(frame);
     }
-    if rtt_write(frame) {
-        report_rtt_drops();
-    } else {
+    let rtt_ok = rtt_write(frame);
+    if !rtt_ok {
         st.rtt_dropped += 1;
     }
-    Current::console_write(frame);
+    let console_ok = Current::console_write(frame);
+    if !console_ok {
+        st.console_dropped += 1;
+    }
+    report_drops(rtt_ok, console_ok);
     true
 }
 
@@ -349,13 +356,20 @@ fn rtt_write(frame: &[u8]) -> bool {
     }
 }
 
-fn report_rtt_drops() {
+/// Reports earlier drops on a sink once it takes a frame again.
+fn report_drops(rtt_ok: bool, console_ok: bool) {
     let st = state();
-    if st.rtt_dropped == 0 || st.reporting {
+    if st.reporting {
         return;
     }
     st.reporting = true;
-    let count = core::mem::take(&mut st.rtt_dropped);
-    event!(Warn, "log.dropped", sink = "rtt", count = count);
+    if rtt_ok && st.rtt_dropped > 0 {
+        let count = core::mem::take(&mut st.rtt_dropped);
+        event!(Warn, "log.dropped", sink = "rtt", count = count);
+    }
+    if console_ok && st.console_dropped > 0 {
+        let count = core::mem::take(&mut st.console_dropped);
+        event!(Warn, "log.dropped", sink = "console", count = count);
+    }
     st.reporting = false;
 }

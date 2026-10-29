@@ -11,10 +11,12 @@ const USJ_EP1: usize = USJ_BASE;
 const USJ_EP1_CONF: usize = USJ_BASE + 0x4;
 const USJ_WR_DONE: u32 = 1 << 0;
 const USJ_SERIAL_IN_EP_DATA_FREE: u32 = 1 << 1;
-/// Polls before giving up on a byte, so output does not hang when no host has
-/// the CDC port open.
-const USJ_TIMEOUT_POLLS: u32 = 50_000;
-/// Set after a timeout: until the FIFO has room again, bytes are dropped
+/// How long to wait for room in the FIFO before deciding that nobody reads
+/// the CDC port. Longer than the host's 1 ms USB polling interval: with a
+/// poll-count limit (50,000) bursts were dropped while a host was reading
+/// (doc/14 §9.3).
+const USJ_TIMEOUT_TICKS: u64 = SYSTIMER_TICKS_PER_MS * 50;
+/// After a timeout: until the FIFO has room again, bytes are dropped
 /// without waiting. Otherwise every byte would wait the full timeout while
 /// nobody reads the port, slowing the whole system down several times
 /// (seen while logs were read over RTT only, doc/12 §8).
@@ -57,6 +59,7 @@ const TIMG_WDT_EN: u32 = 1 << 31;
 // alarm 0 is compared against it. The bus and function clocks are enabled at
 // reset (hp_sys_clkrst_reg.h: SYSTIMER_APB_CLK_EN, SYSTIMER_CLK_EN).
 const SYSTIMER_BASE: usize = 0x500E_2000;
+const SYSTIMER_TICKS_PER_MS: u64 = 16_000;
 const SYSTIMER_CONF: usize = SYSTIMER_BASE;
 const SYSTIMER_CLK_EN: u32 = 1 << 31;
 const SYSTIMER_TARGET0_WORK_EN: u32 = 1 << 24;
@@ -294,27 +297,28 @@ impl Platform for Esp32p4v1 {
         }
     }
 
-    fn console_write(bytes: &[u8]) {
+    fn console_write(bytes: &[u8]) -> bool {
         // Single core, interrupts off in the kernel.
         let stalled = unsafe { &mut *core::ptr::addr_of_mut!(USJ_STALLED) };
+        let free = || unsafe { rd(USJ_EP1_CONF) & USJ_SERIAL_IN_EP_DATA_FREE != 0 };
+        let mut all = true;
         for &b in bytes {
-            let mut polls = 0;
-            unsafe {
-                while rd(USJ_EP1_CONF) & USJ_SERIAL_IN_EP_DATA_FREE == 0 {
-                    polls += 1;
-                    if *stalled || polls >= USJ_TIMEOUT_POLLS {
-                        *stalled = true;
-                        break;
-                    }
+            if !free() {
+                if !*stalled {
+                    let deadline = Self::now() + USJ_TIMEOUT_TICKS;
+                    while !free() && Self::now() < deadline {}
                 }
-                if *stalled && rd(USJ_EP1_CONF) & USJ_SERIAL_IN_EP_DATA_FREE == 0 {
+                if !free() {
+                    *stalled = true;
+                    all = false;
                     continue;
                 }
-                *stalled = false;
-                wr(USJ_EP1, b as u32);
             }
+            *stalled = false;
+            unsafe { wr(USJ_EP1, b as u32) };
         }
         unsafe { wr(USJ_EP1_CONF, USJ_WR_DONE) };
+        all
     }
 
     fn sync_code(addr: usize, len: usize) {

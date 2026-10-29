@@ -29,7 +29,8 @@ pub trait Platform {
     /// Interrupts stay globally disabled in M-mode (MIE=0).
     fn init();
     /// Raw byte output for log frames (doc/12 §2.4). Never blocks for long.
-    fn console_write(bytes: &[u8]);
+    /// Returns false if some bytes were dropped (no reader).
+    fn console_write(bytes: &[u8]) -> bool;
     /// Makes code the kernel just wrote to `[addr, addr + len)` visible to
     /// instruction fetch.
     fn sync_code(addr: usize, len: usize);

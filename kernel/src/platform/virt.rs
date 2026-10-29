@@ -58,13 +58,14 @@ impl Platform for Virt {
         Self::set_alarm(u64::MAX);
     }
 
-    fn console_write(bytes: &[u8]) {
+    fn console_write(bytes: &[u8]) -> bool {
         for &b in bytes {
             unsafe {
                 while core::ptr::read_volatile((UART0 + UART_LSR) as *const u8) & UART_LSR_THRE == 0 {}
                 core::ptr::write_volatile((UART0 + UART_THR) as *mut u8, b);
             }
         }
+        true
     }
 
     fn map_flash() -> Option<usize> {
