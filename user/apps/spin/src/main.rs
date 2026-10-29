@@ -9,7 +9,7 @@
 //! Exit 1: FP registers changed. Exit 2: never saw a gap in time, i.e. was
 //! never preempted.
 
-use t5_rt::{println, time_ns};
+use t5_rt::{event, time_ns};
 
 t5_rt::entry!(main);
 
@@ -39,13 +39,7 @@ fn main(id: usize, duration_ms: usize) -> usize {
     unsafe { store_fregs(&mut got) };
 
     let bad = want.iter().zip(got.iter()).filter(|(w, g)| w != g).count();
-    println!(
-        "[spin{}] {} iterations, {} gaps, fp registers {}",
-        id,
-        iters,
-        gaps,
-        if bad == 0 { "intact" } else { "CORRUPTED" }
-    );
+    event!(Info, "spin.done", id = id, iterations = iters, gaps = gaps, fp_mismatches = bad);
     if bad != 0 {
         1
     } else if gaps == 0 {

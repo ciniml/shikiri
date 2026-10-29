@@ -1,10 +1,14 @@
 //! t5emu: runs a tab5-os kernel ELF built for the ESP32-P4 rev v1.x
 //! (`make kernel-p4`) without the hardware. See doc/11-emulator.md.
 //!
-//! Exit status: 0 = the kernel reported `selftest: PASS` and halted,
-//! 1 = it reported a failure or never reported, 2 = the emulator stopped on
-//! a hardware-level problem (lock-up, incoherent fetch, watchdog, ...),
-//! 3 = time limit, 64 = usage error.
+//! The console carries structured log frames (doc/12); they are decoded with
+//! the schemas of the kernel ELF plus any `--elf`/`--schemas` given (the app
+//! ELFs, so app events get names).
+//!
+//! Exit status: 0 = the kernel logged `selftest.result` with `pass=true` and
+//! halted, 1 = it reported a failure or never reported, 2 = the emulator
+//! stopped on a hardware-level problem (lock-up, incoherent fetch, watchdog,
+//! ...), 3 = time limit, 64 = usage error.
 
 use std::process::ExitCode;
 
@@ -13,6 +17,7 @@ use t5emu::cache;
 use t5emu::machine::{Machine, Stop};
 
 const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [--seed N] \
+                     [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -23,6 +28,10 @@ struct Opts {
     trace_traps: bool,
     warn_unmodelled: bool,
     quiet: bool,
+    json: bool,
+    extra_elfs: Vec<String>,
+    schema_files: Vec<String>,
+    console_out: Option<String>,
     elf: String,
 }
 
@@ -35,6 +44,10 @@ fn parse_args() -> Result<Opts, String> {
         trace_traps: false,
         warn_unmodelled: false,
         quiet: false,
+        json: false,
+        extra_elfs: Vec::new(),
+        schema_files: Vec::new(),
+        console_out: None,
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -54,6 +67,10 @@ fn parse_args() -> Result<Opts, String> {
             "--trace-traps" => o.trace_traps = true,
             "--warn-unmodelled" => o.warn_unmodelled = true,
             "--quiet" => o.quiet = true,
+            "--json" => o.json = true,
+            "--elf" => o.extra_elfs.push(val()?),
+            "--schemas" => o.schema_files.push(val()?),
+            "--console-out" => o.console_out = Some(val()?),
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => o.elf = s.to_string(),
         }
@@ -87,8 +104,22 @@ fn main() -> ExitCode {
         }
     };
 
+    let mut schemas = t5log::SchemaTable::new();
+    let loaded: Result<(), String> = (|| {
+        for p in std::iter::once(&o.elf).chain(&o.extra_elfs) {
+            schemas.add_elf(p)?;
+        }
+        for p in &o.schema_files {
+            schemas.add_file(p)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = loaded {
+        eprintln!("t5emu: {e}");
+        return ExitCode::from(64);
+    }
+
     let mut bus = Bus::new(o.mhz * 1_000_000, o.cache, o.seed);
-    bus.periph.usj.echo = !o.quiet;
     bus.periph.warn_unmodelled = o.warn_unmodelled;
     for s in &elf.segments {
         if s.data.is_empty() {
@@ -106,7 +137,32 @@ fn main() -> ExitCode {
     let limit = o.max_ms * o.mhz * 1000;
     let stop = m.run(limit);
 
-    let out = String::from_utf8_lossy(&m.bus.periph.usj.output).into_owned();
+    let console = &m.bus.periph.usj.output;
+    if let Some(path) = &o.console_out {
+        if let Err(e) = std::fs::write(path, console) {
+            eprintln!("t5emu: {path}: {e}");
+        }
+    }
+    let mut decoder = t5log::StreamDecoder::new();
+    let mut items = decoder.push(console);
+    items.extend(decoder.finish());
+    let mut passed = false;
+    for item in &items {
+        match item {
+            t5log::Item::Event(e) => {
+                if !o.quiet {
+                    println!("{}", if o.json { e.to_json(&schemas) } else { e.to_pretty(&schemas) });
+                }
+                if e.name(&schemas) == Some("selftest.result") {
+                    passed = e.field(&schemas, "pass") == Some(&t5log::Value::Bool(true));
+                }
+            }
+            t5log::Item::Text(t) if !o.quiet => println!("| {t}"),
+            t5log::Item::Bad { error, .. } => eprintln!("t5emu: undecodable log frame: {error}"),
+            _ => {}
+        }
+    }
+
     let emulated_ms = m.bus.cycles / (o.mhz * 1000);
     eprintln!(
         "t5emu: stopped after {} instructions, {} ms emulated at {} MHz: {}",
@@ -115,10 +171,8 @@ fn main() -> ExitCode {
         o.mhz,
         describe(&stop)
     );
-    // Temporary until the structured log service replaces text output
-    // (doc/07): the verdict is read from the console text.
     match stop {
-        Stop::Halted { .. } if out.contains("selftest: PASS") => ExitCode::SUCCESS,
+        Stop::Halted { .. } if passed => ExitCode::SUCCESS,
         Stop::Halted { .. } => ExitCode::from(1),
         Stop::TimeLimit => ExitCode::from(3),
         _ => ExitCode::from(2),

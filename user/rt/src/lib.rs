@@ -6,9 +6,8 @@
 
 #![no_std]
 
-use core::fmt;
-
-pub use t5_abi::{Error, sys};
+pub use t5_abi::log::{self, Addr, Level};
+pub use t5_abi::{Error, event, sys};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -65,18 +64,27 @@ unsafe fn syscall2(nr: usize, a0: usize, a1: usize) -> (isize, usize, usize) {
     (ret, val, val2)
 }
 
-fn result(ret: isize, val: usize) -> Result<usize, Error> {
-    if ret < 0 {
-        Err(Error::from_code(ret.unsigned_abs()))
-    } else {
-        Ok(val)
-    }
+/// Raw syscall access for tests and low-level code: returns a0 (0 or
+/// -error) and the values in a1/a2.
+///
+/// # Safety
+/// Pointer arguments must follow the syscall's contract.
+pub unsafe fn raw_syscall(nr: usize, a0: usize, a1: usize) -> (isize, usize, usize) {
+    unsafe { syscall2(nr, a0, a1) }
 }
 
-/// Writes bytes to the kernel debug console. Returns the number written.
-pub fn dbg_write(buf: &[u8]) -> Result<usize, Error> {
-    let (ret, val, _) = unsafe { syscall2(sys::DBG_WRITE, buf.as_ptr() as usize, buf.len()) };
-    result(ret, val)
+/// The `log_emit` syscall: the sink behind [`event!`] in apps. Logging never
+/// fails from the app's point of view; a rejected payload is a bug in the
+/// encoder and the kernel reports it as its own event.
+#[unsafe(no_mangle)]
+pub fn t5log_emit(payload: &[u8]) {
+    unsafe { syscall2(sys::LOG_EMIT, payload.as_ptr() as usize, payload.len()) };
+}
+
+/// The lowest level the kernel currently keeps.
+pub fn log_level() -> log::Level {
+    let (_, v, _) = unsafe { syscall2(sys::LOG_LEVEL, 0, 0) };
+    log::Level::from_u8(v as u8).unwrap_or(log::Level::Trace)
 }
 
 /// Gives up the rest of the time slice.
@@ -108,69 +116,12 @@ pub fn exit(code: usize) -> ! {
     loop {}
 }
 
-/// `core::fmt` adapter over [`dbg_write`]. Output is collected in a small
-/// buffer and written with as few syscalls as possible, so that a line from
-/// [`println!`] is not interleaved with other processes' output (each
-/// `dbg_write` is atomic; the formatting machinery calls `write_str` once per
-/// fragment).
-pub struct DebugConsole {
-    buf: [u8; 128],
-    len: usize,
-}
-
-impl DebugConsole {
-    pub const fn new() -> Self {
-        DebugConsole { buf: [0; 128], len: 0 }
-    }
-
-    pub fn flush(&mut self) {
-        if self.len > 0 {
-            let _ = dbg_write(&self.buf[..self.len]);
-            self.len = 0;
-        }
-    }
-}
-
-impl Default for DebugConsole {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Write for DebugConsole {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let mut bytes = s.as_bytes();
-        while !bytes.is_empty() {
-            if self.len == self.buf.len() {
-                self.flush();
-            }
-            let n = bytes.len().min(self.buf.len() - self.len);
-            self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
-            self.len += n;
-            bytes = &bytes[n..];
-        }
-        Ok(())
-    }
-}
-
-impl Drop for DebugConsole {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
-#[macro_export]
-macro_rules! println {
-    ($($arg:tt)*) => {{
-        use core::fmt::Write as _;
-        let mut console = $crate::DebugConsole::new();
-        let _ = writeln!(console, $($arg)*);
-    }};
-}
-
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write as _;
-    let _ = writeln!(DebugConsole::new(), "app panic: {}", info);
+    let mut msg = log::FmtBuf::<{ log::MAX_STR }>::new();
+    let _ = write!(msg, "{}", info.message());
+    let (file, line) = info.location().map_or(("?", 0), |l| (l.file(), l.line()));
+    event!(Error, "app.panic", file = file, line = line, msg = msg.as_str());
     exit(t5_abi::EXIT_PANIC)
 }

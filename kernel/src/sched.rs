@@ -6,11 +6,13 @@
 //! runs with interrupts enabled, so there is no locking; the alarm only ever
 //! interrupts U-mode.
 
-use crate::arch::riscv32::csr::cause;
+use t5_abi::event;
+use t5_abi::log::Addr;
+
+use crate::arch::riscv32::csr::{cause, mstatus};
 use crate::arch::riscv32::fpu::{self, FpState};
 use crate::arch::riscv32::pmp;
 use crate::arch::riscv32::trap::{self, Trap};
-use crate::arch::riscv32::csr::mstatus;
 use crate::platform::{Current, Platform};
 use crate::process::{Exit, Next, Process, State};
 use crate::time;
@@ -72,6 +74,7 @@ pub fn run(procs: &mut [Process], limit_ms: u64) -> Stats {
             for p in procs.iter_mut() {
                 if p.exit().is_none() {
                     p.state = State::Exited(Exit::Killed);
+                    log_exit(p, Exit::Killed);
                 }
             }
             break;
@@ -111,12 +114,29 @@ pub fn run(procs: &mut [Process], limit_ms: u64) -> Stats {
         Current::set_alarm(wake.min(now + time::ms_to_ticks(SLICE_MS)));
         run_slice(&mut procs[i], i, &mut fpu, &mut stats);
         Current::clear_alarm();
-        if procs[i].exit().is_some() {
+        if let Some(exit) = procs[i].exit() {
             fpu.release(i);
+            log_exit(&procs[i], exit);
         }
     }
     Current::clear_alarm();
     stats
+}
+
+fn log_exit(p: &Process, exit: Exit) {
+    match exit {
+        Exit::Code(code) => event!(Info, "proc.exit", pid = p.pid, code = code),
+        Exit::Fault { code, pc, tval } => event!(
+            Warn,
+            "proc.fault" => "{pid} killed by {cause_name} at {pc}",
+            pid = p.pid,
+            cause = code,
+            cause_name = cause::name(code),
+            pc = Addr(pc as u32),
+            tval = Addr(tval as u32)
+        ),
+        Exit::Killed => event!(Warn, "proc.killed", pid = p.pid),
+    }
 }
 
 /// Runs process `i` until it is preempted, gives up the CPU or ends.

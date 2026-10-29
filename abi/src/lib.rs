@@ -4,11 +4,14 @@
 
 #![no_std]
 
+pub mod log;
+
 /// ABI version carried by every app image. The kernel accepts an image when
 /// the major numbers match and the image's minor is not newer than its own.
 pub const ABI_MAJOR: u16 = 0;
-/// Minor 2 (M2): yield, sleep, time.
-pub const ABI_MINOR: u16 = 2;
+/// Minor 2 (M2): yield, sleep, time. Minor 3 (L1, doc/12): log_emit and
+/// log_level replace dbg_write (pre-1.0, so no compatibility is kept).
+pub const ABI_MINOR: u16 = 3;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -21,7 +24,12 @@ pub mod sys {
     pub const SYS_INFO: usize = 0x003;
     /// Returns monotonic nanoseconds since boot in a1/a2 (lo/hi).
     pub const TIME: usize = 0x004;
-    pub const DBG_WRITE: usize = 0xF00;
+    /// a0/a1 = payload (see `log`), at most `log::MAX_PAYLOAD` bytes. The
+    /// kernel adds the sequence number, timestamp and source.
+    pub const LOG_EMIT: usize = 0x005;
+    /// Returns the lowest level (a1) the kernel currently keeps, so apps can
+    /// skip building events that would be dropped.
+    pub const LOG_LEVEL: usize = 0x006;
 }
 
 /// Error codes. A syscall returns `-(code as isize)` in a0 on failure.

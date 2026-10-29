@@ -1,7 +1,7 @@
 # 12. 構造化ログサービスの設計案
 
 - 日付: 2026-10-30
-- 状態: **設計案（実装前。方針の確認待ち）**
+- 状態: 設計はユーザーの確認済み（2026-10-30）。**L1 を実装し、QEMU virt、t5emu、実機で動作を確認した（§5）。** L2、L3 は未着手。
 - 前提となるユーザー方針（2026-10-30）: **OS はテキストログを提供せず、構造化ログだけを提供する。** RTT や defmt のような、ログを記録して回収する仕組みを最初から持つ。
 - 事実には出典を付け、推測には「（推測）」、設計判断には「（判断）」と書く。
 
@@ -32,7 +32,7 @@
   - ローカルにある最新版 `~/.espressif/tools/openocd-esp32/v0.12.0-esp32-20260424` には `board/esp32p4-builtin.cfg`（内蔵の USB-JTAG を使う設定）がある。
   - `help` の出力に、`rtt server start <port> <channel>` などの RTT コマンドがある（2026-10-30 にローカルで確認）。
   - NuttX の P4 の手順も、OpenOCD と内蔵 USB-JTAG を使っている（https://nuttx.incubator.apache.org/docs/latest/platforms/risc-v/esp32p4/index.html ）。
-- probe-rs は P4 を挙げていない。ローカルの 0.27.0 の `chip list` は esp32、c2、c3、c6、h2、s2、s3 だけ。Espressif の Rust book も、USB-JTAG を使える例に P4 を挙げていない（https://docs.espressif.com/projects/rust/book/getting-started/tooling/probe-rs.html ）。**当面は OpenOCD を使う**（判断）。
+- ~~probe-rs は P4 を挙げていない~~ → **訂正（13）**: ローカルの 0.27.0 にないだけで、上流の probe-rs は 0.31.0（2026-01-17）から P4（v1.x を含む）に対応している（PR #3649）。ただし、v1.x では L2MEM をプログラムバッファ経由で読む（読むたびに core0 が止まる）。また、上流のメモリマップに LP SRAM がない。RTT の回収に OpenOCD と probe-rs のどちらを使うかは、L2 で 13 の段階 1 の結果を見て決める（判断）。
 - **キャッシュの問題**: L2MEM は書き戻し方式の L1 D キャッシュの後ろにある（09 §2）。デバッガがシステムバスで読むと、キャッシュに残ったログを読み損なうおそれがある（推測）。
   - 非キャッシュの別名 `SOC_NON_CACHEABLE_OFFSET = 0x4000_0000`（`soc/esp32p4/include/soc/ext_mem_defs.h:68`、`hal/esp32p4/include/hal/cache_ll.h:27`。DMA の記述子に使われている）を使う手がある。
   - ただし、次の §1.3 の LP SRAM は周辺の空間（0x5000_0000〜）にあり、もともとキャッシュされない（推測）。そのため本案では LP SRAM を使う。
@@ -78,8 +78,17 @@ event!(Error, "kernel.panic", file = loc.file(), line = loc.line(), msg = &*buf)
 
 ### 2.2 スキーマとその ID
 - `event!` は `macro_rules!` で実装し、手続きマクロは使わない（判断。ビルドを軽くし、カーネルの stable ツールチェーンでも使えるようにする）。
-- 各呼び出しで、次のスキーマ文字列を `concat!` でコンパイル時に作る:
-  `{"v":1,"name":"sched.preempt","level":"info","fields":["pid","pc"],"msg":null,"file":"kernel/src/sched.rs","line":123}`
+- 各呼び出しで、次のスキーマ文字列を `concat!` でコンパイル時に作る（実装では JSON ではなく、行単位の `key=value` にした。`macro_rules!` の繰り返しでは、JSON の配列の区切りのカンマをうまく作れないため）:
+  ```
+  t5log/1
+  name=sched.preempt
+  level=Info
+  file=kernel/src/sched.rs
+  line=123
+  fields=pid,pc,
+  msg=
+  （空行で終わる）
+  ```
 - **ID はスキーマ文字列の FNV-1a 32 ビットハッシュにする。** const fn で計算する。アドレスを使わないので、カーネル（絶対番地）と静的 PIE のアプリ（ロード先が変わる）で同じ扱いにできる。
 - スキーマ文字列そのものは、`#[used] #[link_section = ".t5log"] static` に置く。リンカスクリプトでこのセクションを `(INFO)`、つまり非ロードにする。デバイスのメモリは使わない。
   - カーネル: `kernel-common.ld` に足す。
@@ -170,3 +179,36 @@ record :=
 3. **実機での確認の許可**（L2/L3 で必要）:
    - OpenOCD で内蔵の USB-JTAG につなぐ。CPU を止める、メモリを読む、リセットする、という操作があり得る。フラッシュは書かない。
    - LP SRAM の内容がリセット後に残るかの試験。カーネルを書き換え、RWDT のリセットとソフトウェアリセットを起こす。
+
+## 5. L1 の実装記録（2026-10-30）
+
+### 5.1 実装したもの
+| 場所 | 内容 |
+|---|---|
+| `abi/src/log.rs` | ワイヤ形式 v1（タグ、varint、COBS、FNV-1a）、`Payload`、`Field` トレイト（整数、bool、f32、str、[u8]、`Addr`）、`event!` マクロ、`FmtBuf`（パニックのメッセージ用）、単体テスト |
+| `kernel/src/log.rs` | `t5log_emit`（カーネルの出力先）、`record`（検証、seq/t_us/source の付与、COBS、リング、コンソール）。リングは P4 では LP SRAM の先頭 24KiB、virt ではカーネルの RAM |
+| `kernel/src/process.rs` | `log_emit`（0x005。範囲の検査、取り込み、検証。拒否したら `log.rejected` を出して `-Invalid` を返す）、`log_level`（0x006） |
+| `user/rt` | `t5log_emit` = `log_emit` syscall、`log_level()`、`raw_syscall`（試験用）。パニックは `app.panic` |
+| `tools/t5log` | `schemas`（ELF から集めて検査し、ファイルに書く）、`check`、`decode`（JSON Lines か `--pretty`、ファイル、標準入力、TCP） |
+| `emu/` | LP SRAM を模す。コンソールのフレームを解読して表示し、`selftest.result` の `pass=true` で合否を判定する |
+| `Makefile` | `schemas-virt`、`schemas-p4`、`test-virt`（QEMU の出力をファイルに取ってから解読）、`run-virt`、`monitor`（`stty raw` して `t5log decode --pretty`） |
+
+- ABI は 0.3 にした。`dbg_write`（0xF00）、`kprintln!`、`platform::Console`、`t5-rt` の `println!`、`DebugConsole` は削除した。テキストの出力経路は、Rust のコードには残っていない（ホストのツールの標準出力を除く）。
+- カーネルとアプリのイベントは、合わせて 25 種類（`build/t5log.schemas`）。
+- セルフテストに `fault/bad-log` を足した。形の壊れたペイロード 2 種は `Invalid`、大きすぎるものは `Size`、カーネルのアドレスは `BadAddress` で拒否されることを確かめる。
+
+### 5.2 確認したこと
+- QEMU virt（`make test-virt`）、t5emu（`make test-p4emu`）、Tab5 の実機の 3 つで `selftest.result failures=0 pass=true` を確認した。実機のログ（解読後）は [logs/l1-tab5-20261030.txt](logs/l1-tab5-20261030.txt)。
+- 実機では、ブートローダのテキスト（`| ` 付きで表示）とカーネルのイベントが正しく分かれた。解読できないフレームは 0 件だった。カーネルは最初に 0x00 を 1 バイト出して、それまでの出力を区切る。
+- アプリのイベントの `src` は、カーネルが付けた `pid1` などになる（アプリは偽れない）。
+- 実機の `boot.start` の時刻は 0.052s。SYSTIMER はチップのリセットから数えているので、ブートローダの時間を含む。
+
+### 5.3 設計からの変更と、残っていること
+- スキーマの書式は JSON ではなく行単位にした（§2.2）。
+- 予約されたフィールド名は `seq`、`t_us`、`src`、`level`、`event` だけにした。`id` は、スキーマが不明なときにしか JSON のキーに使わないので外した。
+- 未実装:
+  - 出力先を非同期に進めること（今は `event!` のたびに同期で USB に書く）。
+  - プロセスごとのレート制限。
+  - 実行時のしきい値の変更（`log::KEEP` は定数で Trace）。
+  - `log.dropped`。
+  - リングのヘッダ（L3）。

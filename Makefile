@@ -4,20 +4,25 @@ BUILD      := build
 APPS_DIR   := $(BUILD)/apps
 APP_TARGET := user/target/riscv32imafc-unknown-none-elf/release
 ELF2T5A    := tools/target/release/elf2t5a
+T5LOG      := tools/target/release/t5log
 APPS       := hello fault ticker spin
+APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS))
+# All log schemas (doc/12): every event! call site in the kernel and the apps.
+SCHEMAS    := $(BUILD)/t5log.schemas
 
 QEMU       ?= qemu-system-riscv32
 QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
-              -nographic -no-reboot
+              -no-reboot
 
 .PHONY: all apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
-        emu test-emu test-p4emu backup-flash flash-p4 monitor clean
+        schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 monitor clean
 
 all: kernel-virt image-p4 boot
 
 IDF_PATH_6 ?= $(HOME)/esp-idf/6.0
 IDF        := . $(IDF_PATH_6)/export.sh >/dev/null && idf.py
 PORT       ?= /dev/ttyACM0
+PRETTY     := $(T5LOG) decode --pretty --schemas $(SCHEMAS)
 
 tools:
 	cd tools && cargo build --release
@@ -31,6 +36,13 @@ kernel-virt: apps
 	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
 	    --features platform-virt --target-dir target/virt
 	mkdir -p $(BUILD) && cp kernel/target/virt/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-virt.elf
+
+# Collect and check the schemas (id collisions, naming rules).
+schemas-virt: kernel-virt
+	$(T5LOG) schemas -o $(SCHEMAS) $(BUILD)/t5-kernel-virt.elf $(APP_ELFS)
+
+schemas-p4: kernel-p4
+	$(T5LOG) schemas -o $(SCHEMAS) $(BUILD)/t5-kernel-esp32p4v1.elf $(APP_ELFS)
 
 kernel-p4: apps
 	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
@@ -63,16 +75,22 @@ flash-p4: image-p4 boot
 	espflash write-bin --port $(PORT) 0x8000 $(BUILD)/boot/partition_table/partition-table.bin
 	espflash write-bin --port $(PORT) 0x10000 $(BUILD)/t5-kernel-esp32p4v1.bin
 
-monitor:
-	espflash monitor --port $(PORT)
+# Decoded log of the device (the console carries log frames, doc/12).
+monitor: schemas-p4
+	stty -F $(PORT) raw -echo
+	$(PRETTY) $(PORT)
 
-# Interactive run (Ctrl-A X to quit QEMU).
-run-virt: kernel-virt
-	$(QEMU) $(QEMU_FLAGS) -kernel $(BUILD)/t5-kernel-virt.elf
+# Run on QEMU virt with the decoded log on stdout.
+run-virt: schemas-virt
+	$(QEMU) $(QEMU_FLAGS) -display none -monitor none -serial stdio \
+	    -kernel $(BUILD)/t5-kernel-virt.elf | $(PRETTY)
 
-# CI-style run: the kernel exits QEMU with status 0 only if the self-test passes.
-test-virt: kernel-virt
-	timeout 20 $(QEMU) $(QEMU_FLAGS) -kernel $(BUILD)/t5-kernel-virt.elf
+# CI-style run: the kernel exits QEMU with status 0 only if the self-test
+# passes; the raw log is kept in build/virt-console.bin and shown decoded.
+test-virt: schemas-virt
+	timeout 20 $(QEMU) $(QEMU_FLAGS) -display none -monitor none \
+	    -serial file:$(BUILD)/virt-console.bin -kernel $(BUILD)/t5-kernel-virt.elf; \
+	    s=$$?; $(PRETTY) $(BUILD)/virt-console.bin; exit $$s
 
 # ESP32-P4 rev v1.x emulator (doc/11). Runs the same kernel ELF as the
 # hardware; exit status 0 only if the self-test passes.
@@ -85,7 +103,7 @@ test-emu:
 	cd emu && cargo test --release
 
 test-p4emu: emu kernel-p4
-	$(T5EMU) $(BUILD)/t5-kernel-esp32p4v1.elf
+	$(T5EMU) $(addprefix --elf ,$(APP_ELFS)) $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

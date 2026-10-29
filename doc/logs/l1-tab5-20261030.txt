@@ -1,0 +1,104 @@
+| ESP-ROM:esp32p4-eco2-20240710
+| Build:Jul 10 2024
+| rst:0x17 (CHIP_USB_UART_RESET),boot:0x20c (SPI_FAST_FLASH_BOOT)
+| Core0 Saved PC:0x400093b8
+| SPI mode:DIO, clock div:1
+| load:0x4ff33ce0,len:0x16f8
+| load:0x4ff29ed0,len:0xb38
+| load:0x4ff2cbd0,len:0x36c4
+| entry 0x4ff29eda
+| I (25) boot: ESP-IDF v6.0-beta1-624-g6534932340 2nd stage bootloader
+| I (25) boot: compile time Oct 30 2026 00:16:39
+| I (26) boot: Multicore bootloader
+| I (27) boot: chip revision: v1.0
+| I (27) boot: efuse block revision: v0.3
+| I (28) boot.esp32p4: SPI Speed      : 80MHz
+| I (28) boot.esp32p4: SPI Mode       : DIO
+| I (28) boot.esp32p4: SPI Flash Size : 16MB
+| I (28) boot: Enabling RNG early entropy source...
+| I (29) boot: Partition Table:
+| I (29) boot: ## Label            Usage          Type ST Offset   Length
+| I (29) boot:  0 nvs              WiFi data        01 02 00009000 00004000
+| I (30) boot:  1 otadata          OTA data         01 00 0000d000 00002000
+| I (30) boot:  2 ota_0            OTA app          00 10 00010000 00200000
+| I (31) boot:  3 ota_1            OTA app          00 11 00210000 00200000
+| I (31) boot:  4 appmeta          unknown          40 00 00410000 00010000
+| I (32) boot:  5 apps             unknown          40 01 00420000 00800000
+| I (32) boot:  6 userdata         unknown          40 02 00c20000 003e0000
+| I (34) boot: End of partition table
+| I (35) esp_image: segment 0: paddr=00010020 vaddr=40000020 size=07f4ch ( 32588) map
+| I (43) esp_image: segment 1: paddr=00017f74 vaddr=00000000 size=00044h (    68) 
+| I (45) esp_image: segment 2: paddr=00017fc0 vaddr=40007fc0 size=048f0h ( 18672) map
+| I (50) boot: Loaded app from partition at offset 0x10000
+| I (50) boot: Disabling RNG early entropy source...
+   0.052482 I kernel boot.start platform=esp32p4-v1.x abi_major=0 abi_minor=3
+   0.052635 I kernel boot.cpu misa=1083183397 mstatus=0 mtvec=0x400081c3
+   0.053371 I kernel proc.start pid=1 name=hello base=0x4ff40000
+   0.053571 I pid1   hello.greet text=hello from U-mode
+   0.053657 I kernel proc.exit pid=1 code=0
+   0.053757 I kernel selftest.case name=hello ok=true result=exit code=0
+   0.054399 I kernel proc.start pid=1 name=fault/ok base=0x4ff40000
+   0.054495 I pid1   fault.start mode=0 addr=0x00000000
+   0.054547 I kernel proc.exit pid=1 code=0
+   0.054604 I kernel selftest.case name=fault/ok ok=true result=exit code=0
+   0.054844 I kernel proc.start pid=1 name=fault/load-mmio base=0x4ff40000
+   0.054946 I pid1   fault.start mode=1 addr=0x500d2000
+   0.055021 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+   0.055110 I kernel selftest.case name=fault/load-mmio ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x500d2000
+   0.055428 I kernel proc.start pid=1 name=fault/load-kernel base=0x4ff40000
+   0.055532 I pid1   fault.start mode=1 addr=0x40000524
+   0.055595 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+   0.055681 I kernel selftest.case name=fault/load-kernel ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x40000524
+   0.056006 I kernel proc.start pid=1 name=fault/store-kernel base=0x4ff40000
+   0.056110 I pid1   fault.start mode=2 addr=0x40000524
+   0.056171 W kernel proc.fault: 1 killed by store access fault at 0x4ff400de
+   0.056260 I kernel selftest.case name=fault/store-kernel ok=true result=store access fault code=7 pc=0x4ff400de tval=0x40000524
+   0.056578 I kernel proc.start pid=1 name=fault/load-kernel-ram base=0x4ff40000
+   0.056686 I pid1   fault.start mode=1 addr=0x4ff00004
+   0.056744 W kernel proc.fault: 1 killed by load access fault at 0x4ff40084
+   0.056832 I kernel selftest.case name=fault/load-kernel-ram ok=true result=load access fault code=5 pc=0x4ff40084 tval=0x4ff00004
+   0.057157 I kernel proc.start pid=1 name=fault/store-kernel-ram base=0x4ff40000
+   0.057265 I pid1   fault.start mode=2 addr=0x4ff00004
+   0.057324 W kernel proc.fault: 1 killed by store access fault at 0x4ff400de
+   0.057412 I kernel selftest.case name=fault/store-kernel-ram ok=true result=store access fault code=7 pc=0x4ff400de tval=0x4ff00004
+   0.057735 I kernel proc.start pid=1 name=fault/exec-data base=0x4ff40000
+   0.057837 I pid1   fault.start mode=3 addr=0x00000000
+   0.057899 W kernel proc.fault: 1 killed by instruction access fault at 0x4ff41ae8
+   0.057992 I kernel selftest.case name=fault/exec-data ok=true result=instruction access fault code=1 pc=0x4ff41ae8 tval=0x4ff41ae8
+   0.058314 I kernel proc.start pid=1 name=fault/store-text base=0x4ff40000
+   0.058417 I pid1   fault.start mode=4 addr=0x00000000
+   0.058476 W kernel proc.fault: 1 killed by store access fault at 0x4ff400d2
+   0.058564 I kernel selftest.case name=fault/store-text ok=true result=store access fault code=7 pc=0x4ff400d2 tval=0x4ff4000a
+   0.058887 I kernel proc.start pid=1 name=fault/bad-log base=0x4ff40000
+   0.058987 I pid1   fault.start mode=5 addr=0x40000524
+   0.059051 W kernel log.rejected pid=1 len=5
+   0.059103 W kernel log.rejected pid=1 len=7
+   0.059159 I kernel proc.exit pid=1 code=0
+   0.059215 I kernel selftest.case name=fault/bad-log ok=true result=exit code=0
+   0.059285 I kernel selftest.m2_start processes=4 slice_ms=10
+   0.060011 I kernel proc.start pid=1 name=ticker1 base=0x4ff40000
+   0.060365 I kernel proc.start pid=2 name=ticker2 base=0x4ff58000
+   0.061020 I kernel proc.start pid=3 name=spin1 base=0x4ff70000
+   0.061266 I kernel proc.start pid=4 name=spin2 base=0x4ff88000
+   0.111455 I pid1   ticker.tick id=1 tick=0 slept_us=30026
+   0.126487 I pid2   ticker.tick id=2 tick=0 slept_us=45025
+   0.141561 I pid1   ticker.tick id=1 tick=1 slept_us=30024
+   0.161691 I pid3   spin.done id=1 iterations=6574 gaps=5 fp_mismatches=0
+   0.161751 I kernel proc.exit pid=3 code=0
+   0.171445 I pid4   spin.done id=2 iterations=5404 gaps=4 fp_mismatches=0
+   0.171505 I kernel proc.exit pid=4 code=0
+   0.171585 I pid2   ticker.tick id=2 tick=1 slept_us=45017
+   0.171672 I pid1   ticker.tick id=1 tick=2 slept_us=30030
+   0.201766 I pid1   ticker.tick id=1 tick=3 slept_us=30017
+   0.216789 I pid2   ticker.tick id=2 tick=2 slept_us=45017
+   0.231861 I pid1   ticker.tick id=1 tick=4 slept_us=30016
+   0.231918 I kernel proc.exit pid=1 code=0
+   0.261884 I pid2   ticker.tick id=2 tick=3 slept_us=45016
+   0.306979 I pid2   ticker.tick id=2 tick=4 slept_us=45016
+   0.307036 I kernel proc.exit pid=2 code=0
+   0.307110 I kernel selftest.case name=ticker1 ok=true result=exit code=0
+   0.307172 I kernel selftest.case name=ticker2 ok=true result=exit code=0
+   0.307232 I kernel selftest.case name=spin1 ok=true result=exit code=0
+   0.307291 I kernel selftest.case name=spin2 ok=true result=exit code=0
+   0.307354 I kernel selftest.m2_stats elapsed_ms=245 preemptions=12 fpu_switches=4 fpu_saves=2 idle_waits=6
+   0.307427 I kernel selftest.result failures=0 pass=true

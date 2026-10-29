@@ -35,5 +35,8 @@ SECTIONS
     . = ALIGN(16);
     __t5_mem_end = .;
 
+    /* Log schemas (doc/12). Not loaded; read by host tools from the ELF. */
+    .t5log (INFO) : { KEEP(*(.t5log .t5log.*)) }
+
     /DISCARD/ : { *(.eh_frame .eh_frame_hdr .comment .riscv.attributes) }
 }

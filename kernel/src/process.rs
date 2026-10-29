@@ -1,15 +1,19 @@
 //! A user-mode process and the syscall dispatcher.
 
-use t5_abi::{Error, sys};
+use t5_abi::log::{self as wire, Addr};
+use t5_abi::{Error, event, sys};
 
 use crate::arch::riscv32::csr::cause;
 use crate::arch::riscv32::pmp::Region;
 use crate::arch::riscv32::trap::{TrapFrame, reg};
 use crate::loader::Loaded;
+use crate::log;
 use crate::platform::{Current, Platform};
 use crate::time;
 
 pub struct Process {
+    /// Log source id (>= 1; 0 is the kernel).
+    pub pid: u32,
     pub name: &'static str,
     pub frame: TrapFrame,
     pub region: Region,
@@ -42,13 +46,14 @@ pub enum Next {
 }
 
 impl Process {
-    pub fn new(name: &'static str, loaded: &Loaded, arg0: usize, arg1: usize) -> Process {
+    pub fn new(pid: u32, name: &'static str, loaded: &Loaded, arg0: usize, arg1: usize) -> Process {
         let mut frame = TrapFrame::default();
         frame.pc = loaded.entry;
         frame.regs[reg::SP] = loaded.stack_top;
         frame.regs[reg::A0] = arg0;
         frame.regs[reg::A1] = arg1;
-        Process { name, frame, region: loaded.region, state: State::Ready }
+        event!(Info, "proc.start", pid = pid, name = name, base = Addr(loaded.region.base as u32));
+        Process { pid, name, frame, region: loaded.region, state: State::Ready }
     }
 
     pub fn exit(&self) -> Option<Exit> {
@@ -82,7 +87,8 @@ impl Process {
                 let ns = time::ticks_to_ns(Current::now());
                 Ok([ns as usize, (ns >> 32) as usize])
             }
-            sys::DBG_WRITE => self.dbg_write(a0, a1).map(|n| [n, 0]),
+            sys::LOG_EMIT => self.log_emit(a0, a1).map(|_| [0, 0]),
+            sys::LOG_LEVEL => Ok([log::KEEP as usize, 0]),
             _ => Err(Error::NoSupport),
         };
         self.set_result(result);
@@ -118,19 +124,21 @@ impl Process {
         }
     }
 
-    fn dbg_write(&self, ptr: usize, len: usize) -> Result<usize, Error> {
-        self.check_user_range(ptr, len, false)?;
-        // Copy in before use so another core cannot change the bytes between
-        // the check and the write (relevant once Core1 runs processes).
-        let mut buf = [0u8; 64];
-        let mut done = 0;
-        while done < len {
-            let n = (len - done).min(buf.len());
-            unsafe { core::ptr::copy_nonoverlapping((ptr + done) as *const u8, buf.as_mut_ptr(), n) };
-            <Current as Platform>::console_write(&buf[..n]);
-            done += n;
+    fn log_emit(&self, ptr: usize, len: usize) -> Result<(), Error> {
+        if len > wire::MAX_PAYLOAD {
+            return Err(Error::Size);
         }
-        Ok(len)
+        self.check_user_range(ptr, len, false)?;
+        // Copy in before validating, so the bytes cannot change in between
+        // (relevant once Core1 runs processes).
+        let mut buf = [0u8; wire::MAX_PAYLOAD];
+        unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, buf.as_mut_ptr(), len) };
+        if log::record(self.pid, &buf[..len]) {
+            Ok(())
+        } else {
+            event!(Warn, "log.rejected", pid = self.pid, len = len);
+            Err(Error::Invalid)
+        }
     }
 }
 

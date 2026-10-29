@@ -28,7 +28,10 @@ pub trait Platform {
     /// Early hardware setup: watchdogs, console, the timer and its interrupt.
     /// Interrupts stay globally disabled in M-mode (MIE=0).
     fn init();
+    /// Raw byte output for log frames (doc/12 §2.4). Never blocks for long.
     fn console_write(bytes: &[u8]);
+    /// Memory for the log record ring: (address, length).
+    fn log_ring() -> (usize, usize);
     /// Makes code the kernel just wrote to `[addr, addr + len)` visible to
     /// instruction fetch.
     fn sync_code(addr: usize, len: usize);
@@ -45,21 +48,4 @@ pub trait Platform {
     }
     /// Ends the run. On QEMU this exits the emulator with `code`.
     fn exit(code: u32) -> !;
-}
-
-pub struct Console;
-
-impl core::fmt::Write for Console {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        <Current as Platform>::console_write(s.as_bytes());
-        Ok(())
-    }
-}
-
-#[macro_export]
-macro_rules! kprintln {
-    ($($arg:tt)*) => {{
-        use core::fmt::Write as _;
-        let _ = writeln!($crate::platform::Console, $($arg)*);
-    }};
 }

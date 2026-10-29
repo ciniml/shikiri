@@ -1,0 +1,10 @@
+[package]
+name = "t5log"
+version = "0.1.0"
+edition = "2024"
+description = "Decoder for tab5-os structured logs (doc/12)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+t5-abi = { path = "../../abi" }
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }

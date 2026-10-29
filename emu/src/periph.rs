@@ -3,8 +3,6 @@
 //! and `components/soc/esp32p4/include/soc/clic_reg.h` (doc/10 §2.1).
 //! Behaviour that was checked on the Tab5 is noted as such.
 
-use std::io::Write;
-
 pub const USJ_BASE: u32 = 0x500D_2000;
 pub const SYSTIMER_BASE: u32 = 0x500E_2000;
 pub const INTMTX_BASE: u32 = 0x500D_6000;
@@ -17,11 +15,11 @@ pub const CLIC_LINES: usize = 48;
 pub const SYSTIMER_HZ: u64 = 16_000_000;
 
 /// USB Serial/JTAG CDC console. Only the EP1 FIFO is modelled; the FIFO is
-/// always free, as when a host has the port open.
+/// always free, as when a host has the port open. The bytes are log frames
+/// (doc/12), decoded by `main`.
 #[derive(Default)]
 pub struct Usj {
     pub output: Vec<u8>,
-    pub echo: bool,
 }
 
 impl Usj {
@@ -34,20 +32,7 @@ impl Usj {
 
     fn write(&mut self, off: u32, v: u32) {
         match off {
-            0x0 => {
-                let b = v as u8;
-                self.output.push(b);
-                if self.echo {
-                    let mut out = std::io::stdout().lock();
-                    let _ = out.write_all(&[b]);
-                    if b == b'\n' {
-                        let _ = out.flush();
-                    }
-                }
-            }
-            0x4 if v & 1 != 0 && self.echo => {
-                let _ = std::io::stdout().flush();
-            }
+            0x0 => self.output.push(v as u8),
             _ => {}
         }
     }

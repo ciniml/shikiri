@@ -6,6 +6,8 @@ description = "ESP32-P4 rev v1.x emulator for tab5-os (doc/08 plan B, doc/11)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# Log decoding for the verdict and the console view (doc/12).
+t5log = { path = "../tools/t5log" }
 
 [profile.release]
 debug = true

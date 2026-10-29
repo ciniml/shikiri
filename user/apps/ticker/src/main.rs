@@ -4,7 +4,7 @@
 //! M2 test app: sleeps `period_ms` five times and checks that each sleep
 //! lasted at least that long. Exit 1 if a sleep ended early.
 
-use t5_rt::{println, sleep_ms, time_ns, yield_now};
+use t5_rt::{event, sleep_ms, time_ns, yield_now};
 
 t5_rt::entry!(main);
 
@@ -16,7 +16,7 @@ fn main(id: usize, period_ms: usize) -> usize {
         let before = time_ns();
         sleep_ms(period_ms as u64);
         let slept_us = (time_ns() - before) / 1000;
-        println!("[ticker{}] tick {} slept {} us", id, i, slept_us);
+        event!(Info, "ticker.tick", id = id, tick = i, slept_us = slept_us);
         if slept_us < period_ms as u64 * 1000 {
             return 1;
         }

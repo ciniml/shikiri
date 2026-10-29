@@ -18,6 +18,10 @@ pub const L2MEM_SIZE: u32 = 0x000C_0000;
 pub const L2MEM_UNCACHED_BASE: u32 = L2MEM_BASE + 0x4000_0000;
 pub const TCM_BASE: u32 = 0x3010_0000;
 pub const TCM_SIZE: u32 = 0x2000;
+/// LP SRAM (soc/esp32p4/include/soc/soc.h:176-177): uncached, in the
+/// peripheral address space; the kernel keeps its log ring here (doc/12).
+pub const LP_SRAM_BASE: u32 = 0x5010_8000;
+pub const LP_SRAM_SIZE: u32 = 0x8000;
 pub const ROM_BASE: u32 = 0x4FC0_0000;
 pub const ROM_SIZE: u32 = 0x0002_0000;
 const PERIPH: std::ops::Range<u32> = 0x5000_0000..0x5020_0000;
@@ -29,6 +33,7 @@ pub struct Bus {
     pub flash: Vec<u8>,
     pub l2mem: Vec<u8>,
     tcm: Vec<u8>,
+    pub lp_sram: Vec<u8>,
     pub cache: Cache,
     pub periph: Peripherals,
 }
@@ -57,8 +62,9 @@ impl Bus {
         // RAM holds garbage at power-on; fill it with a deterministic
         // pseudo-random pattern so reliance on zeroed memory shows up.
         let mut l2mem = vec![0u8; L2MEM_SIZE as usize];
+        let mut lp_sram = vec![0u8; LP_SRAM_SIZE as usize];
         let mut x = l2mem_fill_seed | 1;
-        for b in l2mem.iter_mut() {
+        for b in l2mem.iter_mut().chain(lp_sram.iter_mut()) {
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;
@@ -70,6 +76,7 @@ impl Bus {
             flash: vec![0xFF; FLASH_SIZE as usize],
             l2mem,
             tcm: vec![0; TCM_SIZE as usize],
+            lp_sram,
             cache: Cache::new(cache_mode, L2MEM_BASE, L2MEM_SIZE),
             periph: Peripherals::default(),
         }
@@ -115,6 +122,9 @@ impl Bus {
         if let Some(o) = within(addr, size, TCM_BASE, TCM_SIZE) {
             return Some(rd(&self.tcm, o, size));
         }
+        if let Some(o) = within(addr, size, LP_SRAM_BASE, LP_SRAM_SIZE) {
+            return Some(rd(&self.lp_sram, o, size));
+        }
         if (PERIPH.contains(&addr) || CLIC.contains(&addr)) && addr % size == 0 {
             let ticks = self.ticks();
             let word = self.periph.read32(addr & !3, ticks);
@@ -141,6 +151,10 @@ impl Bus {
         }
         if let Some(o) = within(addr, size, TCM_BASE, TCM_SIZE) {
             wr(&mut self.tcm, o, size, v);
+            return true;
+        }
+        if let Some(o) = within(addr, size, LP_SRAM_BASE, LP_SRAM_SIZE) {
+            wr(&mut self.lp_sram, o, size, v);
             return true;
         }
         if (PERIPH.contains(&addr) || CLIC.contains(&addr)) && addr % size == 0 {
