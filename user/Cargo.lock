@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
+]
+
+[[package]]
 name = "t5-abi"
 version = "0.1.0"
 
@@ -25,4 +32,11 @@ name = "t5-rt"
 version = "0.1.0"
 dependencies = [
  "t5-abi",
+]
+
+[[package]]
+name = "ticker"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
 ]

@@ -20,12 +20,29 @@ pub trait Platform {
     /// An MMIO address U-mode must never reach (used by the self-test).
     const PROTECTED_MMIO: usize;
 
-    /// Early hardware setup: watchdogs, console.
+    /// Frequency of the monotonic counter returned by `now`.
+    const TIMER_HZ: u64;
+    /// mcause exception code of the alarm interrupt.
+    const TIMER_IRQ: usize;
+
+    /// Early hardware setup: watchdogs, console, the timer and its interrupt.
+    /// Interrupts stay globally disabled in M-mode (MIE=0).
     fn init();
     fn console_write(bytes: &[u8]);
     /// Makes code the kernel just wrote to `[addr, addr + len)` visible to
     /// instruction fetch.
     fn sync_code(addr: usize, len: usize);
+    /// Monotonic time in counter ticks.
+    fn now() -> u64;
+    /// Arms the one-shot alarm at `at` ticks, replacing any earlier one. An
+    /// `at` in the past fires immediately.
+    fn set_alarm(at: u64);
+    /// Disarms the alarm and clears its pending interrupt.
+    fn clear_alarm();
+    /// Waits until an interrupt is pending (MIE stays 0, so no trap is taken).
+    fn wait_for_interrupt() {
+        unsafe { core::arch::asm!("wfi") };
+    }
     /// Ends the run. On QEMU this exits the emulator with `code`.
     fn exit(code: u32) -> !;
 }

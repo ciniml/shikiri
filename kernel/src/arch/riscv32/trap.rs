@@ -30,6 +30,7 @@ pub mod reg {
     pub const SP: usize = 2;
     pub const A0: usize = 10;
     pub const A1: usize = 11;
+    pub const A2: usize = 12;
     pub const A7: usize = 17;
 }
 
@@ -59,13 +60,19 @@ unsafe extern "C" {
     pub fn trap_entry();
 }
 
-/// Runs the process described by `frame` in U-mode until it traps.
-pub fn run_user(frame: &mut TrapFrame) -> Trap {
-    // Return to U-mode with interrupts kept off in the kernel (v0 runs the
-    // kernel with MIE=0, doc/07 §4.3) and the FPU usable by the process.
+/// Runs the process described by `frame` in U-mode until it traps. `fs` is
+/// the `mstatus.FS` value the process runs with (see `fpu`).
+pub fn run_user(frame: &mut TrapFrame, fs: usize) -> Trap {
+    // In CLIC mode mret also restores the interrupt level from mcause.mpil;
+    // clear it so U-mode always runs at level 0. mcause.mpp/mpie alias the
+    // mstatus fields, so mstatus is written after it. On QEMU virt this is a
+    // plain write to mcause.
+    super::csr::write_csr!("mcause", 0);
+    // The kernel itself keeps MIE=0 (doc/07 §4.3). MPIE=1 lets the timer
+    // interrupt preempt U-mode.
     let mut ms = read_csr!("mstatus");
-    ms &= !(mstatus::MPP_MASK | mstatus::MPIE | mstatus::MPRV | mstatus::FS_MASK);
-    ms |= mstatus::FS_INITIAL;
+    ms &= !(mstatus::MPP_MASK | mstatus::MPRV | mstatus::FS_MASK);
+    ms |= mstatus::MPIE | fs;
     super::csr::write_csr!("mstatus", ms);
     unsafe { switch_to_user_asm(frame) };
     frame.trap()
@@ -194,7 +201,7 @@ trap_entry:
     ret
 
     # From M-mode: undo the swap (mscratch is 0 again) and report. The
-    # kernel runs with interrupts off in v0, so this is always a bug.
+    # kernel runs with interrupts off (MIE=0), so this is always a bug.
 1:  csrrw sp, mscratch, sp
     csrr a0, mcause
     csrr a1, mepc

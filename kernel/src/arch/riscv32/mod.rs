@@ -1,4 +1,5 @@
 pub mod csr;
+pub mod fpu;
 pub mod pmp;
 pub mod trap;
 

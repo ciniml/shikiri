@@ -1,7 +1,7 @@
 //! ESP32-P4 rev v1.x (M5Stack Tab5). Register addresses come from ESP-IDF 6.0
 //! `components/soc/esp32p4/register/hw_ver1` (doc/06 §2, §3.1).
 //!
-//! Untested on hardware until M1a.
+//! Verified on a Tab5 (rev v1.0) in M1 (doc/09) and M2 (doc/10).
 
 use super::Platform;
 
@@ -28,6 +28,45 @@ const TIMG_WDTCONFIG0: usize = 0x48;
 const TIMG_WDTWPROTECT: usize = 0x64;
 const TIMG_WDT_WKEY: u32 = 0x50D8_3AA1;
 const TIMG_WDT_EN: u32 = 1 << 31;
+
+// SYSTIMER (doc/10 §2): systimer_reg.h, hal/esp32p4/include/hal/systimer_ll.h.
+// Unit 0 counts at 16 MHz from reset (esp_hw_support/port/esp32p4/systimer.c);
+// alarm 0 is compared against it. The bus and function clocks are enabled at
+// reset (hp_sys_clkrst_reg.h: SYSTIMER_APB_CLK_EN, SYSTIMER_CLK_EN).
+const SYSTIMER_BASE: usize = 0x500E_2000;
+const SYSTIMER_CONF: usize = SYSTIMER_BASE;
+const SYSTIMER_CLK_EN: u32 = 1 << 31;
+const SYSTIMER_TARGET0_WORK_EN: u32 = 1 << 24;
+const SYSTIMER_UNIT0_OP: usize = SYSTIMER_BASE + 0x04;
+const SYSTIMER_UNIT0_UPDATE: u32 = 1 << 30;
+const SYSTIMER_UNIT0_VALUE_VALID: u32 = 1 << 29;
+const SYSTIMER_TARGET0_HI: usize = SYSTIMER_BASE + 0x1C;
+const SYSTIMER_TARGET0_LO: usize = SYSTIMER_BASE + 0x20;
+/// Period mode off, compared against unit 0.
+const SYSTIMER_TARGET0_CONF: usize = SYSTIMER_BASE + 0x34;
+const SYSTIMER_UNIT0_VALUE_HI: usize = SYSTIMER_BASE + 0x40;
+const SYSTIMER_UNIT0_VALUE_LO: usize = SYSTIMER_BASE + 0x44;
+const SYSTIMER_COMP0_LOAD: usize = SYSTIMER_BASE + 0x50;
+const SYSTIMER_INT_ENA: usize = SYSTIMER_BASE + 0x64;
+const SYSTIMER_INT_CLR: usize = SYSTIMER_BASE + 0x6C;
+const SYSTIMER_TARGET0_INT: u32 = 1 << 0;
+
+// Interrupt matrix (interrupt_core0_reg.h): one map register per source,
+// holding the CLIC interrupt index (CPU line + 16, hal/interrupt_clic_ll.h).
+const INTMTX_CORE0_BASE: usize = 0x500D_6000;
+const SYSTIMER_TARGET0_SOURCE: usize = 53; // ETS_SYSTIMER_TARGET0_INTR_SOURCE, map reg +0xD4
+/// CPU interrupt line used for the scheduler tick.
+const TIMER_CPU_LINE: usize = 1;
+const CLIC_EXT_INTR_NUM_OFFSET: usize = 16;
+const TIMER_CLIC_INDEX: usize = TIMER_CPU_LINE + CLIC_EXT_INTR_NUM_OFFSET;
+
+// CLIC, rev v1.x layout (soc/esp32p4/include/soc/clic_reg.h, doc/01 §4.1).
+// One word per interrupt: [31:24] ctl (priority in the top NLBITS=3 bits),
+// [23:16] attr (mode RO, trig, shv), [8] ie, [0] ip.
+const CLIC_INT_THRESH: usize = 0x2080_0008;
+const CLIC_CTRL_BASE: usize = 0x2080_1000;
+/// Priority 1 (ctl = 1 << 5 | 0x1F), level-triggered, non-vectored, enabled.
+const CLIC_TIMER_CTRL: u32 = (0x3F << 24) | (1 << 8);
 
 // ROM cache functions (esp_rom/esp32p4/ld/esp32p4.rom.ld,
 // esp_rom/esp32p4/include/esp32p4/rom/cache.h). ESP-IDF uses these rather than
@@ -110,6 +149,8 @@ impl Platform for Esp32p4v1 {
     // Upper L2MEM region with a 128 KiB L2 cache (doc/02 §1.1, doc/07 §3).
     const APP_POOL: core::ops::Range<usize> = 0x4FF4_0000..0x4FFA_0000;
     const PROTECTED_MMIO: usize = USJ_BASE;
+    const TIMER_HZ: u64 = 16_000_000;
+    const TIMER_IRQ: usize = TIMER_CLIC_INDEX;
 
     fn init() {
         unsafe {
@@ -122,6 +163,55 @@ impl Platform for Esp32p4v1 {
                 wr(base + TIMG_WDTCONFIG0, rd(base + TIMG_WDTCONFIG0) & !TIMG_WDT_EN);
                 wr(base + TIMG_WDTWPROTECT, 0);
             }
+
+            // Alarm 0: one-shot on unit 0, routed to CPU line 1 at priority 1.
+            // A threshold of 0 lets every enabled level through; U-mode runs
+            // at level 0 and the kernel masks with MIE=0.
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) | SYSTIMER_CLK_EN);
+            Self::clear_alarm();
+            wr(SYSTIMER_TARGET0_CONF, 0);
+            wr(SYSTIMER_INT_ENA, rd(SYSTIMER_INT_ENA) | SYSTIMER_TARGET0_INT);
+            wr(INTMTX_CORE0_BASE + 4 * SYSTIMER_TARGET0_SOURCE, TIMER_CLIC_INDEX as u32);
+            wr(CLIC_CTRL_BASE + 4 * TIMER_CLIC_INDEX, CLIC_TIMER_CTRL);
+            wr(CLIC_INT_THRESH, 0);
+        }
+    }
+
+    fn now() -> u64 {
+        // Same sequence as systimer_hal_get_counter_value(): snapshot, then
+        // read lo/hi/lo until lo is stable.
+        unsafe {
+            wr(SYSTIMER_UNIT0_OP, SYSTIMER_UNIT0_UPDATE);
+            while rd(SYSTIMER_UNIT0_OP) & SYSTIMER_UNIT0_VALUE_VALID == 0 {}
+            let mut lo = rd(SYSTIMER_UNIT0_VALUE_LO);
+            loop {
+                let hi = rd(SYSTIMER_UNIT0_VALUE_HI);
+                let lo2 = rd(SYSTIMER_UNIT0_VALUE_LO);
+                if lo2 == lo {
+                    return ((hi as u64) << 32) | lo as u64;
+                }
+                lo = lo2;
+            }
+        }
+    }
+
+    fn set_alarm(at: u64) {
+        // The P4 alarm fires immediately for a target already in the past
+        // (SOC_SYSTIMER_ALARM_MISS_COMPENSATE), so no retry loop is needed.
+        unsafe {
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !SYSTIMER_TARGET0_WORK_EN);
+            wr(SYSTIMER_INT_CLR, SYSTIMER_TARGET0_INT);
+            wr(SYSTIMER_TARGET0_HI, (at >> 32) as u32);
+            wr(SYSTIMER_TARGET0_LO, at as u32);
+            wr(SYSTIMER_COMP0_LOAD, 1);
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) | SYSTIMER_TARGET0_WORK_EN);
+        }
+    }
+
+    fn clear_alarm() {
+        unsafe {
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !SYSTIMER_TARGET0_WORK_EN);
+            wr(SYSTIMER_INT_CLR, SYSTIMER_TARGET0_INT);
         }
     }
 

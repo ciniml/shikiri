@@ -21,7 +21,7 @@ fn main() {
     // the kernel until app loading from flash arrives in M3.
     let apps = PathBuf::from(env::var("T5_APPS_DIR").unwrap_or_else(|_| "../build/apps".into()));
     println!("cargo:rerun-if-env-changed=T5_APPS_DIR");
-    for app in ["hello", "fault"] {
+    for app in ["hello", "fault", "ticker", "spin"] {
         let src = apps.join(format!("{app}.t5a"));
         println!("cargo:rerun-if-changed={}", src.display());
         fs::copy(&src, out.join(format!("{app}.t5a"))).unwrap_or_else(|e| {

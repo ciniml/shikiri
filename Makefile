@@ -4,7 +4,7 @@ BUILD      := build
 APPS_DIR   := $(BUILD)/apps
 APP_TARGET := user/target/riscv32imafc-unknown-none-elf/release
 ELF2T5A    := tools/target/release/elf2t5a
-APPS       := hello fault
+APPS       := hello fault ticker spin
 
 QEMU       ?= qemu-system-riscv32
 QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
@@ -30,12 +30,12 @@ apps: tools
 kernel-virt: apps
 	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
 	    --features platform-virt --target-dir target/virt
-	mkdir -p $(BUILD) && cp kernel/target/virt/riscv32imafc-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-virt.elf
+	mkdir -p $(BUILD) && cp kernel/target/virt/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-virt.elf
 
 kernel-p4: apps
 	cd kernel && T5_APPS_DIR=$(CURDIR)/$(APPS_DIR) cargo build --release \
 	    --features platform-esp32p4v1 --target-dir target/esp32p4v1
-	mkdir -p $(BUILD) && cp kernel/target/esp32p4v1/riscv32imafc-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-esp32p4v1.elf
+	mkdir -p $(BUILD) && cp kernel/target/esp32p4v1/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-esp32p4v1.elf
 
 # ESP app image for the 2nd stage bootloader (rev v1.x only).
 image-p4: kernel-p4

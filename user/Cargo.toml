@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["rt", "apps/hello", "apps/fault"]
+members = ["rt", "apps/hello", "apps/fault", "apps/ticker", "apps/spin"]
 
 [profile.release]
 opt-level = "s"

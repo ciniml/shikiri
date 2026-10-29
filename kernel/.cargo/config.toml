@@ -1,2 +1,5 @@
 [build]
-target = "riscv32imafc-unknown-none-elf"
+# No F/D: the kernel must never touch the FP registers, which hold the
+# FPU owner's state (src/arch/riscv32/fpu.rs). The hardware has F; the
+# kernel saves and restores it with `.option arch, +f` assembly.
+target = "riscv32imac-unknown-none-elf"

@@ -7,14 +7,19 @@
 /// ABI version carried by every app image. The kernel accepts an image when
 /// the major numbers match and the image's minor is not newer than its own.
 pub const ABI_MAJOR: u16 = 0;
-pub const ABI_MINOR: u16 = 1;
+/// Minor 2 (M2): yield, sleep, time.
+pub const ABI_MINOR: u16 = 2;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
+    /// a0 = exit code. Does not return.
     pub const EXIT: usize = 0x000;
+    /// Gives up the rest of the time slice.
     pub const YIELD: usize = 0x001;
+    /// a0/a1 = nanoseconds (lo/hi). Sleeps at least that long.
     pub const SLEEP: usize = 0x002;
     pub const SYS_INFO: usize = 0x003;
+    /// Returns monotonic nanoseconds since boot in a1/a2 (lo/hi).
     pub const TIME: usize = 0x004;
     pub const DBG_WRITE: usize = 0xF00;
 }

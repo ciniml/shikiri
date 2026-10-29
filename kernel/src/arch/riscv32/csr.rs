@@ -22,8 +22,17 @@ pub mod mstatus {
     pub const MPIE: usize = 1 << 7;
     pub const MPP_MASK: usize = 0b11 << 11;
     pub const FS_MASK: usize = 0b11 << 13;
+    pub const FS_OFF: usize = 0b00 << 13;
     pub const FS_INITIAL: usize = 0b01 << 13;
+    pub const FS_CLEAN: usize = 0b10 << 13;
+    pub const FS_DIRTY: usize = 0b11 << 13;
     pub const MPRV: usize = 1 << 17;
+}
+
+/// Machine interrupt-enable bits (standard `mie`; unused in CLIC mode).
+#[allow(dead_code)]
+pub mod mie {
+    pub const MTIE: usize = 1 << 7;
 }
 
 /// Exception codes (mcause with the interrupt bit clear).
