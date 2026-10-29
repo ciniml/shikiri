@@ -68,12 +68,6 @@ const CLIC_CTRL_BASE: usize = 0x2080_1000;
 /// Priority 1 (ctl = 1 << 5 | 0x1F), level-triggered, non-vectored, enabled.
 const CLIC_TIMER_CTRL: u32 = (0x3F << 24) | (1 << 8);
 
-// LP SRAM (soc/esp32p4/include/soc/soc.h:176-177). The top from 0x5010_FA80
-// belongs to the LP ROM (esp_system/ld/esp32p4/memory.ld.in:43-45). Not
-// cached, kept across resets (doc/12 §1.3); U-mode has no PMP entry for it.
-const LP_SRAM_BASE: usize = 0x5010_8000;
-const LOG_RING_SIZE: usize = 24 * 1024;
-
 // ROM cache functions (esp_rom/esp32p4/ld/esp32p4.rom.ld,
 // esp_rom/esp32p4/include/esp32p4/rom/cache.h). ESP-IDF uses these rather than
 // fence.i to make written code fetchable (doc/02 §2.2).
@@ -235,10 +229,6 @@ impl Platform for Esp32p4v1 {
             }
         }
         unsafe { wr(USJ_EP1_CONF, USJ_WR_DONE) };
-    }
-
-    fn log_ring() -> (usize, usize) {
-        (LP_SRAM_BASE, LOG_RING_SIZE)
     }
 
     fn sync_code(addr: usize, len: usize) {

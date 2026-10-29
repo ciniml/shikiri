@@ -3,7 +3,7 @@
 M5Stack Tab5（ESP32-P4 rev v1.x）向けの Rust 製の自作 OS（開発中）。カーネルは M モード、アプリは U モードで動かし、PMP で分離する。
 
 - 設計と調査: [doc/](doc/README.md)（結論は [doc/07](doc/07-architecture-proposal.md)）
-- 進捗: M0（雛形、静的 PIE、ブートローダ）、M1-virt（QEMU virt）、M1a/M1b（実機の Tab5 で U モードの hello と保護テスト 7 件。記録は [doc/09](doc/09-bringup-m1.md)）、**M2（タイマ割り込みによるプリエンプション、sleep/yield/time、FPU の遅延切り替え。QEMU と実機で PASS。記録は [doc/10](doc/10-m2-scheduling.md)）**、エミュレータ t5emu 初版（実機用カーネルが無改造で PASS。[doc/11](doc/11-emulator.md)）、**構造化ログ L1（テキストログを廃止。[doc/12](doc/12-structured-logging.md)）**
+- 進捗: M0（雛形、静的 PIE、ブートローダ）、M1-virt（QEMU virt）、M1a/M1b（実機の Tab5 で U モードの hello と保護テスト 7 件。記録は [doc/09](doc/09-bringup-m1.md)）、**M2（タイマ割り込みによるプリエンプション、sleep/yield/time、FPU の遅延切り替え。QEMU と実機で PASS。記録は [doc/10](doc/10-m2-scheduling.md)）**、エミュレータ t5emu 初版（実機用カーネルが無改造で PASS。[doc/11](doc/11-emulator.md)）、**構造化ログ L1/L2（テキストログを廃止。USB と RTT（probe-rs）で回収。[doc/12](doc/12-structured-logging.md)）**
 
 ## 構成
 
@@ -21,7 +21,9 @@ M5Stack Tab5（ESP32-P4 rev v1.x）向けの Rust 製の自作 OS（開発中）
 
 ```sh
 make test-p4emu    # 実機用カーネルを自作エミュレータ t5emu で実行（doc/11）。成功で終了コード 0
-make monitor PORT=/dev/ttyACM3   # 実機のログを解読して表示（doc/12）
+make monitor PORT=/dev/ttyACM3   # 実機のログを USB から解読して表示（doc/12）
+make probe-rs      # probe-rs（コミット固定）を build/probe-rs に入れる（doc/13）
+make rtt PROBE=303a:1001:<MAC>   # 実機のログを RTT（probe-rs）で回収して表示（doc/12 §6）
 make test-emu      # t5emu の単体テスト
 make test-virt     # QEMU virt でセルフテスト（M1: U モードと保護テスト 10 件、M2: 4 プロセスの並行実行）。ログを解読して表示し、成功で終了コード 0
 make image-p4      # ESP32-P4 v1.x 用のカーネル app image（build/t5-kernel-esp32p4v1.bin）

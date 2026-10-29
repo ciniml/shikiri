@@ -9,6 +9,14 @@ pub struct Segment {
 pub struct Elf {
     pub entry: u32,
     pub segments: Vec<Segment>,
+    /// Defined symbols from `.symtab`: (name, value).
+    pub symbols: Vec<(String, u32)>,
+}
+
+impl Elf {
+    pub fn symbol(&self, name: &str) -> Option<u32> {
+        self.symbols.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
+    }
 }
 
 fn u16_at(b: &[u8], o: usize) -> Result<u16, String> {
@@ -43,5 +51,32 @@ pub fn parse(b: &[u8]) -> Result<Elf, String> {
         let data = b.get(offset..offset + filesz).ok_or("segment outside the file")?.to_vec();
         segments.push(Segment { vaddr, data, memsz });
     }
-    Ok(Elf { entry, segments })
+    Ok(Elf { entry, segments, symbols: symbols(b)? })
+}
+
+fn symbols(b: &[u8]) -> Result<Vec<(String, u32)>, String> {
+    let shoff = u32_at(b, 0x20)? as usize;
+    let shentsize = u16_at(b, 0x2E)? as usize;
+    let shnum = u16_at(b, 0x30)? as usize;
+    let mut out = Vec::new();
+    for i in 0..shnum {
+        let sh = shoff + i * shentsize;
+        if u32_at(b, sh + 4)? != 2 {
+            continue; // SHT_SYMTAB only
+        }
+        let (off, size) = (u32_at(b, sh + 16)? as usize, u32_at(b, sh + 20)? as usize);
+        let strtab = shoff + u32_at(b, sh + 24)? as usize * shentsize;
+        let str_off = u32_at(b, strtab + 16)? as usize;
+        for s in (off..off + size).step_by(16) {
+            let shndx = u16_at(b, s + 14)?;
+            if shndx == 0 {
+                continue; // undefined
+            }
+            let name_off = str_off + u32_at(b, s)? as usize;
+            let end = b[name_off..].iter().position(|&c| c == 0).ok_or("bad symbol name")?;
+            let name = String::from_utf8_lossy(&b[name_off..name_off + end]).into_owned();
+            out.push((name, u32_at(b, s + 4)?));
+        }
+    }
+    Ok(out)
 }

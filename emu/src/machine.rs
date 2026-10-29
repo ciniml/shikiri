@@ -196,6 +196,12 @@ pub struct Machine {
     pub bus: Bus,
     /// Print every trap to stderr.
     pub trace_traps: bool,
+    /// Address of the SEGGER RTT control block, if the ELF has one. `run`
+    /// then plays the debugger and drains up-channel 0 into `rtt_output`.
+    pub rtt_cb: Option<u32>,
+    pub rtt_output: Vec<u8>,
+    /// Instructions between RTT polls (0: no host attached).
+    pub rtt_poll_interval: u32,
 }
 
 fn sext(v: u32, bits: u32) -> u32 {
@@ -205,7 +211,7 @@ fn sext(v: u32, bits: u32) -> u32 {
 
 impl Machine {
     pub fn new(bus: Bus, entry: u32) -> Machine {
-        Machine { cpu: Cpu::new(entry), bus, trace_traps: false }
+        Machine { cpu: Cpu::new(entry), bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_poll_interval: 4096 }
     }
 
     /// Runs until something stops the emulator or `limit_cycles` is reached.
@@ -216,6 +222,9 @@ impl Machine {
                 return s;
             }
             wdt_check = wdt_check.wrapping_add(1);
+            if self.rtt_poll_interval != 0 && wdt_check % self.rtt_poll_interval == 0 {
+                self.poll_rtt();
+            }
             if wdt_check % 4096 == 0 {
                 if self.bus.cycles >= limit_cycles {
                     return Stop::TimeLimit;
@@ -226,6 +235,36 @@ impl Machine {
                 }
             }
         }
+    }
+
+    /// What a debugger does: read up-channel 0 between `RdOff` and `WrOff`
+    /// and advance `RdOff`. Ignored until the block carries its id. The
+    /// layout is SEGGER_RTT_CB (16-byte id, MaxNumUpBuffers,
+    /// MaxNumDownBuffers, then 24-byte buffer descriptors).
+    pub fn poll_rtt(&mut self) {
+        let Some(cb) = self.rtt_cb else { return };
+        let mut id = [0u8; 10];
+        for (i, b) in id.iter_mut().enumerate() {
+            *b = self.bus.read(cb + i as u32, 1).unwrap_or(0) as u8;
+        }
+        if &id != b"SEGGER RTT" {
+            return;
+        }
+        let up = cb + 24;
+        let rd32 = |bus: &mut Bus, a: u32| bus.read(a, 4).unwrap_or(0);
+        let buf = rd32(&mut self.bus, up + 4);
+        let size = rd32(&mut self.bus, up + 8);
+        let wr = rd32(&mut self.bus, up + 12);
+        let mut rd = rd32(&mut self.bus, up + 16);
+        if size == 0 || wr >= size || rd >= size {
+            return;
+        }
+        while rd != wr {
+            let b = self.bus.read(buf + rd, 1).unwrap_or(0) as u8;
+            self.rtt_output.push(b);
+            rd = (rd + 1) % size;
+        }
+        self.bus.write(up + 16, 4, rd);
     }
 
     pub fn step(&mut self) -> Result<(), Stop> {

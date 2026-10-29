@@ -7,6 +7,9 @@
 //!                                   or one line per event (--pretty). INPUT is a
 //!                                   file or device (default: stdin). For a tty,
 //!                                   set it to raw mode first (stty raw -echo).
+//!                                   --hex reads the bytes as hex pairs ("0a 1b "),
+//!                                   which is how probe-rs prints a binary RTT
+//!                                   channel; other text is ignored.
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
@@ -16,7 +19,7 @@ use t5log::{Item, SchemaTable, StreamDecoder};
 const USAGE: &str = "usage:
   t5log schemas -o OUT ELF...
   t5log check ELF...
-  t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--tcp HOST:PORT | INPUT]";
+  t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -79,6 +82,7 @@ fn cmd_schemas(args: &[String]) -> Result<(), String> {
 fn cmd_decode(args: &[String]) -> Result<(), String> {
     let mut t = SchemaTable::new();
     let mut pretty = false;
+    let mut hex = false;
     let mut tcp = None;
     let mut input = None;
     let mut it = args.iter();
@@ -91,6 +95,7 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
                 t.add_elf(it.next().ok_or("--elf needs a path")?)?;
             }
             "--pretty" => pretty = true,
+            "--hex" => hex = true,
             "--json" => pretty = false,
             "--tcp" => tcp = Some(it.next().ok_or("--tcp needs HOST:PORT")?.clone()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n{USAGE}")),
@@ -107,6 +112,7 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     };
 
     let mut d = StreamDecoder::new();
+    let mut hexd = HexDecoder::default();
     let mut out = std::io::stdout().lock();
     let mut buf = [0u8; 4096];
     loop {
@@ -116,7 +122,8 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.to_string()),
         };
-        for item in d.push(&buf[..n]) {
+        let bytes = if hex { hexd.push(&buf[..n]) } else { buf[..n].to_vec() };
+        for item in d.push(&bytes) {
             print_item(&mut out, &t, &item, pretty)?;
         }
         out.flush().map_err(|e| e.to_string())?;
@@ -125,6 +132,31 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         print_item(&mut out, &t, &item, pretty)?;
     }
     Ok(())
+}
+
+/// Turns "0a 1b ..." text into bytes. A token is two hex digits surrounded
+/// by whitespace; anything else (status lines) is skipped.
+#[derive(Default)]
+struct HexDecoder {
+    token: Vec<u8>,
+}
+
+impl HexDecoder {
+    fn push(&mut self, text: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &c in text {
+            if c.is_ascii_whitespace() {
+                if self.token.len() == 2 && self.token.iter().all(u8::is_ascii_hexdigit) {
+                    let s = std::str::from_utf8(&self.token).unwrap();
+                    out.push(u8::from_str_radix(s, 16).unwrap());
+                }
+                self.token.clear();
+            } else if self.token.len() < 3 {
+                self.token.push(c);
+            }
+        }
+        out
+    }
 }
 
 fn print_item(out: &mut impl Write, t: &SchemaTable, item: &Item, pretty: bool) -> Result<(), String> {

@@ -30,8 +30,6 @@ pub trait Platform {
     fn init();
     /// Raw byte output for log frames (doc/12 §2.4). Never blocks for long.
     fn console_write(bytes: &[u8]);
-    /// Memory for the log record ring: (address, length).
-    fn log_ring() -> (usize, usize);
     /// Makes code the kernel just wrote to `[addr, addr + len)` visible to
     /// instruction fetch.
     fn sync_code(addr: usize, len: usize);

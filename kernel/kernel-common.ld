@@ -45,6 +45,13 @@ SECTIONS
 
     __kernel_end = .;
 
+    /* Log ring and RTT control block (kernel/src/log.rs). Not loaded and not
+     * zeroed: the kernel initialises it at boot (and, from L3, first checks
+     * what the previous boot left there). */
+    .log_mem (NOLOAD) : ALIGN(16) {
+        *(.log_mem .log_mem.*)
+    } > REGION_LOG
+
     /* Log schemas (doc/12). Not loaded; read by host tools from the ELF. */
     .t5log (INFO) : { KEEP(*(.t5log .t5log.*)) }
 

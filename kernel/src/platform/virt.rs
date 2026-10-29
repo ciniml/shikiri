@@ -64,12 +64,6 @@ impl Platform for Virt {
         }
     }
 
-    fn log_ring() -> (usize, usize) {
-        // No retained memory on virt; the ring lives in kernel RAM.
-        static mut RING: [u8; 16 * 1024] = [0; 16 * 1024];
-        (core::ptr::addr_of_mut!(RING) as usize, 16 * 1024)
-    }
-
     fn sync_code(_addr: usize, _len: usize) {
         unsafe { core::arch::asm!("fence.i") };
     }

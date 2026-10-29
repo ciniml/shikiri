@@ -1,7 +1,7 @@
 # 13. probe-rs の ESP32-P4 対応の調査
 
 - 日付: 2026-10-30
-- 状態: **調査結果（実機での確認は未実施。方針の確認待ち）**
+- 状態: 調査結果。ユーザーの判断（2026-10-30）で、段階 0〜1 を実施した。**実機で接続と、LP SRAM の RTT の回収を確認した（§8）。**
 - 目的: RTT でのログ回収とデバッグを、OpenOCD ではなく probe-rs で行えるかを調べる。必要なら上流へ P4 対応を出す。
 - 事実には出典を付け、推測には「（推測）」、設計判断には「（判断）」と書く。
 - 参照したソース:
@@ -190,3 +190,13 @@
 - esp-hal の v1.x への方針: https://github.com/esp-rs/esp-hal/issues/2285#issuecomment-4022872793 、issue #5880、#6179
 - openocd-esp32: https://github.com/espressif/openocd-esp32/blob/master/src/target/espressif/esp32p4.c 、ローカルの `target/esp32p4.cfg`、`target/esp32p4-lpcore.cfg`、`target/esp_common.cfg`、`board/esp32p4-builtin.cfg`
 - RISC-V External Debug Support 0.13.2 §4.1（Debug Mode の権限）
+
+## 8. 段階 0〜1 の結果（2026-10-30）
+
+- 段階 0: `make probe-rs` で、コミット `dd4909231da2` を `build/probe-rs` に入れた（`probe-rs 0.32.0 (git commit: dd49092)`）。独自のチップ記述は `tools/probe-rs/esp32p4-tab5.yaml`。
+- 段階 1: Tab5 の内蔵 USB-JTAG（プローブ `303a:1001:30:ED:A0:E0:CB:86`）で、次のことを確認した。フラッシュは書いていない。
+  - `Using sequence Riscv(ESP32P4)`、IDCODE `0x00012C25`、TAP 2 つ（§2.5 のとおり）。
+  - ウォッチドッグの停止、core0 の停止、トリガ 3 本（type 4）の検出、core1 の扱い。いずれもエラーなし。
+  - **ELF の `_SEGGER_RTT`（0x5010_E018）から制御ブロックを見つけ、LP SRAM をシステムバスで読んだ。** ポーリング中に core0 は止まらない。L2MEM のときにプログラムバッファ経由になる問題（§0-3）を避けられた。
+  - RTT で受けたバイト列は、USB の CDC で受けたものと完全に一致した。詳細は 12 §6.3。
+- 段階 2（リセット、ブレークポイント）、段階 3（書き込み）、段階 4（上流への貢献）は未実施。

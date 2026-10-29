@@ -15,7 +15,8 @@ QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
               -no-reboot
 
 .PHONY: all apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
-        schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 monitor clean
+        schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 monitor \
+        probe-rs rtt clean
 
 all: kernel-virt image-p4 boot
 
@@ -23,6 +24,14 @@ IDF_PATH_6 ?= $(HOME)/esp-idf/6.0
 IDF        := . $(IDF_PATH_6)/export.sh >/dev/null && idf.py
 PORT       ?= /dev/ttyACM0
 PRETTY     := $(T5LOG) decode --pretty --schemas $(SCHEMAS)
+
+# probe-rs pinned to the commit reviewed in doc/13, installed into build/.
+PROBE_RS_REV := dd4909231da2e17bea25c9277196d9fdf3ade53d
+PROBE_RS     := $(BUILD)/probe-rs/bin/probe-rs
+# The debug probe, as `probe-rs list` shows it (VID:PID:serial). The Tab5's
+# built-in USB-JTAG uses its MAC address as the serial. Required: another
+# ESP device may be connected.
+PROBE        ?=
 
 tools:
 	cd tools && cargo build --release
@@ -76,6 +85,17 @@ flash-p4: image-p4 boot
 	espflash write-bin --port $(PORT) 0x10000 $(BUILD)/t5-kernel-esp32p4v1.bin
 
 # Decoded log of the device (the console carries log frames, doc/12).
+# Collect the log over RTT with probe-rs (doc/12 L2). Does not flash or reset;
+# attaching halts the core briefly and disables the watchdogs (doc/13).
+rtt: schemas-p4
+	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: $(PROBE_RS) list)"; exit 1; }
+	tools/probe-rs/rtt.sh $(PROBE_RS) $(PROBE) $(BUILD)/t5-kernel-esp32p4v1.elf \
+	    $(SCHEMAS) $(T5LOG) $(BUILD)/rtt.hex
+
+probe-rs:
+	cargo install --locked --git https://github.com/probe-rs/probe-rs --rev $(PROBE_RS_REV) \
+	    probe-rs-tools --root $(BUILD)/probe-rs
+
 monitor: schemas-p4
 	stty -F $(PORT) raw -echo
 	$(PRETTY) $(PORT)

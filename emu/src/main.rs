@@ -18,6 +18,7 @@ use t5emu::machine::{Machine, Stop};
 
 const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [--seed N] \
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
+                     [--rtt-poll N] [--log-from-rtt] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -32,6 +33,8 @@ struct Opts {
     extra_elfs: Vec<String>,
     schema_files: Vec<String>,
     console_out: Option<String>,
+    rtt_poll: u32,
+    log_from_rtt: bool,
     elf: String,
 }
 
@@ -48,6 +51,8 @@ fn parse_args() -> Result<Opts, String> {
         extra_elfs: Vec::new(),
         schema_files: Vec::new(),
         console_out: None,
+        rtt_poll: 4096,
+        log_from_rtt: false,
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -71,6 +76,8 @@ fn parse_args() -> Result<Opts, String> {
             "--elf" => o.extra_elfs.push(val()?),
             "--schemas" => o.schema_files.push(val()?),
             "--console-out" => o.console_out = Some(val()?),
+            "--rtt-poll" => o.rtt_poll = val()?.parse().map_err(|e| format!("--rtt-poll: {e}"))?,
+            "--log-from-rtt" => o.log_from_rtt = true,
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => o.elf = s.to_string(),
         }
@@ -134,10 +141,40 @@ fn main() -> ExitCode {
 
     let mut m = Machine::new(bus, elf.entry);
     m.trace_traps = o.trace_traps;
+    m.rtt_cb = elf.symbol("_SEGGER_RTT");
+    m.rtt_poll_interval = o.rtt_poll;
     let limit = o.max_ms * o.mhz * 1000;
     let stop = m.run(limit);
+    m.poll_rtt();
 
-    let console = &m.bus.periph.usj.output;
+    // The RTT channel must carry exactly the frames the console carried (the
+    // console has one extra 0x00 that separates the bootloader's text).
+    let usj = &m.bus.periph.usj.output;
+    let rtt_ok = match m.rtt_cb {
+        // A slow or absent host loses frames by design (NO_BLOCK_SKIP), so
+        // the streams are only compared with the default polling.
+        Some(_) if o.rtt_poll != 4096 => true,
+        Some(_) => {
+            let trim = |b: &[u8]| b.iter().position(|&x| x != 0).map_or(Vec::new(), |i| b[i..].to_vec());
+            let same = trim(usj) == trim(&m.rtt_output);
+            if same {
+                eprintln!("t5emu: RTT stream matches the console ({} bytes)", m.rtt_output.len());
+            } else {
+                eprintln!(
+                    "t5emu: RTT stream ({} bytes) differs from the console stream ({} bytes)",
+                    m.rtt_output.len(),
+                    usj.len()
+                );
+            }
+            same
+        }
+        None => {
+            eprintln!("t5emu: no _SEGGER_RTT symbol; RTT not checked");
+            true
+        }
+    };
+
+    let console = if o.log_from_rtt { &m.rtt_output } else { &m.bus.periph.usj.output };
     if let Some(path) = &o.console_out {
         if let Err(e) = std::fs::write(path, console) {
             eprintln!("t5emu: {path}: {e}");
@@ -172,7 +209,7 @@ fn main() -> ExitCode {
         describe(&stop)
     );
     match stop {
-        Stop::Halted { .. } if passed => ExitCode::SUCCESS,
+        Stop::Halted { .. } if passed && rtt_ok => ExitCode::SUCCESS,
         Stop::Halted { .. } => ExitCode::from(1),
         Stop::TimeLimit => ExitCode::from(3),
         _ => ExitCode::from(2),
