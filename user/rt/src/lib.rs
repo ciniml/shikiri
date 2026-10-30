@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, event, rights, sys, timer};
+pub use t5_abi::{Error, FOREVER, chan, display, event, rights, sys, timer, touch};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -227,6 +227,121 @@ impl Channel {
                 return Err(Error::Off);
             }
         }
+    }
+}
+
+/// The display (doc/17 §6): the panel's 720 x 1280 RGB565 framebuffer,
+/// mapped into the process. `put`, `fill` and `rect` take coordinates as the
+/// user sees the screen (after `orientation`); `flush` makes rows visible.
+pub struct Display {
+    pub handle: Handle,
+    fb: &'static mut [u16],
+    /// Framebuffer width and height (the panel's).
+    pub fb_w: usize,
+    pub fb_h: usize,
+    /// Quarter turns (display::ORIENTATION), read at `open`.
+    pub quarter: usize,
+}
+
+impl Display {
+    /// Opens and maps the display. Needs `--permit display`.
+    pub fn open() -> Result<Display, Error> {
+        let handle = Handle::open(display::NAME, rights::CTL | rights::WAIT)?;
+        let info = handle.ctl(display::INFO, 0)?;
+        let (fb_w, fb_h) = (info & 0xFFFF, info >> 16);
+        let quarter = handle.ctl(display::ORIENTATION, 0)? & 3;
+        let addr = handle.ctl(display::MAP, 0)?;
+        let fb = unsafe { core::slice::from_raw_parts_mut(addr as *mut u16, fb_w * fb_h) };
+        Ok(Display { handle, fb, fb_w, fb_h, quarter })
+    }
+
+    /// Width and height as the user sees the screen.
+    pub fn size(&self) -> (usize, usize) {
+        if self.quarter & 1 == 1 { (self.fb_h, self.fb_w) } else { (self.fb_w, self.fb_h) }
+    }
+
+    /// The framebuffer index of user point (x, y) (inverse of the kernel's
+    /// touch mapping).
+    fn index(&self, x: usize, y: usize) -> usize {
+        let (w, h) = (self.fb_w, self.fb_h);
+        let (px, py) = match self.quarter {
+            1 => (w - 1 - y, x),
+            2 => (w - 1 - x, h - 1 - y),
+            3 => (y, h - 1 - x),
+            _ => (x, y),
+        };
+        py * w + px
+    }
+
+    /// The framebuffer row that user point (x, y) lands on.
+    pub fn fb_row(&self, x: usize, y: usize) -> usize {
+        self.index(x, y) / self.fb_w
+    }
+
+    pub fn put(&mut self, x: usize, y: usize, color: u16) {
+        let (w, h) = self.size();
+        if x < w && y < h {
+            let i = self.index(x, y);
+            self.fb[i] = color;
+        }
+    }
+
+    /// Fills a rectangle (user coordinates, clipped).
+    pub fn rect(&mut self, x: usize, y: usize, rw: usize, rh: usize, color: u16) {
+        let (w, h) = self.size();
+        for yy in y..(y + rh).min(h) {
+            for xx in x..(x + rw).min(w) {
+                let i = self.index(xx, yy);
+                self.fb[i] = color;
+            }
+        }
+    }
+
+    pub fn fill(&mut self, color: u16) {
+        self.fb.fill(color);
+    }
+
+    /// Makes framebuffer rows `[y0, y1)` visible.
+    pub fn flush(&self, y0: usize, y1: usize) -> Result<(), Error> {
+        self.handle.ctl(display::FLUSH, (y0 | y1 << 16) as u64).map(|_| ())
+    }
+
+    pub fn flush_all(&self) -> Result<(), Error> {
+        self.flush(0, self.fb_h)
+    }
+}
+
+/// RGB565 from 8-bit components.
+pub const fn rgb(r: u32, g: u32, b: u32) -> u16 {
+    (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)) as u16
+}
+
+/// A touch point in user coordinates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Point {
+    pub x: u16,
+    pub y: u16,
+    pub id: u16,
+    pub size: u16,
+}
+
+/// Touch input. Needs `--permit touch`.
+pub struct Touch(pub Handle);
+
+impl Touch {
+    pub fn open() -> Result<Touch, Error> {
+        Handle::open(touch::NAME, rights::READ | rights::WAIT).map(Touch)
+    }
+
+    /// The current points into `out`; returns how many.
+    pub fn points(&self, out: &mut [Point; touch::MAX_POINTS]) -> Result<usize, Error> {
+        let mut buf = [0u8; touch::MAX_POINTS * touch::POINT_SIZE];
+        let n = self.0.read(&mut buf)? / touch::POINT_SIZE;
+        for (o, b) in out.iter_mut().zip(buf.chunks(touch::POINT_SIZE)).take(n) {
+            let u = |k: usize| u16::from_le_bytes([b[2 * k], b[2 * k + 1]]);
+            *o = Point { x: u(0), y: u(1), id: u(2), size: u(3) };
+        }
+        Ok(n)
     }
 }
 

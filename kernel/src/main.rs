@@ -22,6 +22,7 @@ mod log;
 mod platform;
 mod process;
 mod sched;
+mod screen;
 mod store;
 mod time;
 
@@ -51,6 +52,8 @@ struct Apps {
     xipcheck: Option<&'static [u8]>,
     /// M5c (channels, doc/16 §5). Optional like `timers`.
     echo: Option<&'static [u8]>,
+    /// M6c (display and touch, doc/17 §6). Optional like `timers`.
+    paint: Option<&'static [u8]>,
 }
 
 impl Apps {
@@ -73,6 +76,7 @@ impl Apps {
             hello_xip: s.image("hello-xip"),
             xipcheck: s.image("xipcheck"),
             echo: s.image("echo"),
+            paint: s.image("paint"),
         })
     }
 }
@@ -175,7 +179,7 @@ pub extern "C" fn kmain() -> ! {
     let (pool, slot_size) = (pool(), slot(0).1);
     event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
-        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps) + selftest_m4b(&apps) + selftest_m5c(&apps),
+        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps) + selftest_m4b(&apps) + selftest_m5c(&apps) + selftest_m6c(&apps),
         Some(None) => 1,
         None => {
             event!(Error, "selftest.no_flash");
@@ -235,6 +239,7 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
         s.run(None, &mut |s| {
             settle_updates(s, store);
             touch_log.poll();
+            screen::poll();
             s.reap();
             // A few frames per poll, so an install (one frame per 256 B,
             // some with a sector erase) does not stop the apps meanwhile.
@@ -417,6 +422,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::Touch { seconds } => touch_log.start(seconds),
         Command::I2cScan => Current::i2c_scan(),
         Command::Display => Current::display_stats(),
+        Command::Rotate { degrees } => screen::set_orientation(degrees),
         Command::Power => {
             Current::log_power("cmd");
             Ok(0)
@@ -744,6 +750,42 @@ fn selftest_m5c(apps: &Apps) -> u32 {
         if !ok {
             failures += 1;
         }
+    }
+    failures
+}
+
+/// Display and touch (doc/17 §6): `paint` in self-test mode maps the
+/// framebuffer, draws, waits for frames and reads the touch, checking the
+/// rules on the way.
+fn selftest_m6c(apps: &Apps) -> u32 {
+    let Some(paint) = apps.paint else {
+        event!(Warn, "selftest.skipped", part = "m6c", reason = "no paint app in the store");
+        return 0;
+    };
+    let Some((fb, _)) = Current::display_buffer() else {
+        event!(Warn, "selftest.skipped", part = "m6c", reason = "no display");
+        return 0;
+    };
+    // `paint` maps the framebuffer; `fault`, which did not open the
+    // display, must not be able to write it.
+    let cases: [(&'static str, &'static [u8], usize, usize, Exit, u64); 2] = [
+        ("paint", paint, 1, 0, Exit::Code(0), 3000),
+        ("fault/store-framebuffer", apps.fault, MODE_STORE, fb, fault(cause::STORE_ACCESS), 1000),
+    ];
+    let mut failures = 0;
+    for (name, image, arg0, arg1, expected, limit) in cases {
+        let Some(p) = load(name, image, 0, arg0, arg1) else {
+            failures += 1;
+            continue;
+        };
+        let mut s = sched::Scheduler::new();
+        s.slots = [Some(p), None, None, None];
+        s.run(Some(limit), &mut |_| {});
+        let p = s.slots[0].as_ref().unwrap();
+        let exit = p.exit().unwrap();
+        let ok = matches(&exit, &expected);
+        log_case(p, &exit, ok);
+        failures += !ok as u32;
     }
     failures
 }

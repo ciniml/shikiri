@@ -735,6 +735,22 @@ pub fn service() {
     }
 }
 
+pub fn buffer() -> Option<usize> {
+    state().map(|s| s.fb)
+}
+
+pub fn frames() -> u32 {
+    state().map_or(0, |s| s.frames)
+}
+
+/// Writes back what the CPU drew in `[addr, addr + len)` (whole cache
+/// lines: the range is widened to 128 bytes).
+pub fn flush(addr: usize, len: usize) {
+    let start = addr & !127;
+    let end = (addr + len + 127) & !127;
+    writeback(start, end - start);
+}
+
 /// Logs the frame count and rate.
 pub fn log_stats() -> Result<u32, &'static str> {
     let s = state().ok_or("no display")?;

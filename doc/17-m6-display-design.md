@@ -95,3 +95,11 @@ DSI での ID の読み出し（ILI9881C: page1 の 00/01 = 98 81、ST7123: F4 =
   - 結果: 自己試験と xipcheck の実行を含めて `restarts=0`、アンダーラン 0。`frames` は割り込みの回数なので、カーネルが忙しい間に重なったフレームは 1 回に数えられ、実際より少なく出る（下限）。
 - `psram_init` の前に、前の起動から動いている DMA があれば止める（`display.dma_was_running`）。プローブのリセットのあとでは見られなかった（プローブのリセットで DMA も止まるらしい。推測）。
 - 未解決: `t5log rtt --reset` で、前の起動のログの再生と今回の起動の境目のフレームが壊れることがある（`undecodable frame`。3 回に 2 回）。境目の `log.prev_end` が壊れると、t5log は今回の起動の行も `prev#` と表示する。表示と関係があるかは未確認。
+
+## 11. M6c の実装の記録（2026-10-31）
+- ABI 0.7: `t5_abi::display`（`INFO`、`MAP`、`FLUSH`、`ORIENTATION`、wait の `FRAME`）と `t5_abi::touch`（`read` で 1 点 8 バイト × 最大 5、wait の `CHANGED`）。制御コマンド `rotate 0|90|180|270`。
+- カーネル: `screen.rs`（向き、タッチの状態、display の持ち主）。`display` を開けるのは 1 つだけ（2 つ目は `Busy`）。`ctl(MAP)` で、そのプロセスの PMP にフレームバッファの RW の領域（エントリ 5〜6 の TOR）を足す。ハンドルを閉じるかプロセスが終わると外れる。`touch` を開いているプロセスがいる間だけ、カーネルは 16ms ごとにタッチを読み、向きに合わせた座標にして渡す。
+- `t5-rt`: `Display`（`open` で開いて写像し、`put`/`rect`/`fill` はユーザから見た座標で描く。向きの変換はタッチの逆）、`Touch`、`rgb`。
+- アプリ `paint`（`--permit display --permit touch`）: モード 0 は、上端（ユーザから見た上）に青い帯と左上の白い四角を描き、指の下に四角を描く。モード 1 は自己試験（2 つ目の open が `Busy`、写像したフレームバッファに書ける、`FLUSH` の範囲の検査、`FRAME` が 3 つ来る、`touch` が読める、`touch` への `write` は `Denied`）。
+- 自己試験 M6c: `paint` の自己試験と、`display` を開いていない `fault` がフレームバッファに書くと store access fault になること。表示がない（QEMU）か `paint` がストアにないときは飛ばす。
+- t5emu: `test-p4emu` で、`rotate 180` のあと `run paint 0 1` が `paint.done` まで動くことを確かめる。

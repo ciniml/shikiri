@@ -18,8 +18,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// log_level replace dbg_write. Minor 4 (M3a, doc/14): signed T5A v1 images
 /// (pre-1.0, so no compatibility is kept). Minor 5 (M3d, doc/14 §4): handles,
 /// open/ctl/wait/close and the timer object. Minor 6 (M5c, doc/16 §5):
-/// read/write and the channel object.
-pub const ABI_MINOR: u16 = 6;
+/// read/write and the channel object. Minor 7 (M6c, doc/17 §6): the
+/// display and touch objects.
+pub const ABI_MINOR: u16 = 7;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -106,6 +107,39 @@ pub mod chan {
     pub const READABLE: usize = 1;
     /// `wait` event: nothing is queued and the other end was closed.
     pub const PEER_CLOSED: usize = 2;
+}
+
+/// The display (doc/17 §6): one process at a time gets the framebuffer
+/// mapped into its memory. The framebuffer is the panel's: 720 x 1280
+/// RGB565, rows of 720 pixels, top row first as the panel scans it.
+/// `ORIENTATION` says how the Tab5 is held; apps rotate what they draw.
+pub mod display {
+    pub const NAME: &str = "display";
+    /// ctl: returns width | height << 16 of the framebuffer (pixels).
+    pub const INFO: usize = 1;
+    /// ctl: maps the framebuffer into the caller (read/write); returns its
+    /// address. Stays mapped until the handle is closed.
+    pub const MAP: usize = 2;
+    /// ctl: a2 = first row | (end row << 16): makes those rows visible
+    /// (writes them back from the cache).
+    pub const FLUSH: usize = 3;
+    /// ctl: returns the orientation in quarter turns clockwise (0-3): how
+    /// far the panel's top is turned from the top the user sees.
+    pub const ORIENTATION: usize = 4;
+    /// `wait` event: frames were sent to the panel (value = how many).
+    pub const FRAME: usize = 1;
+}
+
+/// Touch input (doc/17 §6). Points are in the orientation's coordinates
+/// (`display::ORIENTATION`): x to the right, y down as the user sees it.
+pub mod touch {
+    pub const NAME: &str = "touch";
+    /// Points `read` returns at most.
+    pub const MAX_POINTS: usize = 5;
+    /// Bytes per point: u16 x, y, id, size (little-endian).
+    pub const POINT_SIZE: usize = 8;
+    /// `wait` event: the touch changed (value = points now, 0 = released).
+    pub const CHANGED: usize = 1;
 }
 
 /// Error codes. A syscall returns `-(code as isize)` in a0 on failure.

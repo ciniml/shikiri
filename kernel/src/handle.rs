@@ -3,15 +3,18 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, chan, rights, timer};
+use t5_abi::{Error, MAX_HANDLES, chan, display, rights, timer, touch};
 
 use crate::channel;
+use crate::screen::{DisplayHandle, TouchHandle};
 use crate::platform::{Current, Platform};
 use crate::time;
 
 pub enum Object {
     Timer(Timer),
     Channel(channel::End),
+    Display(DisplayHandle),
+    Touch(TouchHandle),
 }
 
 impl Object {
@@ -20,6 +23,8 @@ impl Object {
     fn open(name: &[u8], pid: u32) -> Result<(Object, usize), Error> {
         match name {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
+            n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT)),
+            n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open()?), rights::READ | rights::WAIT)),
             n if n.starts_with(chan::PREFIX.as_bytes()) => {
                 let end = channel::open(&n[chan::PREFIX.len()..], pid)?;
                 Ok((Object::Channel(end), rights::READ | rights::WRITE | rights::WAIT))
@@ -127,23 +132,37 @@ impl Table {
     pub fn ctl(&mut self, h: usize, op: usize, arg: u64) -> Result<usize, Error> {
         match &mut self.get(h, rights::CTL)?.object {
             Object::Timer(t) => t.ctl(op, arg),
-            Object::Channel(_) => Err(Error::NoSupport),
+            Object::Display(d) => d.ctl(op, arg),
+            Object::Channel(_) | Object::Touch(_) => Err(Error::NoSupport),
         }
+    }
+
+    /// Whether `h` is the display handle.
+    pub fn is_display(&self, h: usize) -> bool {
+        h.checked_sub(1)
+            .and_then(|i| self.slots.get(i))
+            .is_some_and(|s| matches!(s, Some(Handle { object: Object::Display(_), .. })))
+    }
+
+    /// Whether any handle is the display.
+    pub fn has_display(&self) -> bool {
+        self.slots.iter().flatten().any(|s| matches!(s.object, Object::Display(_)))
     }
 
     /// `write`: `buf` is the caller's data, already copied in.
     pub fn write(&mut self, h: usize, buf: &[u8]) -> Result<usize, Error> {
         match &self.get(h, rights::WRITE)?.object {
             Object::Channel(e) => e.write(buf),
-            Object::Timer(_) => Err(Error::NoSupport),
+            _ => Err(Error::NoSupport),
         }
     }
 
     /// `read` into `buf` (kernel memory, copied out by the caller).
     pub fn read(&mut self, h: usize, buf: &mut [u8]) -> Result<usize, Error> {
-        match &self.get(h, rights::READ)?.object {
+        match &mut self.get(h, rights::READ)?.object {
             Object::Channel(e) => e.read(buf),
-            Object::Timer(_) => Err(Error::NoSupport),
+            Object::Touch(t) => t.read(buf),
+            _ => Err(Error::NoSupport),
         }
     }
 
@@ -166,6 +185,8 @@ impl Table {
                 (t.pending > 0).then(|| (i, timer::EXPIRED, core::mem::take(&mut t.pending) as usize))
             }
             Object::Channel(e) => e.poll().map(|(ev, v)| (i, ev, v)),
+            Object::Display(d) => d.poll().map(|(ev, v)| (i, ev, v)),
+            Object::Touch(t) => t.poll().map(|(ev, v)| (i, ev, v)),
         })
     }
 
@@ -174,8 +195,9 @@ impl Table {
         hs.iter()
             .filter_map(|&h| match &self.get(h as usize, rights::WAIT).ok()?.object {
                 Object::Timer(t) => t.next,
-                // Woken by the writer's process, not by time.
-                Object::Channel(_) => None,
+                // Woken by the writer's process, a frame or the touch
+                // poll, not by time.
+                Object::Channel(_) | Object::Display(_) | Object::Touch(_) => None,
             })
             .min()
     }

@@ -8,10 +8,11 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo
+APPS       := hello fault ticker spin timers echo paint
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
 PERMIT_echo   := --permit chan:echo
+PERMIT_paint  := --permit display --permit touch
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin
@@ -279,9 +280,9 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	@# write to IO expander #2. The display comes up and keeps refreshing
 	@# (frames counted by `display`).
 	$(T5EMU) --quiet --linger-ms 1500 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
-	    --ctl "i2cscan" --ctl "touch 1" --ctl "display" \
+	    --ctl "i2cscan" --ctl "touch 1" --ctl "display" --ctl "rotate 180" --ctl "run paint 0 1" --ctl "wait-ms 1500" \
 	    --expect-event display.panel --expect-event i2c.found --expect-event touch.point \
-	    --expect-event display.ready --expect-event display.stats \
+	    --expect-event display.ready --expect-event display.stats --expect-event paint.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is

@@ -13,6 +13,9 @@
 //! | 2     | text.end         | TOR, R-X     |
 //! | 3     | data.start       | OFF (bottom) |
 //! | 4     | data.end         | TOR, RW-     |
+//! | 5     | shared.start     | OFF (bottom) |
+//! | 6     | shared.end       | TOR, RW- (only with a shared region: the
+//! |       |                  | framebuffer, doc/17 §6) |
 
 use super::csr::{read_csr, write_csr};
 
@@ -84,6 +87,8 @@ pub struct Region {
     pub text: core::ops::Range<usize>,
     /// Data, bss and stack (RW-).
     pub data: core::ops::Range<usize>,
+    /// Memory the kernel lent the process (RW-): the framebuffer.
+    pub shared: Option<core::ops::Range<usize>>,
 }
 
 /// Grants U-mode R-X on `text` and RW- on `data`.
@@ -96,8 +101,16 @@ pub fn set_process(r: &Region) {
     write_csr!("pmpaddr2", r.text.end >> 2);
     write_csr!("pmpaddr3", r.data.start >> 2);
     write_csr!("pmpaddr4", r.data.end >> 2);
+    let shared = match &r.shared {
+        Some(s) => {
+            write_csr!("pmpaddr5", s.start >> 2);
+            write_csr!("pmpaddr6", s.end >> 2);
+            A_TOR | R | W
+        }
+        None => 0,
+    };
     let cfg0 = u32::from_le_bytes([0, 0, A_TOR | R | X, 0]);
-    let cfg1 = u32::from_le_bytes([A_TOR | R | W, 0, 0, 0]);
+    let cfg1 = u32::from_le_bytes([A_TOR | R | W, 0, shared, 0]);
     write_csr!("pmpcfg0", cfg0 as usize);
     write_csr!("pmpcfg1", cfg1 as usize);
 }

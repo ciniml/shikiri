@@ -4,7 +4,7 @@ use t5_abi::log::{self as wire, Addr};
 use t5_abi::{Error, WAIT_MAX, event, sys};
 
 use crate::arch::riscv32::csr::cause;
-use crate::arch::riscv32::pmp::Region;
+use crate::arch::riscv32::pmp::{self, Region};
 use crate::arch::riscv32::trap::{TrapFrame, reg};
 use crate::handle;
 use crate::loader::Loaded;
@@ -149,8 +149,28 @@ impl Process {
             sys::LOG_EMIT => self.log_emit(a0, a1).map(|_| [0, 0, 0]),
             sys::LOG_LEVEL => Ok([log::KEEP as usize, 0, 0]),
             sys::OPEN => self.open(a0, a1, a2).map(|h| [h, 0, 0]),
-            sys::CLOSE => self.handles.close(a0).map(|_| [0, 0, 0]),
-            sys::CTL => self.handles.ctl(a0, a1, ((a3 as u64) << 32) | a2 as u64).map(|v| [v, 0, 0]),
+            sys::CLOSE => {
+                let r = self.handles.close(a0);
+                if self.region.shared.is_some() && !self.handles.has_display() {
+                    self.region.shared = None;
+                    pmp::set_process(&self.region);
+                }
+                r.map(|_| [0, 0, 0])
+            }
+            sys::CTL => {
+                let r = self.handles.ctl(a0, a1, ((a3 as u64) << 32) | a2 as u64);
+                if let Ok(fb) = r
+                    && a1 == t5_abi::display::MAP
+                    && self.handles.is_display(a0)
+                    && let Some((_, len)) = Current::display_buffer()
+                {
+                    // The framebuffer becomes the process's until it closes
+                    // the handle (doc/17 §6).
+                    self.region.shared = Some(fb..fb + len);
+                    pmp::set_process(&self.region);
+                }
+                r.map(|v| [v, 0, 0])
+            }
             sys::WAIT => match self.wait(a0, a1, ((a3 as u64) << 32) | a2 as u64) {
                 Ok(Some(r)) => Ok(r),
                 Ok(None) => return Next::Switch,

@@ -675,6 +675,22 @@ impl Platform for Esp32p4v1 {
         display::service();
     }
 
+    fn display_buffer() -> Option<(usize, usize)> {
+        display::buffer().map(|fb| (fb, display::FB_BYTES))
+    }
+
+    fn display_size() -> Option<(u16, u16)> {
+        display::buffer().map(|_| (display::WIDTH as u16, display::HEIGHT as u16))
+    }
+
+    fn display_flush(addr: usize, len: usize) {
+        display::flush(addr, len);
+    }
+
+    fn display_frames() -> u32 {
+        display::frames()
+    }
+
     fn display_stats() -> Result<u32, &'static str> {
         display::log_stats()
     }

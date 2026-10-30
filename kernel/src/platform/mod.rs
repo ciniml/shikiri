@@ -130,6 +130,21 @@ pub trait Platform {
     /// Keeps the display refreshing (restarts the frame DMA when a frame is
     /// done). Called from the scheduler loop.
     fn display_service() {}
+    /// The framebuffer (address, bytes) once the display runs.
+    fn display_buffer() -> Option<(usize, usize)> {
+        None
+    }
+    /// The framebuffer's width and height in pixels.
+    fn display_size() -> Option<(u16, u16)> {
+        None
+    }
+    /// Makes `len` bytes of the framebuffer from `addr` visible to the
+    /// display (writes them back from the cache).
+    fn display_flush(_addr: usize, _len: usize) {}
+    /// Frames sent to the panel so far.
+    fn display_frames() -> u32 {
+        0
+    }
     /// Logs the display's frame count and rate.
     fn display_stats() -> Result<u32, &'static str> {
         Err("no display")
@@ -160,6 +175,7 @@ pub trait Platform {
 }
 
 /// The display panel (Tab5 lots, doc/06 §7).
+#[cfg_attr(not(feature = "platform-esp32p4v1"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
     /// No board support, or the IO expander did not answer.
