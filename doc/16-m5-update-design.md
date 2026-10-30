@@ -244,3 +244,4 @@
 - `t5-rt`: `Handle::read`/`write`、`Channel`（`open`、`send` は Busy なら yield してやり直す、`recv` は空なら wait、相手が閉じたら `Error::Off`）。
 - アプリ `echo`（`--permit chan:echo`）と自己試験 M5c（echo のサーバ・クライアントと spin を同時に）。`echo` は省略できる（ストアになければ M5c を飛ばす。実機のストアには、インストールするまで入っていない）。
 - 結果（QEMU）: クライアントは、`chan:secret` が `Denied`、3 つ目の `open` が `Busy`、257 バイトが `Size`、`ctl` が `Denied`、キューを埋めると 4 つ目のあとで `Busy`、長さ 0 のバッファでの `read` が `Size`（メッセージは残る）、を確かめたうえで 44 個のメッセージ（0〜256 バイト、計 4711 バイト）の往復を確かめた。サーバはクライアントの終了で `PEER_CLOSED` を受けて終わった。t5emu でも同じ。
+- 実機（2026-10-31、[logs/m5c-chan-tab5-20261031.txt](logs/m5c-chan-tab5-20261031.txt)）: 利用者が `install build/apps/echo.t5a` を実行し、リセット後の自己試験で M5c が合格した（`failures=0`）。QEMU と同じく、拒否・Busy・Size の確かめのあと 44 個（計 4711 バイト）の往復。クライアントの `chan.open` から `echo.done` まで約 1.8 ms（360MHz）。サーバは `PEER_CLOSED` で終わり、両端とも `dropped=0`。
