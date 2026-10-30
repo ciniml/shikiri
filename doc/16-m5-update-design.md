@@ -1,7 +1,7 @@
 # 16. M5: 更新（カーネルの A/B とロールバック、アプリの A/B、IPC）
 
 - 日付: 2026-10-30
-- 状態: **M5a を実装した。t5emu で確認し、実機では otadata の読み取り（CRC が実物と一致）まで確認した。実機での更新とロールバックの試験は未実施（§6）**
+- 状態: **M5a を実装した。t5emu と実機で、正しい更新の確定と、パニックするカーネルからのロールバックを確認した。自己試験の失敗による戻りは、実機では結果の推定にとどまる（§6.4）**
 - 前提: doc/05（更新の調査）、doc/14（T5A、アプリストア、制御チャネル、インストール）、boot/（ロールバック有効の ESP-IDF 6.0 ブートローダ、パーティション表）
 - 出典の表記: `~/esp-idf/6.0/components/` からの相対パス。（推測）は推測、（判断）は設計判断。
 
@@ -115,10 +115,22 @@
 - **実機**: 新しいカーネル（ota_0）の起動時の `kinfo` で、ブートローダが書いたエントリ（`seq 1, valid`）の CRC が、カーネルの計算と一致した（`crc_ok=true`）。自分のスロットを 0 と正しく判定した。
 - QEMU virt: スロットが分からないので、更新は受け付けない（自己試験は通る）。
 
-### 6.3 実機の試験の手順（未実施。ota_1 と otadata を書き換える）
+### 6.3 実機の試験の手順（ota_1 と otadata を書き換える）
 `PROBE=303a:1001:30:ED:A0:E0:CB:86` として:
 1. `make kupdate PROBE=$PROBE T5K=build/kupdate/good.t5k` → 再起動後、`make rtt PROBE=$PROBE CMD=kinfo` で、ota_1 の 0.1.1-good が動き、`kupdate.confirmed` が出て、otadata の seq 2 が `valid` になっていること。
 2. `make kupdate PROBE=$PROBE T5K=build/kupdate/bad-selftest.t5k` → 新しいカーネル（ota_0）は自己試験に失敗して `kupdate.rejected` を出し、再起動する。ブートローダは ota_1 の 0.1.1-good を起動し、`kupdate.rolled_back`（seq 3、invalid）が出ること。
 3. `make kupdate PROBE=$PROBE T5K=build/kupdate/bad-panic.t5k` → **10 秒ほどプローブをつながない**（つなぐとウォッチドッグが止まり、リセットされない）。パニック → RWDT → ブートローダが ABORTED にして ota_1 に戻る。そのあと `kinfo` で `kupdate.rolled_back`（aborted）が出ること。
 4. `make kupdate PROBE=$PROBE`（開発版。secure_version 0）→ `secure_version rollback` で拒否されること。`make kupdate PROBE=$PROBE T5K=build/kupdate/tampered.t5k` → `bad signature`。
 5. 元に戻す: `make flash-kernel-p4 PORT=/dev/ttyACM3`（ota_0 に開発版を書き、otadata を消す）。
+
+### 6.4 実機の結果（2026-10-30。[logs/m5a-kupdate-tab5-20261030.txt](logs/m5a-kupdate-tab5-20261030.txt)）
+手順 1〜3 を、利用者が 1 回の入力で続けて実行した（t5log は再起動をまたいでつながったままだった）。
+- **正しい更新**: 98KB の書き込みに 1.7 秒（消去 25 回、書き込み 385 回）、署名の確認 95ms。otadata のセクタ 1 に `seq 2, new` を書いた。再起動後、ブートローダは `pending_verify` にして ota_1 の 0.1.1-good を起動した（reset_cause 3 = ソフトウェアによるシステムリセット）。PVT と 360MHz、自己試験も通り、最終的に `seq 2` は `valid` になった（確定）。
+- **パニックするカーネル**: ota_0 に `seq 5` で入った。起動直後に `kernel.panic` を出して止まり、次の起動でブートローダが `seq 5` を `aborted` にし、ota_1 の 0.1.1-good に戻った。カーネルは `kupdate.rolled_back`（ota_seq 5、aborted、slot 0）を出した。
+  - ただし **自動ではリセットされなかった**。プローブがつながったままで、ウォッチドッグが止まっていたため（§6.3 の注意のとおり）。プローブからリセットして戻した。プローブがなければ RWDT でリセットされるはず（推測。M2 の L3 試験で、パニック → RWDT のリセットは確認済み）。
+- **自己試験に失敗するカーネル**: そのときのログは残っていない（次の更新で上書きされた）。ただし、パニックするカーネルの seq が 4 ではなく 5 になったことから、その前にセクタ 0 に CRC の正しい `seq 3` があった（ota_0 を指す）と分かり、それが有効なまま選ばれていなかった（invalid）ことと矛盾しない。直接の確認は、もう一度単独で行う必要がある。
+- 手順 4（ダウングレードと改ざんの拒否）は、実機では未実施（t5emu では改ざんの拒否を確認）。
+
+### 6.5 分かったこと・残っていること
+- プローブ（probe-rs）がつながっている間は、パニックしたカーネルは戻らない。カーネルのパニック処理で、`pending_verify` で起動していたら自分でリセットする（RWDT を待たない）ようにすると、プローブの有無によらず戻れる（判断。L3 の試験は、確定済みのカーネルで行えばよい）。
+- 今の Tab5 は、ota_1 の 0.1.1-good（secure_version 1）で動いている。開発版（secure_version 0）は `kupdate` では入らないので、`make flash-kernel-p4` で ota_0 に戻す。

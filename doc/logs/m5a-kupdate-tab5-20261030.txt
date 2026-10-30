@@ -1,0 +1,42 @@
+# M5a kernel update on the Tab5, 2026-10-30.
+## 0. before: dev kernel 0.1.0 in ota_0 (kinfo after espflash write of ota_0)
+   kupdate.otadata sector=0 ota_seq=1 state=valid crc_ok=true valid=true   (written by the bootloader)
+   kupdate.otadata sector=1 ota_seq=4294967295 state=undefined
+## 1-3. user ran: make kupdate T5K=good, then bad-selftest, then bad-panic (one input; t5log stayed attached)
+## 1. good (excerpt of the user's terminal)
+1139.682078 I kernel kupdate.begin length=98316 slot=1
+1141.418079 I kernel kupdate.written length=98316 erases=25 writes=385 max_us=20097 ms=1735
+1141.512812 I kernel kupdate.verified slot=1 version=0.1.1-good secure_version=1 chip_rev=100 verify_us=94591
+1141.516704 I kernel kupdate.ready slot=1 ota_seq=2 sector=1 version=0.1.1-good
+1141.516882 I kernel kernel.reboot
+   0.135385 I kernel boot.start platform=esp32p4-v1.x boot_id=24 reset_cause=3 abi_major=0 abi_minor=5
+   0.151318 I kernel kupdate.otadata sector=0 ota_seq=1 state=valid crc_ok=true valid=true
+   0.151413 I kernel kupdate.otadata sector=1 ota_seq=2 state=pending_verify crc_ok=true valid=true
+   0.151592 I kernel kupdate.slot slot=0 running=false version=0.1.0 secure_version=0 len=98224
+   0.151704 I kernel kupdate.slot slot=1 running=true version=0.1.1-good secure_version=1 len=98224
+   0.329907 I kernel clock.cpu mhz=360 measured_khz=359998
+## 3. after bad-panic: the core stayed stopped (probe attached -> watchdog off) until a probe reset (t5log --reset --cmd kinfo)
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+   0.133442 I kernel log.prev_begin boot_id=27 bytes=1248
+prev#27    0.124928 I kernel boot.start platform=esp32p4-v1.x boot_id=27 reset_cause=3 abi_major=0 abi_minor=5
+prev#27    0.140535 I kernel kupdate.otadata sector=0 ota_seq=5 state=pending_verify crc_ok=true valid=true
+prev#27    0.140622 I kernel kupdate.otadata sector=1 ota_seq=2 state=valid crc_ok=true valid=true
+prev#27    0.140764 I kernel kupdate.slot slot=0 running=true version=0.1.1-bad-panic secure_version=1 len=19552
+prev#27    0.140872 I kernel kupdate.slot slot=1 running=false version=0.1.1-good secure_version=1 len=98224
+prev#27    0.141039 E kernel kernel.panic file=src/main.rs line=136 msg=test-bad-panic: this kernel must be rolled back
+   0.135186 I kernel log.prev_end boot_id=27 frames=30
+   0.135306 I kernel boot.start platform=esp32p4-v1.x boot_id=28 reset_cause=24 abi_major=0 abi_minor=5
+   0.151175 I kernel kupdate.otadata sector=0 ota_seq=5 state=aborted crc_ok=true valid=false
+   0.151271 I kernel kupdate.otadata sector=1 ota_seq=2 state=valid crc_ok=true valid=true
+   0.151436 I kernel kupdate.slot slot=0 running=false version=0.1.1-bad-panic secure_version=1 len=19552
+   0.151562 I kernel kupdate.slot slot=1 running=true version=0.1.1-good secure_version=1 len=98224
+   0.151680 W kernel kupdate.rolled_back ota_seq=5 state=aborted slot=0
+   1.508685 I kernel selftest.result failures=0 pass=true
+t5log: -> #1 kinfo
+   1.529271 I kernel kupdate.otadata sector=0 ota_seq=5 state=aborted crc_ok=true valid=false
+   1.529340 I kernel kupdate.otadata sector=1 ota_seq=2 state=valid crc_ok=true valid=true
+   1.529505 I kernel kupdate.slot slot=0 running=false version=0.1.1-bad-panic secure_version=1 len=19552
+   1.529613 I kernel kupdate.slot slot=1 running=true version=0.1.1-good secure_version=1 len=98224
+   1.529680 W kernel kupdate.rolled_back ota_seq=5 state=aborted slot=0
+   1.529741 I kernel ctl.done request_id=1 cmd=kinfo ok=true value=0
