@@ -231,7 +231,10 @@ fn replay(prev: &RingHeader) {
     let mut frames = 0u32;
     // After a wrap the oldest frame is cut; skip to its terminator.
     let mut synced = prev.wrapped == 0;
-    let mut chunk = [0u8; 64];
+    // Whole frames only: a sink that is full drops what it cannot take, and
+    // a dropped piece of a frame would corrupt it and the one after it
+    // (seen on RTT while the host caught up during boot, doc/17 §11).
+    let mut frame = [0u8; FRAME_MAX];
     let mut n = 0;
     for i in 0..len {
         let b = unsafe { core::ptr::read_volatile(base.add((start + i) % RING_SIZE)) };
@@ -239,13 +242,17 @@ fn replay(prev: &RingHeader) {
             synced = b == 0;
             continue;
         }
-        chunk[n] = b;
+        if n == frame.len() {
+            // Longer than any frame: damaged; drop up to the next terminator.
+            synced = b == 0;
+            n = 0;
+            continue;
+        }
+        frame[n] = b;
         n += 1;
         if b == 0 {
             frames += 1;
-        }
-        if n == chunk.len() || i + 1 == len {
-            output(&chunk[..n]);
+            output(&frame[..n]);
             n = 0;
         }
     }
@@ -265,11 +272,15 @@ fn save_header() {
     unsafe { core::ptr::write_volatile(header(), h) };
 }
 
-/// Raw bytes to RTT and the console, as whole frames (replay only).
+/// A whole, already encoded frame to RTT and the console (replay only).
+/// On RTT it leaves room for `log.prev_end` and the first frames of this
+/// boot: the ring (16 KiB) is larger than the RTT buffer (8 KiB), and a
+/// host that is not reading yet would otherwise lose the end of the
+/// replay, and with it the line between the two boots.
 fn output(bytes: &[u8]) {
-    // Replayed frames are already COBS-encoded; RTT takes them unsplit only
-    // if they fit, so a partial chunk at the end of a frame is fine here.
-    let _ = rtt_write(bytes);
+    if !rtt_write_leaving(bytes, 4 * FRAME_MAX) {
+        state().rtt_dropped += 1;
+    }
     let _ = Current::console_write(bytes);
 }
 
@@ -383,6 +394,11 @@ fn ring_push(bytes: &[u8]) {
 /// Appends a whole frame to the RTT up-buffer, or nothing if it does not fit
 /// (the host has not read far enough, or no host is attached).
 fn rtt_write(frame: &[u8]) -> bool {
+    rtt_write_leaving(frame, 0)
+}
+
+/// As `rtt_write`, but only if `keep` bytes stay free afterwards.
+fn rtt_write_leaving(frame: &[u8], keep: usize) -> bool {
     unsafe {
         let up = core::ptr::addr_of_mut!((*rtt()).up[0]);
         let size = RTT_UP_SIZE;
@@ -392,7 +408,7 @@ fn rtt_write(frame: &[u8]) -> bool {
             return false; // corrupted by the host
         }
         let free = if rd > wr { rd - wr - 1 } else { size - (wr - rd) - 1 };
-        if frame.len() > free {
+        if frame.len() + keep > free {
             return false;
         }
         let buf = core::ptr::addr_of_mut!(RTT_UP).cast::<u8>();
