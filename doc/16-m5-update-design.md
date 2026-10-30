@@ -89,6 +89,33 @@
 - 新しい版は `PendingVerify` で入る。最初の起動から一定時間（例: 2 秒）異常終了しないか、アプリが `confirm` を呼べば `Valid` にし、前の版を消す。`PendingVerify` のまま異常終了すれば、前の版に戻す。
 - 詳しい状態遷移と、カタログの形式の変更（版を上げる）は、実装の前にここへ足す。
 
+### 4.1 カタログの変更（形式 v2）
+- エントリの `state` に `Previous = 4` を足す。同じ名前のエントリは、「今の版」（`Valid` か `PendingVerify`）1 つと、`Previous` 1 つまで。カタログの `version` を 2 にする。カーネルは v1 と v2 を読み、v2 を書く（v1 には `Previous` がないので、そのまま読める）。
+- 名前で引く（`run`、自動起動、XIP のエクステント）のは、今の版だけ。`Previous` は戻るためだけに残す。
+- カタログの書き込みは今までどおり A/B の 2 セクタで、1 回の書き込みで状態が切り替わる（途中で電源が切れても、どちらかの状態のまま）。
+
+### 4.2 状態遷移
+| きっかけ | 前 | 後 | イベント |
+|---|---|---|---|
+| install（同じ名前の版がない） | なし | `Valid` | `store.installed` |
+| install（`Valid` の版がある） | 旧 `Valid` | 新 `PendingVerify` ＋ 旧 `Previous`（それより前の `Previous` は消す） | `store.installed pending=true` |
+| install（`PendingVerify` の版がある） | 新 `PendingVerify` ＋ `Previous` | 新しいほうを `PendingVerify` に（確かめていない版は消す）、`Previous` は残す | 同上 |
+| `PendingVerify` の版のプロセスが、普通に終わる（終了コードは問わない）か、2 秒動き続ける | `PendingVerify` ＋ `Previous` | `Valid`、`Previous` を消す | `store.confirmed` |
+| `PendingVerify` の版のプロセスが、例外で止められる（`proc.fault`） | `PendingVerify` ＋ `Previous` | `Previous` を `Valid` に戻し、新しい版を消す | `store.rolled_back` |
+| ホストからの `kill` | — | 変えない（アプリのせいではない） | — |
+| `remove NAME` | どれでも | 両方消す | `store.removed` |
+| `rollback NAME`（新しい制御コマンド。試験と手動用） | `PendingVerify` か `Valid` ＋ `Previous` | `Previous` を `Valid` に戻す | `store.rolled_back` |
+
+- 消したエントリのエクステントは、空きに戻る。ただし動いている XIP のプロセスのテキストは、今と同じく `busy` で守る（doc/15 §4）。
+- 再起動をまたいでも `PendingVerify` のまま。次に動かしたときに決まる。
+- secure_version: install のときの比較は、今の版と `Previous` の大きいほうと比べる。`PendingVerify` の版から `Previous` に戻ることは許す（新しい版が動かなかったので、まだ「上げた」ことにはしない。ESP-IDF の anti-rollback も、確定したときに eFuse を上げる）。
+- アプリから確定するシステムコール（`confirm`）は、M5b では足さない。2 秒の規則で足りないアプリが出てきたら足す（ABI の minor を上げる）。
+
+### 4.3 試験（エミュレータ）
+- greeter 0.1 の上に greeter 0.2 を入れる → `PendingVerify` ＋ `Previous` → 動かすと普通に終わる → `store.confirmed`、`list` で 1 つだけ。
+- greeter の上に、例外で止まるアプリ（`fault` を `--name greeter --version 0.3.0` で署名したもの）を入れる → 動かすと `proc.fault` → `store.rolled_back` → もう一度動かすと元の greeter が `hello.greet` を出す。
+- `rollback`、`remove` で両方消えること、XIP のアプリでの同じ流れ。
+
 ## 5. M5c: IPC チャネル（方針）
 - ハンドルの種類に「チャネル」を足す。`open("chan:NAME")` で両端をつなぎ、`write` でメッセージ（最大 256 バイト程度）を送り、相手は `wait` で受信を待って `read` で取り出す。権限は Permissions TLV の名前で与える。
 - カーネルの中にメッセージのキュー（固定長）を持つ。共有メモリ（`shm_map`）は M6 の表示で考える。
