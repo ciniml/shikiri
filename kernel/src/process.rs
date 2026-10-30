@@ -263,7 +263,9 @@ impl Process {
     /// `read`/`write` through a kernel buffer: the user range is checked,
     /// then copied in (write) or out (read).
     fn io(&mut self, h: usize, ptr: usize, len: usize, write: bool) -> Result<usize, Error> {
-        let mut buf = [0u8; t5_abi::chan::MSG_MAX];
+        // The largest transfer of any object: SD sectors (4 KiB). Channels
+        // refuse messages over `chan::MSG_MAX` themselves.
+        let mut buf = [0u8; t5_abi::sd::MAX_IO];
         if write && len > buf.len() {
             return Err(Error::Size);
         }

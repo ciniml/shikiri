@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, rights, shm, svc, sys, timer, touch};
+pub use t5_abi::{Error, FOREVER, chan, display, event, fs, rights, sd, shm, svc, sys, timer, touch};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -392,6 +392,113 @@ impl Channel {
     /// The shared memory the other end granted (`Error::Busy` if none).
     pub fn take_shm(&self) -> Result<Shm, Error> {
         self.0.ctl(chan::TAKE_SHM, 0).map(|h| Shm(Handle(h as u32)))
+    }
+}
+
+/// A connection to the file service (doc/18 §5). Needs `--permit svc:fs`.
+/// Data moves through the 64 KiB slice the service grants (`slice`).
+pub struct Files {
+    chan: Channel,
+    _shm: Shm,
+    pub slice: &'static mut [u8],
+}
+
+/// A file the service opened for us.
+#[derive(Clone, Copy, Debug)]
+pub struct FileId {
+    pub id: u32,
+    pub size: u32,
+}
+
+/// A failed request: the service's `fs::status`, or a channel error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsError {
+    Status(u32),
+    Ipc(Error),
+}
+
+impl Files {
+    pub fn connect() -> Result<Files, FsError> {
+        let chan = Channel::connect(fs::SERVICE).map_err(FsError::Ipc)?;
+        let ev = wait(&[&chan.0], FOREVER).map_err(FsError::Ipc)?;
+        if ev.kind != chan::SHM {
+            return Err(FsError::Ipc(Error::Off));
+        }
+        let shm = chan.take_shm().map_err(FsError::Ipc)?;
+        let slice = shm.map().map_err(FsError::Ipc)?;
+        Ok(Files { chan, _shm: shm, slice })
+    }
+
+    fn call(&self, op: u8, flags: u8, a: u32, b: u32, path: &str) -> Result<(u32, u32), FsError> {
+        let mut m = [0u8; chan::MSG_MAX];
+        let n = fs::request(op, flags, a, b, path, &mut m).ok_or(FsError::Status(fs::status::BAD_NAME))?;
+        self.chan.send(&m[..n]).map_err(FsError::Ipc)?;
+        let mut r = [0u8; chan::MSG_MAX];
+        let k = self.chan.recv(&mut r).map_err(FsError::Ipc)?;
+        if k < fs::REPLY_SIZE {
+            return Err(FsError::Ipc(Error::Size));
+        }
+        match fs::u32_at(&r, 0) {
+            fs::status::OK => Ok((fs::u32_at(&r, 4), fs::u32_at(&r, 8))),
+            s => Err(FsError::Status(s)),
+        }
+    }
+
+    pub fn open(&self, path: &str, flags: u8) -> Result<FileId, FsError> {
+        self.call(fs::op::OPEN, flags, 0, 0, path).map(|(id, size)| FileId { id, size })
+    }
+
+    /// Reads up to `buf.len()` bytes; 0 at the end.
+    pub fn read(&mut self, f: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
+        let mut done = 0;
+        while done < buf.len() {
+            let want = (buf.len() - done).min(fs::SLICE);
+            let (n, _) = self.call(fs::op::READ, 0, f.id, want as u32, "")?;
+            let n = n as usize;
+            buf[done..done + n].copy_from_slice(&self.slice[..n]);
+            done += n;
+            if n < want {
+                break;
+            }
+        }
+        Ok(done)
+    }
+
+    pub fn write(&mut self, f: FileId, data: &[u8]) -> Result<(), FsError> {
+        for chunk in data.chunks(fs::SLICE) {
+            self.slice[..chunk.len()].copy_from_slice(chunk);
+            self.call(fs::op::WRITE, 0, f.id, chunk.len() as u32, "")?;
+        }
+        Ok(())
+    }
+
+    pub fn seek(&self, f: FileId, offset: u32) -> Result<(), FsError> {
+        self.call(fs::op::SEEK, 0, f.id, offset, "").map(|_| ())
+    }
+
+    pub fn close(&self, f: FileId) -> Result<(), FsError> {
+        self.call(fs::op::CLOSE, 0, f.id, 0, "").map(|_| ())
+    }
+
+    /// Calls `each(name, size, is_dir)` for the entries of directory `path`
+    /// ("" = root); returns how many there are.
+    pub fn list(&self, path: &str, mut each: impl FnMut(&str, u32, bool)) -> Result<u32, FsError> {
+        let (n, total) = self.call(fs::op::LIST, 0, 0, 0, path)?;
+        for k in 0..n as usize {
+            let rec = &self.slice[k * fs::ENTRY_SIZE..(k + 1) * fs::ENTRY_SIZE];
+            let name_len = rec[..fs::ENTRY_NAME].iter().position(|&b| b == 0).unwrap_or(fs::ENTRY_NAME);
+            let name = core::str::from_utf8(&rec[..name_len]).unwrap_or("?");
+            each(name, fs::u32_at(rec, fs::ENTRY_NAME), rec[fs::ENTRY_NAME + 4] & fs::ATTR_DIR != 0);
+        }
+        Ok(total)
+    }
+
+    pub fn delete(&self, path: &str) -> Result<(), FsError> {
+        self.call(fs::op::DELETE, 0, 0, 0, path).map(|_| ())
+    }
+
+    pub fn mkdir(&self, path: &str) -> Result<(), FsError> {
+        self.call(fs::op::MKDIR, 0, 0, 0, path).map(|_| ())
     }
 }
 

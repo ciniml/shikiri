@@ -5,6 +5,7 @@
 #![no_std]
 
 pub mod ctl;
+pub mod fs;
 pub mod log;
 pub mod otadata;
 pub mod store;
@@ -20,8 +21,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// open/ctl/wait/close and the timer object. Minor 6 (M5c, doc/16 §5):
 /// read/write and the channel object. Minor 7 (M6c, doc/17 §6): the
 /// display and touch objects. Minor 8 (N0a, doc/19): service channels
-/// (`listen:`/`svc:`). Minor 9 (N0b, doc/19 §2): shared memory.
-pub const ABI_MINOR: u16 = 9;
+/// (`listen:`/`svc:`). Minor 9 (N0b, doc/19 §2): shared memory. Minor 10
+/// (M7c, doc/18 §3): the `sd` object.
+pub const ABI_MINOR: u16 = 10;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -136,6 +138,19 @@ pub mod shm {
     pub const fn grant_arg(chan: u32, offset: usize, len: usize) -> u64 {
         chan as u64 | ((offset / GRAIN) as u64) << 8 | ((len / GRAIN) as u64) << 32
     }
+}
+
+/// The SD card as sectors (doc/18 §3), for the file service: one opener at
+/// a time. `read`/`write` move whole sectors (at most `MAX_IO` bytes) at
+/// the position and advance it.
+pub mod sd {
+    pub const NAME: &str = "sd";
+    pub const SECTOR: usize = 512;
+    pub const MAX_IO: usize = 4096;
+    /// ctl: returns the number of sectors.
+    pub const SECTORS: usize = 1;
+    /// ctl: a2 = sector number: the position of the next read or write.
+    pub const SEEK: usize = 2;
 }
 
 /// Service channels (doc/19): many clients, one server. The server opens

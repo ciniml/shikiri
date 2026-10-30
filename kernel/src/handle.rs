@@ -3,7 +3,7 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, chan, display, rights, shm, svc, timer, touch};
+use t5_abi::{Error, MAX_HANDLES, chan, display, rights, sd, shm, svc, timer, touch};
 
 use crate::channel;
 use crate::screen::{DisplayHandle, TouchHandle};
@@ -21,6 +21,61 @@ pub enum Object {
     Touch(TouchHandle),
     Listener(channel::Listener),
     Shm(ShmHandle),
+    Sd(SdHandle),
+}
+
+/// The SD card's sectors (doc/18 §3): one handle at a time.
+pub struct SdHandle {
+    pos: u32,
+    sectors: u32,
+}
+
+static mut SD_OPEN: bool = false;
+
+impl SdHandle {
+    fn open() -> Result<SdHandle, Error> {
+        if unsafe { SD_OPEN } {
+            return Err(Error::Busy);
+        }
+        let sectors = Current::sd_sectors().map_err(|why| {
+            t5_abi::event!(Warn, "sd.absent", error = why);
+            Error::NoDevice
+        })?;
+        unsafe { SD_OPEN = true };
+        Ok(SdHandle { pos: 0, sectors })
+    }
+
+    /// Checks a transfer of `len` bytes at the position; returns sectors.
+    fn span(&self, len: usize) -> Result<u32, Error> {
+        if len == 0 || len % sd::SECTOR != 0 || len > sd::MAX_IO {
+            return Err(Error::Size);
+        }
+        let n = (len / sd::SECTOR) as u32;
+        if self.pos as u64 + n as u64 > self.sectors as u64 {
+            return Err(Error::Invalid);
+        }
+        Ok(n)
+    }
+
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        let n = self.span(buf.len())?;
+        Current::sd_read(self.pos, buf).map_err(|_| Error::Fail)?;
+        self.pos += n;
+        Ok(buf.len())
+    }
+
+    pub fn write(&mut self, data: &[u8]) -> Result<usize, Error> {
+        let n = self.span(data.len())?;
+        Current::sd_write(self.pos, data).map_err(|_| Error::Fail)?;
+        self.pos += n;
+        Ok(data.len())
+    }
+}
+
+impl Drop for SdHandle {
+    fn drop(&mut self) {
+        unsafe { SD_OPEN = false };
+    }
 }
 
 impl Object {
@@ -31,6 +86,7 @@ impl Object {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
             n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT)),
             n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open()?), rights::READ | rights::WAIT)),
+            n if n == sd::NAME.as_bytes() => Ok((Object::Sd(SdHandle::open()?), rights::READ | rights::WRITE | rights::CTL)),
             n if n == shm::NAME.as_bytes() => {
                 if !crate::shm::available() {
                     return Err(Error::NoDevice);
@@ -154,6 +210,15 @@ impl Table {
             Object::Timer(t) => t.ctl(op, arg),
             Object::Display(d) => d.ctl(op, arg),
             Object::Listener(_) => Err(Error::NoSupport), // ACCEPT: `accept`
+            Object::Sd(s) => match op {
+                sd::SECTORS => Ok(s.sectors as usize),
+                sd::SEEK if arg < s.sectors as u64 => {
+                    s.pos = arg as u32;
+                    Ok(0)
+                }
+                sd::SEEK => Err(Error::Invalid),
+                _ => Err(Error::NoSupport),
+            },
             Object::Shm(s) => match op {
                 shm::ALLOC if s.window.is_none() => {
                     s.window = Some(crate::shm::alloc(arg as usize)?);
@@ -238,8 +303,9 @@ impl Table {
 
     /// `write`: `buf` is the caller's data, already copied in.
     pub fn write(&mut self, h: usize, buf: &[u8]) -> Result<usize, Error> {
-        match &self.get(h, rights::WRITE)?.object {
+        match &mut self.get(h, rights::WRITE)?.object {
             Object::Channel(e) => e.write(buf),
+            Object::Sd(s) => s.write(buf),
             _ => Err(Error::NoSupport),
         }
     }
@@ -249,6 +315,7 @@ impl Table {
         match &mut self.get(h, rights::READ)?.object {
             Object::Channel(e) => e.read(buf),
             Object::Touch(t) => t.read(buf),
+            Object::Sd(s) => s.read(buf),
             _ => Err(Error::NoSupport),
         }
     }
@@ -275,7 +342,7 @@ impl Table {
             Object::Display(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::Touch(t) => t.poll().map(|(ev, v)| (i, ev, v)),
             Object::Listener(l) => l.poll().map(|(ev, v)| (i, ev, v)),
-            Object::Shm(_) => None,
+            Object::Shm(_) | Object::Sd(_) => None,
         })
     }
 

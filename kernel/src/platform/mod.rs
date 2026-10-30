@@ -161,6 +161,18 @@ pub trait Platform {
     fn sd_test() -> Result<u32, &'static str> {
         Err("no SD card slot")
     }
+    /// The SD card's size in sectors (initialises it if needed).
+    fn sd_sectors() -> Result<u32, &'static str> {
+        Err("no SD card slot")
+    }
+    /// Reads `buf.len() / 512` sectors from `lba` (at most 4 KiB).
+    fn sd_read(_lba: u32, _buf: &mut [u8]) -> Result<(), &'static str> {
+        Err("no SD card slot")
+    }
+    /// Writes `data.len() / 512` sectors at `lba` (at most 4 KiB).
+    fn sd_write(_lba: u32, _data: &[u8]) -> Result<(), &'static str> {
+        Err("no SD card slot")
+    }
     /// Logs sector `lba` of the SD card.
     fn sd_dump(_lba: u32) -> Result<u32, &'static str> {
         Err("no SD card slot")

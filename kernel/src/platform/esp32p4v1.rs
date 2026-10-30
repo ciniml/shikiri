@@ -708,6 +708,18 @@ impl Platform for Esp32p4v1 {
         sd::info()
     }
 
+    fn sd_sectors() -> Result<u32, &'static str> {
+        sd::init().map(|c| c.sectors)
+    }
+
+    fn sd_read(lba: u32, buf: &mut [u8]) -> Result<(), &'static str> {
+        sd::read_blocks(lba, buf)
+    }
+
+    fn sd_write(lba: u32, data: &[u8]) -> Result<(), &'static str> {
+        sd::write_blocks(lba, data)
+    }
+
     fn sd_test() -> Result<u32, &'static str> {
         sd::test()
     }
