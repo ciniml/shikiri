@@ -196,4 +196,5 @@
 - **止まったとき**: `pending_verify` で起動したら、カーネルはウォッチドッグ（RWDT、約 4 秒）をもう一度有効にする（`kupdate.pending watchdog=true`）。プローブが起動のあとでつなぎ直して止めた場合までは防げない。また、ウォッチドッグのリセットは HP 系だけのリセット（LP SRAM のログを残すため）で、§6.7 の止まり方はプローブからのリセットでも戻らなかったので、それで戻るかどうかは確かめていない。
 - 確定前にブレークポイントで数秒止めると、リセットされる（確定してからデバッグする）。
 - 試験: `make test-p4emu` の 6 回目。otadata を「seq 1（ota_0）、pending_verify」にして（`elf2t5a otadata`）、bad-panic のカーネルを動かす。`kupdate.pending`、`kernel.panic`、`kupdate.panic_reset` が出て、ソフトウェアリセットで終わることを確かめる（`t5emu --expect-reset`）。
-- 実機では、`make kupdate … T5K=build/kupdate/bad-panic.t5k` を t5log をつないだまま実行し、プローブからのリセットなしで good に戻ることを確かめる（書き込みを伴うので利用者が実行する）。
+- 実機（2026-10-30）: ota_0 の開発版（0.1.0）から `make kupdate … T5K=build/kupdate/bad-panic.t5k` を t5log をつないだまま実行した。bad-panic は ota_1 に `seq 2` で入り、パニックして自分でリセットし、ブートローダが `seq 2` を aborted にして ota_0 の開発版に戻った（`kupdate.rolled_back ota_seq=2 state=aborted slot=1`）。**プローブからのリセットなしで戻った**（§6.4 ではプローブからのリセットが要った）。
+- `make kupdate PROBE=<Tab5> T5K=build/kupdate/*` は、利用者が Claude Code の許可設定（`.claude/settings.local.json`、コミットしない）に入れたので、Claude が実行できる。それ以外の書き込みは、これまでどおり確認してから。
