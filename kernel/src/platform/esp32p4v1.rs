@@ -708,6 +708,10 @@ impl Platform for Esp32p4v1 {
         sd::info()
     }
 
+    fn sd_test() -> Result<u32, &'static str> {
+        sd::test()
+    }
+
     fn sd_dump(lba: u32) -> Result<u32, &'static str> {
         sd::dump(lba)
     }

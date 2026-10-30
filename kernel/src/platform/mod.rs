@@ -157,6 +157,10 @@ pub trait Platform {
     fn sd_info() -> Result<u32, &'static str> {
         Err("no SD card slot")
     }
+    /// Writes, reads back and times the SD card's test sectors.
+    fn sd_test() -> Result<u32, &'static str> {
+        Err("no SD card slot")
+    }
     /// Logs sector `lba` of the SD card.
     fn sd_dump(_lba: u32) -> Result<u32, &'static str> {
         Err("no SD card slot")

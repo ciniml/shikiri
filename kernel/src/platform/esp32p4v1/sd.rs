@@ -124,6 +124,17 @@ const CMD7: u32 = 0xA000_2147;
 const CMD13: u32 = 0xA000_214D;
 const CMD16: u32 = 0xA000_2150;
 const CMD17: u32 = 0xA000_2351;
+const CMD18: u32 = 0xA000_3352;
+const CMD24: u32 = 0xA000_2758;
+const CMD25: u32 = 0xA000_3759;
+const ACMD6: u32 = 0xA000_2146;
+const ACMD51: u32 = 0xA000_2373;
+const CMD6: u32 = 0xA000_2346;
+/// STATUS.data_busy: the card holds D0 low while it programs.
+const STATUS_DATA_BUSY: u32 = 1 << 9;
+/// CMD13: READY_FOR_DATA and CURRENT_STATE = tran (4).
+const R1_READY: u32 = 1 << 8;
+const R1_STATE_TRAN: u32 = 4 << 9;
 
 /// HCS and the 2.7-3.6 V window; never S18R (no 1.8 V).
 const ACMD41_ARG: u32 = 0x40FF_8000;
@@ -138,8 +149,10 @@ struct Desc([u32; 16]);
 static mut DESC: Desc = Desc([0; 16]);
 /// The DMA's buffer in internal SRAM, whole cache lines.
 #[repr(C, align(64))]
-struct Bounce([u8; 4096]);
-static mut BOUNCE: Bounce = Bounce([0; 4096]);
+struct Bounce([u8; BOUNCE_SIZE]);
+/// The longest transfer: 8 sectors.
+pub const BOUNCE_SIZE: usize = 4096;
+static mut BOUNCE: Bounce = Bounce([0; BOUNCE_SIZE]);
 
 #[derive(Clone, Copy)]
 pub struct Card {
@@ -242,8 +255,17 @@ fn update_clock() -> Result<(), &'static str> {
 /// The card clock: the host's divider (`div2`, 0 = bypass) on the first
 /// stage's output; `khz` sets the data timeout (m7-sdcard.md §3.2).
 fn set_card_clock(div2: u32, khz: u32) -> Result<(), &'static str> {
+    set_card_clock_from(None, div2, khz)
+}
+
+/// As `set_card_clock`, also changing the first stage's divider (of the
+/// 160 MHz source) while the card clock is off.
+fn set_card_clock_from(source_div: Option<u32>, div2: u32, khz: u32) -> Result<(), &'static str> {
     unsafe { wr(CLKENA, 0) };
     update_clock()?;
+    if let Some(d) = source_div {
+        set_source_div(d);
+    }
     unsafe {
         wr(CLKDIV, div2);
         wr(CLKSRC, 0);
@@ -258,20 +280,46 @@ fn set_card_clock(div2: u32, khz: u32) -> Result<(), &'static str> {
 
 // ---- commands ----
 
-/// Issues `cmd` with `arg`; with `data`, reads that many bytes through the
-/// FIFO. Returns the four response words (RESP0 = bits 31:0).
-fn command(cmd: u32, arg: u32, data: Option<&mut [u8]>) -> Result<[u32; 4], &'static str> {
+/// The data phase of a command, through the IDMAC and the bounce buffer
+/// (at most its size).
+enum Data<'a> {
+    None,
+    Read(&'a mut [u8]),
+    Write(&'a [u8]),
+}
+
+impl Data<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Data::None => 0,
+            Data::Read(b) => b.len(),
+            Data::Write(b) => b.len(),
+        }
+    }
+}
+
+/// Issues `cmd` with `arg` and its data phase (blocks of at most 512
+/// bytes). Returns the four response words (RESP0 = bits 31:0).
+fn command(cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
     if !wait(1_000_000, || unsafe { rd(CMD) } & CMD_START == 0) {
         return Err("SDMMC busy");
     }
+    let len = data.len();
+    if len > BOUNCE_SIZE {
+        return Err("transfer too long");
+    }
     unsafe {
         wr(RINTSTS, 0xFFFF_FFFF);
-        if let Some(d) = &data {
+        if len > 0 {
             wr(CTRL, rd(CTRL) | CTRL_FIFO_RESET);
             let _ = wait(10_000, || rd(CTRL) & CTRL_FIFO_RESET == 0);
-            wr(BLKSIZ, d.len() as u32);
-            wr(BYTCNT, d.len() as u32);
-            dma_start(d.len());
+            wr(BLKSIZ, len.min(SECTOR) as u32);
+            wr(BYTCNT, len as u32);
+            if let Data::Write(b) = &data {
+                let dst = core::ptr::addr_of_mut!(BOUNCE).cast::<u8>();
+                core::ptr::copy_nonoverlapping(b.as_ptr(), dst, len);
+            }
+            dma_start(len);
         }
         wr(CMDARG, arg);
         wr(CMD, cmd);
@@ -294,14 +342,23 @@ fn command(cmd: u32, arg: u32, data: Option<&mut [u8]>) -> Result<[u32; 4], &'st
         return Err("response error");
     }
     let resp = unsafe { [rd(RESP0), rd(RESP0 + 4), rd(RESP0 + 8), rd(RESP0 + 12)] };
-    if let Some(buf) = data {
-        dma_finish(buf)?;
+    match data {
+        Data::None => {}
+        Data::Read(buf) => dma_finish(IDSTS_RI, Some(buf))?,
+        Data::Write(_) => {
+            dma_finish(IDSTS_TI, None)?;
+            // The card programs with D0 low (up to 250 ms per block by the
+            // spec; 5 s as ESP-IDF allows).
+            if !wait(5_000_000, || unsafe { rd(STATUS) } & STATUS_DATA_BUSY == 0) {
+                return Err("card stayed busy");
+            }
+        }
     }
     unsafe { wr(RINTSTS, 0xFFFF_FFFF) };
     Ok(resp)
 }
 
-/// Sets the IDMAC up to receive `len` bytes into the bounce buffer.
+/// Sets the IDMAC up to move `len` bytes to or from the bounce buffer.
 fn dma_start(len: usize) {
     let buf = core::ptr::addr_of!(BOUNCE) as usize;
     let desc = core::ptr::addr_of!(DESC) as usize;
@@ -322,14 +379,15 @@ fn dma_start(len: usize) {
     }
 }
 
-/// Waits for the DMA of a read and copies it out.
-fn dma_finish(out: &mut [u8]) -> Result<(), &'static str> {
+/// Waits for the DMA (`done_bit`: RI for a read, TI for a write) and the
+/// end of the data phase; for a read, copies the data out.
+fn dma_finish(done_bit: u32, out: Option<&mut [u8]>) -> Result<(), &'static str> {
     let mut ids = 0;
     let mut ints = 0;
     let done = wait(1_000_000, || {
         ids = unsafe { rd(IDSTS) };
         ints = unsafe { rd(RINTSTS) };
-        ids & (IDSTS_RI | IDSTS_ERRORS) != 0 && ints & (DTO | DATA_ERRORS) != 0 || ints & DATA_ERRORS != 0
+        ids & (done_bit | IDSTS_ERRORS) != 0 && ints & (DTO | DATA_ERRORS) != 0 || ints & DATA_ERRORS != 0
     });
     if !done || ids & IDSTS_ERRORS != 0 || ints & DATA_ERRORS != 0 {
         event!(Warn, "sd.dma_error", idsts = ids, rintsts = ints, status = unsafe { rd(STATUS) }, done = done);
@@ -342,16 +400,34 @@ fn dma_finish(out: &mut [u8]) -> Result<(), &'static str> {
         return Err("data error");
     }
     unsafe { wr(IDSTS, 0x3FF) };
-    let buf = core::ptr::addr_of!(BOUNCE) as usize;
-    super::cache_invalidate(buf, out.len().next_multiple_of(64), false);
-    let src = core::ptr::addr_of!(BOUNCE).cast::<u8>();
-    unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len()) };
+    if let Some(out) = out {
+        let buf = core::ptr::addr_of!(BOUNCE) as usize;
+        super::cache_invalidate(buf, out.len().next_multiple_of(64), false);
+        let src = core::ptr::addr_of!(BOUNCE).cast::<u8>();
+        unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len()) };
+    }
     Ok(())
 }
 
-fn app_command(rca: u32, cmd: u32, arg: u32) -> Result<[u32; 4], &'static str> {
-    command(CMD55, rca << 16, None)?;
-    command(cmd, arg, None)
+fn app_command(rca: u32, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
+    command(CMD55, rca << 16, Data::None)?;
+    command(cmd, arg, data)
+}
+
+/// Waits until the card is back in the transfer state and ready for data
+/// (after a write).
+fn wait_ready(rca: u32) -> Result<(), &'static str> {
+    let end = Esp32p4v1::now() + 16 * 5_000_000;
+    loop {
+        let r = command(CMD13, rca << 16, Data::None)?[0];
+        if r & R1_READY != 0 && r & (0xF << 9) == R1_STATE_TRAN {
+            return Ok(());
+        }
+        if Esp32p4v1::now() > end {
+            event!(Warn, "sd.not_ready", status = r);
+            return Err("card not ready");
+        }
+    }
 }
 
 /// Capacity in sectors from the CSD (versions 1 and 2).
@@ -384,10 +460,10 @@ pub fn init() -> Result<Card, &'static str> {
     }
     host_init()?;
     delay_us(1000);
-    command(CMD0, 0, None)?;
+    command(CMD0, 0, Data::None)?;
     delay_us(20_000);
     // CMD8: version 2 cards answer with the check pattern.
-    let v2 = match command(CMD8, 0x1AA, None) {
+    let v2 = match command(CMD8, 0x1AA, Data::None) {
         Ok(r) if r[0] & 0xFFF == 0x1AA => true,
         Ok(r) => {
             event!(Warn, "sd.if_cond", resp = r[0]);
@@ -401,7 +477,7 @@ pub fn init() -> Result<Card, &'static str> {
     let mut tries = 0;
     while tries < 300 {
         tries += 1;
-        ocr = app_command(0, ACMD41, arg)?[0];
+        ocr = app_command(0, ACMD41, arg, Data::None)?[0];
         if ocr & OCR_BUSY_DONE != 0 {
             break;
         }
@@ -412,9 +488,9 @@ pub fn init() -> Result<Card, &'static str> {
     if ocr & OCR_BUSY_DONE == 0 {
         return Err("card did not power up");
     }
-    let cid = command(CMD2, 0, None)?;
-    let rca = command(CMD3, 0, None)?[0] >> 16;
-    let csd = command(CMD9, rca << 16, None)?;
+    let cid = command(CMD2, 0, Data::None)?;
+    let rca = command(CMD3, 0, Data::None)?[0] >> 16;
+    let csd = command(CMD9, rca << 16, Data::None)?;
     let sectors = csd_sectors(csd);
     // CID: manufacturer [127:120], OEM [119:104], name [103:64].
     let name = [(cid[3] & 0xFF) as u8, (cid[2] >> 24) as u8, (cid[2] >> 16) as u8, (cid[2] >> 8) as u8, cid[2] as u8];
@@ -429,25 +505,131 @@ pub fn init() -> Result<Card, &'static str> {
         sectors = sectors,
         mib = sectors / 2048
     );
-    command(CMD7, rca << 16, None)?;
+    command(CMD7, rca << 16, Data::None)?;
     if !block_addressed {
-        command(CMD16, SECTOR as u32, None)?;
+        command(CMD16, SECTOR as u32, Data::None)?;
     }
     let c = Card { rca, block_addressed, sectors };
+    let mut before = [0u8; SECTOR];
+    command(CMD17, 0, Data::Read(&mut before))?;
+    speed_up(rca)?;
+    // The same sector at the new width and clock (m7-sdcard.md §8 step 22).
+    let mut after = [0u8; SECTOR];
+    command(CMD17, 0, Data::Read(&mut after))?;
+    if before != after {
+        event!(Error, "sd.verify_failed");
+        return Err("sector 0 differs after the speed change");
+    }
     unsafe { CARD = Some(c) };
-    let _ = command(CMD13, rca << 16, None).map(|r| event!(Info, "sd.status", status = r[0]));
     Ok(c)
 }
 
-/// Reads sector `lba` (polled, through the FIFO).
-pub fn read(lba: u32, buf: &mut [u8; SECTOR]) -> Result<(), &'static str> {
-    let c = init()?;
-    if lba >= c.sectors {
-        return Err("past the end of the card");
+/// SCR, then 4 data lines and 20 MHz, then High Speed (40 MHz) if the card
+/// switches (m7-sdcard.md §4 steps 9-13). 3.3 V only.
+fn speed_up(rca: u32) -> Result<(), &'static str> {
+    let mut scr = [0u8; 8];
+    app_command(rca, ACMD51, 0, Data::Read(&mut scr))?;
+    let spec = scr[0] & 0xF;
+    let four_bit = scr[1] & 0x04 != 0;
+    if four_bit {
+        app_command(rca, ACMD6, 2, Data::None)?;
+        unsafe {
+            wr(CTYPE, 1);
+            wr(io_mux_reg(D3), IO_MUX_SD);
+            wr(func_out_sel(D3), SIG_GPIO_OUT);
+        }
     }
-    let addr = if c.block_addressed { lba } else { lba * SECTOR as u32 };
-    command(CMD17, addr, Some(&mut buf[..]))?;
+    set_card_clock_from(Some(8), 0, 20_000)?;
+    // CMD6 mode 1, group 1 function 1 (High Speed); the answer's bits
+    // 379:376 say which function is now selected.
+    let mut high_speed = false;
+    if spec >= 1 {
+        let mut st = [0u8; 64];
+        if command(CMD6, 0x80FF_FFF1, Data::Read(&mut st)).is_ok() && st[16] & 0xF == 1 {
+            set_card_clock_from(Some(4), 0, 40_000)?;
+            high_speed = true;
+        }
+    }
+    event!(Info, "sd.bus", scr_spec = spec, four_bit = four_bit, high_speed = high_speed);
     Ok(())
+}
+
+fn address(c: &Card, lba: u32) -> u32 {
+    if c.block_addressed { lba } else { lba * SECTOR as u32 }
+}
+
+/// Reads `buf.len() / 512` sectors from `lba` (at most `BOUNCE_SIZE`).
+pub fn read_blocks(lba: u32, buf: &mut [u8]) -> Result<(), &'static str> {
+    let c = init()?;
+    let n = buf.len() / SECTOR;
+    if buf.len() % SECTOR != 0 || n == 0 || lba as u64 + n as u64 > c.sectors as u64 {
+        return Err("bad sector range");
+    }
+    let cmd = if n == 1 { CMD17 } else { CMD18 };
+    command(cmd, address(&c, lba), Data::Read(buf))?;
+    Ok(())
+}
+
+/// Writes `data.len() / 512` sectors at `lba` (at most `BOUNCE_SIZE`) and
+/// waits until the card has programmed them.
+pub fn write_blocks(lba: u32, data: &[u8]) -> Result<(), &'static str> {
+    let c = init()?;
+    let n = data.len() / SECTOR;
+    if data.len() % SECTOR != 0 || n == 0 || lba as u64 + n as u64 > c.sectors as u64 {
+        return Err("bad sector range");
+    }
+    let cmd = if n == 1 { CMD24 } else { CMD25 };
+    command(cmd, address(&c, lba), Data::Write(data))?;
+    wait_ready(c.rca)
+}
+
+/// Reads sector `lba`.
+pub fn read(lba: u32, buf: &mut [u8; SECTOR]) -> Result<(), &'static str> {
+    read_blocks(lba, &mut buf[..])
+}
+
+/// The sectors `sdtest` may overwrite: in the gap between the MBR and the
+/// first partition of the card at hand (doc/18 §9). Saved and restored.
+const TEST_LBA: u32 = 8192;
+
+/// `sdtest`: write and read back 8 sectors at `TEST_LBA` (restoring what
+/// was there), then time 256 KiB of reads and of writes.
+pub fn test() -> Result<u32, &'static str> {
+    init()?;
+    let mut saved = [0u8; BOUNCE_SIZE];
+    read_blocks(TEST_LBA, &mut saved)?;
+    let mut pattern = [0u8; BOUNCE_SIZE];
+    for (i, b) in pattern.iter_mut().enumerate() {
+        *b = (i * 7 + (i >> 9)) as u8;
+    }
+    write_blocks(TEST_LBA, &pattern)?;
+    let mut back = [0u8; BOUNCE_SIZE];
+    read_blocks(TEST_LBA, &mut back)?;
+    let ok = back == pattern;
+    let rounds = 64u32; // 64 x 4 KiB
+    let t = Esp32p4v1::now();
+    for i in 0..rounds {
+        read_blocks(16384 + i * 8, &mut back)?;
+    }
+    let read_us = ((Esp32p4v1::now() - t) / 16) as u32;
+    let t = Esp32p4v1::now();
+    for _ in 0..rounds {
+        write_blocks(TEST_LBA, &pattern)?;
+    }
+    let write_us = ((Esp32p4v1::now() - t) / 16) as u32;
+    write_blocks(TEST_LBA, &saved)?;
+    read_blocks(TEST_LBA, &mut back)?;
+    let restored = back == saved;
+    let kib = rounds * 4;
+    event!(
+        Info,
+        "sd.test",
+        verified = ok,
+        restored = restored,
+        read_kib_s = (kib as u64 * 1_000_000 / read_us.max(1) as u64) as u32,
+        write_kib_s = (kib as u64 * 1_000_000 / write_us.max(1) as u64) as u32
+    );
+    if ok && restored { Ok(kib) } else { Err("read back differs") }
 }
 
 /// `sdinfo`: initialises the card if needed and logs sector 0's partition
