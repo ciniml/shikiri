@@ -15,10 +15,15 @@
 //!   elf2t5a verify IMAGE.t5a --public FILE
 //!   elf2t5a kernel IN.bin OUT.t5k --key SECRET
 //!   elf2t5a verify-kernel PACKAGE.t5k --public FILE
+//!   elf2t5a otadata OUT.bin SEQ STATE
 //!
 //! `kernel` signs an ESP app image (espflash save-image) as a T5K kernel
 //! package (`t5_abi::t5k`, doc/16 §2): the image, a 16-byte header and the
 //! signature footer.
+//!
+//! `otadata` writes the 8 KiB otadata partition with one entry in its first
+//! sector (`t5_abi::otadata`), for emulator runs that start as a given
+//! update (STATE is the number, e.g. 1 = pending_verify).
 //!
 //! Keys are hex files: the secret file holds the 32-byte Ed25519 seed, the
 //! public file the 32-byte public key. `--abi` overrides the ABI version and
@@ -32,7 +37,7 @@ use object::read::elf::{FileHeader, ProgramHeader, Rela as _, SectionHeader};
 use object::Endianness;
 use sha2::{Digest, Sha256};
 use t5_abi::t5a::{self, tlv};
-use t5_abi::t5k;
+use t5_abi::{otadata, t5k};
 
 const PMP_GRANULE: u32 = 128;
 const DEFAULT_STACK: u32 = 4096;
@@ -42,7 +47,8 @@ const USAGE: &str = "usage:
                 [--permit NAME]... [--autostart] [--secure-version N] [--abi MAJOR.MINOR]
   elf2t5a verify IMAGE.t5a --public FILE
   elf2t5a kernel IN.bin OUT.t5k --key SECRET
-  elf2t5a verify-kernel PACKAGE.t5k --public FILE";
+  elf2t5a verify-kernel PACKAGE.t5k --public FILE
+  elf2t5a otadata OUT.bin SEQ STATE";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -52,6 +58,7 @@ fn main() -> ExitCode {
         Some("verify") => verify(&args[1..]),
         Some("kernel") => kernel(&args[1..]),
         Some("verify-kernel") => verify_kernel(&args[1..]),
+        Some("otadata") => otadata(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match r {
@@ -374,6 +381,14 @@ fn verify_kernel(args: &[String]) -> Result<(), String> {
         .map_err(|_| "bad signature")?;
     println!("{package}: kernel {} {} secure_version {}: signature OK", p.image.project, p.image.version, p.image.secure_version);
     Ok(())
+}
+
+fn otadata(args: &[String]) -> Result<(), String> {
+    let [out, seq, state] = args else { return Err(USAGE.into()) };
+    let entry = otadata::Entry::new(parse_u32(seq)?, parse_u32(state)?);
+    let mut data = vec![0xFF; 2 * otadata::SECTOR_SIZE as usize];
+    data[..otadata::ENTRY_SIZE].copy_from_slice(&entry.to_bytes());
+    fs::write(out, data).map_err(|e| format!("{out}: {e}"))
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {

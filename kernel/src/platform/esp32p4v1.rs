@@ -385,12 +385,7 @@ impl Platform for Esp32p4v1 {
             // The 2nd stage bootloader leaves RWDT running. Shorten its
             // timeout to ~4 s and reset only the HP system on expiry, so LP
             // SRAM survives a lock-up; the scheduler feeds it (doc/12 L3).
-            wr(LP_WDT_WPROTECT, LP_WDT_WKEY);
-            wr(LP_WDT_CONFIG1, LP_WDT_STG0_HOLD);
-            let c = rd(LP_WDT_CONFIG0) & !LP_WDT_STG0_MASK;
-            wr(LP_WDT_CONFIG0, c | (LP_WDT_STG_RESET_SYSTEM << LP_WDT_STG0_SHIFT) | LP_WDT_EN);
-            wr(LP_WDT_FEED, LP_WDT_FEED_BIT);
-            wr(LP_WDT_WPROTECT, 0);
+            Self::arm_watchdog();
             for base in TIMG_BASES {
                 wr(base + TIMG_WDTWPROTECT, TIMG_WDT_WKEY);
                 wr(base + TIMG_WDTCONFIG0, rd(base + TIMG_WDTCONFIG0) & !TIMG_WDT_EN);
@@ -638,6 +633,17 @@ impl Platform for Esp32p4v1 {
     fn feed_watchdog() {
         unsafe {
             wr(LP_WDT_WPROTECT, LP_WDT_WKEY);
+            wr(LP_WDT_FEED, LP_WDT_FEED_BIT);
+            wr(LP_WDT_WPROTECT, 0);
+        }
+    }
+
+    fn arm_watchdog() {
+        unsafe {
+            wr(LP_WDT_WPROTECT, LP_WDT_WKEY);
+            wr(LP_WDT_CONFIG1, LP_WDT_STG0_HOLD);
+            let c = rd(LP_WDT_CONFIG0) & !LP_WDT_STG0_MASK;
+            wr(LP_WDT_CONFIG0, c | (LP_WDT_STG_RESET_SYSTEM << LP_WDT_STG0_SHIFT) | LP_WDT_EN);
             wr(LP_WDT_FEED, LP_WDT_FEED_BIT);
             wr(LP_WDT_WPROTECT, 0);
         }

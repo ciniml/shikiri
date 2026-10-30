@@ -4,6 +4,8 @@
 //! next boot. The new kernel confirms itself when its self-test passes; if
 //! it does not, the ESP-IDF bootloader starts the old one again.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use t5_abi::otadata::{self, Entry, OTADATA_OFFSET, SLOT_SIZE, SLOTS, state};
 use t5_abi::{event, t5k};
 
@@ -11,6 +13,17 @@ use crate::flash;
 use crate::loader;
 use crate::platform::{Current, Platform};
 use crate::time;
+
+/// Set while the running kernel is an update that has not confirmed itself
+/// yet (`pending_verify`). Such a kernel must never stop: a panic resets
+/// the chip instead, so the bootloader goes back to the old kernel even
+/// when a debug probe has turned the watchdog off (doc/16 §6.10).
+static PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the running kernel is still unconfirmed (see [`PENDING`]).
+pub fn pending() -> bool {
+    PENDING.load(Ordering::Relaxed)
+}
 
 /// A package being received.
 struct Session {
@@ -44,7 +57,16 @@ fn state_name(s: u32) -> &'static str {
 impl Kupdate {
     pub fn new(window: usize) -> Kupdate {
         let running = Current::kernel_slot().and_then(|o| SLOTS.iter().position(|&s| s == o));
-        Kupdate { window, running, session: None }
+        let k = Kupdate { window, running, session: None };
+        if k.own_entry().is_some_and(|(_, e)| e.state == state::PENDING_VERIFY) {
+            // Until the self-test confirms this kernel, a hang must end in
+            // a reset as well: arm the watchdog again in case a probe
+            // turned it off.
+            PENDING.store(true, Ordering::Relaxed);
+            Current::arm_watchdog();
+            event!(Info, "kupdate.pending", watchdog = true);
+        }
+        k
     }
 
     fn bytes(&self, offset: u32, len: usize) -> &'static [u8] {
@@ -193,7 +215,10 @@ impl Kupdate {
         }
         if pass {
             match self.write_entry(sector, &Entry { state: state::VALID, ..e }) {
-                Ok(()) => event!(Info, "kupdate.confirmed", ota_seq = e.seq, slot = e.slot() as u32),
+                Ok(()) => {
+                    PENDING.store(false, Ordering::Relaxed);
+                    event!(Info, "kupdate.confirmed", ota_seq = e.seq, slot = e.slot() as u32)
+                }
                 Err(why) => event!(Error, "kupdate.confirm_failed", ota_seq = e.seq, error = why),
             }
             return;

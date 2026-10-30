@@ -122,12 +122,14 @@ define test_kernel
 	espflash save-image --chip esp32p4 --min-chip-rev 1.0 --flash-size 16mb \
 	    kernel/target/kupdate-$(1)/riscv32imac-unknown-none-elf/release/t5-kernel $(KUPDATE_DIR)/$(1).bin
 	$(ELF2T5A) kernel $(KUPDATE_DIR)/$(1).bin $(KUPDATE_DIR)/$(1).t5k --key $(DEV_KEY)
+	cp kernel/target/kupdate-$(1)/riscv32imac-unknown-none-elf/release/t5-kernel $(KUPDATE_DIR)/$(1).elf
 endef
 kupdate-test-kernels: image-p4
 	mkdir -p $(KUPDATE_DIR)
 	$(call test_kernel,good,)
 	$(call test_kernel,bad-selftest,test-bad-selftest)
 	$(call test_kernel,bad-panic,test-bad-panic)
+	$(ELF2T5A) otadata $(KUPDATE_DIR)/otadata-pending.bin 1 1
 	cp $(KERNEL_T5K) $(KUPDATE_DIR)/tampered.t5k
 	printf 'X' | dd of=$(KUPDATE_DIR)/tampered.t5k bs=1 seek=100 conv=notrunc status=none
 
@@ -257,6 +259,13 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --expect-event kupdate.slot --expect-event ctl.failed --expect-event kupdate.ready \
 	    --expect-event kernel.reboot \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# An update that panics before confirming itself (otadata: seq 1 =
+	@# ota_0, pending_verify) resets the chip so the bootloader rolls back,
+	@# instead of stopping (doc/16 §6.10).
+	$(T5EMU) --quiet --expect-reset $(EMU_FLASH) --flash $(KUPDATE_DIR)/otadata-pending.bin@d000 \
+	    --flash $(KUPDATE_DIR)/bad-panic.bin@10000 \
+	    --expect-event kupdate.pending --expect-event kernel.panic --expect-event kupdate.panic_reset \
+	    $(KUPDATE_DIR)/bad-panic.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

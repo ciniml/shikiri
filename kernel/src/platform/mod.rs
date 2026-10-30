@@ -116,6 +116,9 @@ pub trait Platform {
     fn log_power(_stage: &'static str) {}
     /// Restarts the system watchdog (no-op where there is none).
     fn feed_watchdog() {}
+    /// Turns the system watchdog on again (a debug probe turns it off when
+    /// it attaches); no-op where there is none.
+    fn arm_watchdog() {}
     /// Why the chip last reset (ROM RESET_REASON on the ESP32-P4; 0 = unknown).
     fn reset_cause() -> u32 {
         0

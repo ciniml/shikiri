@@ -93,7 +93,7 @@ fn load_image(bus: &mut Bus, elf: &t5emu::elf::Elf) -> Result<(), String> {
 
 const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [--seed N] \
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
-                     [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] \
+                     [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND]... [--expect-event NAME]... \
                      [--linger-ms N] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
@@ -114,6 +114,9 @@ struct Opts {
     log_from_rtt: bool,
     resets: u32,
     expect_prev_event: Option<String>,
+    /// The run must end in a software reset before the self-test passes
+    /// (a kernel that rolls itself back, doc/16 §6.10).
+    expect_reset: bool,
     flash_images: Vec<(u32, String)>,
     ctl: Vec<String>,
     expect_events: Vec<String>,
@@ -138,6 +141,7 @@ fn parse_args() -> Result<Opts, String> {
         log_from_rtt: false,
         resets: 0,
         expect_prev_event: None,
+        expect_reset: false,
         flash_images: Vec::new(),
         ctl: Vec::new(),
         expect_events: Vec::new(),
@@ -169,6 +173,7 @@ fn parse_args() -> Result<Opts, String> {
             "--log-from-rtt" => o.log_from_rtt = true,
             "--resets" => o.resets = val()?.parse().map_err(|e| format!("--resets: {e}"))?,
             "--expect-prev-event" => o.expect_prev_event = Some(val()?),
+            "--expect-reset" => o.expect_reset = true,
             "--ctl" => {
                 let v = val()?;
                 t5log::ctl::frames(&v, &mut 0).map_err(|e| format!("--ctl {v}: {e}"))?;
@@ -351,6 +356,11 @@ fn main() -> ExitCode {
                         passed = e.field(&schemas, "pass") == Some(&t5log::Value::Bool(true));
                     }
                     (Some(n), Some(_)) if o.expect_prev_event.as_deref() == Some(n) => expected_seen = true,
+                    // Events after the last control-channel poll (a run
+                    // that ends in a reset) only show up here.
+                    (Some(n), None) => {
+                        mon.seen.insert(n.to_string());
+                    }
                     _ => {}
                 }
             }
@@ -383,6 +393,11 @@ fn main() -> ExitCode {
     }
     if !mon.pending.is_empty() {
         eprintln!("t5emu: commands without ctl.done/ctl.failed: {:?}", mon.pending);
+    }
+    if o.expect_reset {
+        let reset = matches!(stop, Stop::SoftwareReset);
+        eprintln!("t5emu: {}", if reset { "reset as expected" } else { "expected a software reset" });
+        return if reset && rtt_ok && missing.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) };
     }
     let all_ok = passed && rtt_ok && missing.is_empty() && mon.pending.is_empty();
     match stop {

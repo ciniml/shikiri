@@ -645,5 +645,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let _ = write!(msg, "{}", info.message());
     let (file, line) = info.location().map_or(("?", 0), |l| (l.file(), l.line()));
     event!(Error, "kernel.panic", file = file, line = line, msg = msg.as_str());
+    if kupdate::pending() {
+        // An unconfirmed update: restart so the bootloader rolls back.
+        event!(Error, "kupdate.panic_reset");
+        Current::reset();
+    }
     Current::exit(0xFF)
 }
