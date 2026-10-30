@@ -46,6 +46,10 @@ pub mod cmd {
     pub const POWER: u8 = 16;
     /// `u8 name_len | name`: go back to the previous version (doc/16 §4.2).
     pub const ROLLBACK: u8 = 17;
+    /// `u32 seconds`: log touch points for that long (M6a).
+    pub const TOUCH: u8 = 18;
+    /// Log every address on the board I2C bus that answers.
+    pub const I2C_SCAN: u8 = 19;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -73,6 +77,8 @@ pub enum Command<'a> {
     Clock { mhz: u32 },
     Pvt { on: bool },
     Power,
+    Touch { seconds: u32 },
+    I2cScan,
 }
 
 impl Command<'_> {
@@ -95,6 +101,8 @@ impl Command<'_> {
             Command::Clock { .. } => "clock",
             Command::Pvt { .. } => "pvt",
             Command::Power => "power",
+            Command::Touch { .. } => "touch",
+            Command::I2cScan => "i2cscan",
         }
     }
 }
@@ -124,6 +132,8 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::CLOCK if args.len() == 4 => Command::Clock { mhz: u32_at(args, 0)? },
         cmd::PVT if args.len() == 4 => Command::Pvt { on: u32_at(args, 0)? != 0 },
         cmd::POWER if args.is_empty() => Command::Power,
+        cmd::TOUCH if args.len() == 4 => Command::Touch { seconds: u32_at(args, 0)? },
+        cmd::I2C_SCAN if args.is_empty() => Command::I2cScan,
         cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -171,11 +181,14 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Clock { .. } => put(&[cmd::CLOCK])?,
         Command::Pvt { .. } => put(&[cmd::PVT])?,
         Command::Power => put(&[cmd::POWER])?,
+        Command::Touch { .. } => put(&[cmd::TOUCH])?,
+        Command::I2cScan => put(&[cmd::I2C_SCAN])?,
     }
     put(&id.to_le_bytes())?;
     match c {
         Command::Kill { pid } => put(&pid.to_le_bytes())?,
         Command::Clock { mhz } => put(&mhz.to_le_bytes())?,
+        Command::Touch { seconds } => put(&seconds.to_le_bytes())?,
         Command::Pvt { on } => put(&(*on as u32).to_le_bytes())?,
         Command::Run { name, arg0, arg1 } => {
             if name.len() > 32 {
@@ -244,9 +257,11 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
             _ => return Err("pvt on|off"),
         },
         Some("power") => Command::Power,
+        Some("touch") => Command::Touch { seconds: num(Some(w.next().ok_or("touch SECONDS")?))? },
+        Some("i2cscan") => Command::I2cScan,
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan");
         }
     };
     if w.next().is_some() {
@@ -275,7 +290,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

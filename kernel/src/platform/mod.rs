@@ -114,6 +114,19 @@ pub trait Platform {
     }
     /// Logs the core voltage settings (`stage` names the moment).
     fn log_power(_stage: &'static str) {}
+    /// Board devices around the display (M6a, doc/17 §5): releases the
+    /// panel and touch resets and identifies the panel.
+    fn board_init() -> Panel {
+        Panel::None
+    }
+    /// Reads the touch points into `out`; returns how many (0 = no touch).
+    fn touch_read(_out: &mut [TouchPoint; 5]) -> Result<usize, &'static str> {
+        Err("no touch")
+    }
+    /// Logs every I2C address on the board bus that acknowledges.
+    fn i2c_scan() -> Result<u32, &'static str> {
+        Err("no I2C")
+    }
     /// Restarts the system watchdog (no-op where there is none).
     fn feed_watchdog() {}
     /// Turns the system watchdog on again (a debug probe turns it off when
@@ -129,4 +142,25 @@ pub trait Platform {
     }
     /// Ends the run. On QEMU this exits the emulator with `code`.
     fn exit(code: u32) -> !;
+}
+
+/// The display panel (Tab5 lots, doc/06 §7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    /// No board support, or the IO expander did not answer.
+    None,
+    /// Nothing identified on the touch addresses.
+    Unknown,
+    Ili9881c { touch_addr: u8 },
+    St7123,
+    St7121,
+}
+
+/// One touch point in panel pixels (720 x 1280, portrait).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TouchPoint {
+    pub x: u16,
+    pub y: u16,
+    pub id: u16,
+    pub size: u16,
 }

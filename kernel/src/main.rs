@@ -145,6 +145,11 @@ pub extern "C" fn kmain() -> ! {
         Err(why) => event!(Warn, "boot.no_psram", error = why),
     }
     Current::clock_init();
+    // The panel and touch (M6a). Not part of the self-test's result: a
+    // kernel must be able to confirm itself without them (doc/17 §2).
+    let t = Current::now();
+    let panel = Current::board_init();
+    event!(Info, "board.ready", panel = panel_name(panel), ms = time::ticks_to_ns(Current::now() - t) / 1_000_000);
     let (pool, slot_size) = (pool(), slot(0).1);
     event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
@@ -194,6 +199,7 @@ const FRAMES_PER_POLL: usize = 4;
 /// are log events.
 fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     let mut s = sched::Scheduler::new();
+    let mut touch_log = TouchLog::default();
     for e in store.entries().filter(|e| e.is_current() && e.flags & t5_abi::t5a::tlv::FLAG_AUTOSTART as u8 != 0) {
         let name = e.name();
         if let Err(why) = start(&mut s, store, name, 0, 0) {
@@ -206,13 +212,14 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     loop {
         s.run(None, &mut |s| {
             settle_updates(s, store);
+            touch_log.poll();
             s.reap();
             // A few frames per poll, so an install (one frame per 256 B,
             // some with a sector erase) does not stop the apps meanwhile.
             let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND];
             for _ in 0..FRAMES_PER_POLL {
                 let Some(n) = log::read_command(&mut frame) else { break };
-                handle(s, store, kup, &frame[..n]);
+                handle(s, store, kup, &mut touch_log, &frame[..n]);
             }
         });
     }
@@ -249,7 +256,77 @@ fn settle_updates(s: &mut sched::Scheduler, store: &mut store::Store) {
     }
 }
 
-fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate::Kupdate, frame: &[u8]) {
+fn panel_name(p: platform::Panel) -> &'static str {
+    match p {
+        platform::Panel::None => "none",
+        platform::Panel::Unknown => "unknown",
+        platform::Panel::Ili9881c { .. } => "ili9881c",
+        platform::Panel::St7123 => "st7123",
+        platform::Panel::St7121 => "st7121",
+    }
+}
+
+/// The `touch` command (M6a): logs touch points for a while, read every
+/// `TOUCH_POLL_MS`. A point is logged when it appears or moves; lifting
+/// every finger logs `touch.up`.
+#[derive(Default)]
+struct TouchLog {
+    until: u64,
+    next: u64,
+    last: [platform::TouchPoint; 5],
+    last_n: usize,
+    reads: u32,
+    errors: u32,
+}
+
+const TOUCH_POLL_MS: u64 = 16;
+
+impl TouchLog {
+    fn start(&mut self, seconds: u32) -> Result<u32, &'static str> {
+        let mut probe = [platform::TouchPoint::default(); 5];
+        Current::touch_read(&mut probe)?;
+        let now = Current::now();
+        *self = TouchLog { until: now + time::ms_to_ticks(seconds as u64 * 1000), next: now, ..TouchLog::default() };
+        Ok(seconds)
+    }
+
+    fn poll(&mut self) {
+        let now = Current::now();
+        if self.until == 0 || now < self.next {
+            return;
+        }
+        if now >= self.until {
+            event!(Info, "touch.log_done", reads = self.reads, errors = self.errors);
+            self.until = 0;
+            return;
+        }
+        self.next = now + time::ms_to_ticks(TOUCH_POLL_MS);
+        let mut pts = [platform::TouchPoint::default(); 5];
+        self.reads += 1;
+        let n = match Current::touch_read(&mut pts) {
+            Ok(n) => n,
+            Err(why) => {
+                if self.errors == 0 {
+                    event!(Warn, "touch.read_failed", error = why);
+                }
+                self.errors += 1;
+                return;
+            }
+        };
+        for p in &pts[..n] {
+            if !self.last[..self.last_n].contains(p) {
+                event!(Info, "touch.point", x = p.x, y = p.y, id = p.id, size = p.size, count = n as u32);
+            }
+        }
+        if n == 0 && self.last_n > 0 {
+            event!(Info, "touch.up");
+        }
+        self.last = pts;
+        self.last_n = n;
+    }
+}
+
+fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate::Kupdate, touch_log: &mut TouchLog, frame: &[u8]) {
     use t5_abi::ctl::Command;
     let Some((id, cmd)) = t5_abi::ctl::decode(frame) else {
         event!(Warn, "ctl.bad_command", len = frame.len() as u32);
@@ -315,6 +392,8 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         }
         Command::Clock { mhz } => Current::set_cpu_mhz(mhz),
         Command::Pvt { on } => Current::set_pvt(on),
+        Command::Touch { seconds } => touch_log.start(seconds),
+        Command::I2cScan => Current::i2c_scan(),
         Command::Power => {
             Current::log_power("cmd");
             Ok(0)

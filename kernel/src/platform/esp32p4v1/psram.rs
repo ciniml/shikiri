@@ -39,7 +39,7 @@ pub(super) fn delay_us(us: u64) {
 }
 
 /// Polls `done` for up to `us` microseconds.
-fn wait(us: u64, mut done: impl FnMut() -> bool) -> bool {
+pub(super) fn wait(us: u64, mut done: impl FnMut() -> bool) -> bool {
     let end = Esp32p4v1::now() + us * 16;
     while !done() {
         if Esp32p4v1::now() > end {

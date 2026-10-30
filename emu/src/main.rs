@@ -434,7 +434,16 @@ fn main() -> ExitCode {
         eprintln!("t5emu: {}", if reset { "reset as expected" } else { "expected a software reset" });
         return if reset && rtt_ok && missing.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) };
     }
-    let all_ok = passed && rtt_ok && missing.is_empty() && mon.pending.is_empty();
+    let i2c = &m.bus.periph.i2c;
+    let board_ok = i2c.exp2_writes == 0;
+    if i2c.transfers > 0 {
+        let (dir, out) = i2c.expander1();
+        eprintln!(
+            "t5emu: I2C: {} transfers; expander #1 DIR={dir:#04x} OUT={out:#04x}; {} write(s) to expander #2",
+            i2c.transfers, i2c.exp2_writes
+        );
+    }
+    let all_ok = passed && rtt_ok && board_ok && missing.is_empty() && mon.pending.is_empty();
     match stop {
         // A reset is an end like any other once everything expected was
         // seen (`reboot`, doc/16 §3.6).

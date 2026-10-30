@@ -274,6 +274,13 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --expect-event store.confirmed --expect-event store.rolled_back --expect-event proc.fault \
 	    --expect-event hello.greet --expect-event spin.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Board (M6a, doc/17 §5): the modelled ST7123 is identified over I2C,
+	@# its touch point is logged, and t5emu fails on any write to IO
+	@# expander #2.
+	$(T5EMU) --quiet --linger-ms 1500 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "i2cscan" --ctl "touch 1" \
+	    --expect-event display.panel --expect-event i2c.found --expect-event touch.point \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is
 	@# selected in otadata, and reboot ends the run (no bootloader here).

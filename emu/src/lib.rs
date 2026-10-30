@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod cache;
 pub mod elf;
+pub mod i2c;
 pub mod machine;
 pub mod periph;
 pub mod pmp;

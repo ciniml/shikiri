@@ -6,7 +6,9 @@
 use super::Platform;
 
 mod clock;
+mod i2c;
 mod psram;
+mod tab5;
 
 // USB Serial/JTAG (doc/06 §3.1): usb_serial_jtag_reg.h
 const USJ_BASE: usize = 0x500D_2000;
@@ -647,6 +649,25 @@ impl Platform for Esp32p4v1 {
             wr(LP_WDT_FEED, LP_WDT_FEED_BIT);
             wr(LP_WDT_WPROTECT, 0);
         }
+    }
+
+    fn board_init() -> super::Panel {
+        tab5::init()
+    }
+
+    fn touch_read(out: &mut [super::TouchPoint; 5]) -> Result<usize, &'static str> {
+        tab5::touch_read(out)
+    }
+
+    fn i2c_scan() -> Result<u32, &'static str> {
+        let mut n = 0;
+        for addr in 0x08..0x78u8 {
+            if i2c::probe(addr) {
+                t5_abi::event!(Info, "i2c.found", addr = addr);
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     fn reset_cause() -> u32 {

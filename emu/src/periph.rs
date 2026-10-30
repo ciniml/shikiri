@@ -11,6 +11,7 @@ pub const CLIC_BASE: u32 = 0x2080_0000;
 pub const CLIC_CTRL_BASE: u32 = 0x2080_1000;
 /// CLIC interrupt lines (`CLIC_INT_INFO_NUM_INT` default 48).
 pub const CLIC_LINES: usize = 48;
+use crate::i2c::{I2C1_BASE, I2C1_SIZE};
 /// The SYSTIMER counts at 16 MHz (esp_hw_support/port/esp32p4/systimer.c:20).
 pub const SYSTIMER_HZ: u64 = 16_000_000;
 
@@ -401,6 +402,7 @@ fn initial_value(addr: u32) -> u32 {
 /// peripheral space, so that unmodelled registers read back what was written.
 #[derive(Default)]
 pub struct Peripherals {
+    pub i2c: crate::i2c::I2c,
     pub usj: Usj,
     pub systimer: Systimer,
     pub intmtx: Intmtx,
@@ -421,6 +423,7 @@ impl Peripherals {
             a if (INTMTX_BASE..INTMTX_BASE + 0x200).contains(&a) => self.intmtx.map[((a - INTMTX_BASE) / 4) as usize],
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.read(a - LP_WDT_BASE),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.read(a),
+            a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.read(a - I2C1_BASE),
             LP_CLKRST_RESET_CAUSE => self.reset_cause << 7,
             a => {
                 self.warn(a, "read");
@@ -439,6 +442,7 @@ impl Peripherals {
             }
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.write(a - LP_WDT_BASE, v, now_ms),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.write(a, v),
+            a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.write(a - I2C1_BASE, v),
             // The divider update completes at once (clk_ll_bus_update).
             ROOT_CLK_CTRL0 => {
                 self.other.insert(ROOT_CLK_CTRL0, v & !SOC_CLK_DIV_UPDATE);
