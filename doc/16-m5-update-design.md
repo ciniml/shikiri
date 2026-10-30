@@ -251,4 +251,4 @@
 - `good.t5k`（secure_version 1）に更新して確定したあと、`downgrade.t5k`（開発版、secure_version 0。`kupdate-test-kernels` で作るようにした）: `kupdate.downgrade offered=0 running=1`、`secure_version rollback` で拒否。
 - **見つけた穴**: 拒否したパッケージは、空きスロットに書かれたまま残っていた。ESP のイメージとしては正しいので、のちに動いているカーネルが invalid になると、ブートローダは「もう一方のスロット」としてそれを起動しうる（ダウングレードの抜け道）。そこで、`install_end` で拒否したら、そのスロットの最初のセクタを消すようにした（`kupdate.slot_erased`）。ブートローダはイメージのヘッダが読めないスロットを選ばない。t5emu の kupdate の試験でも `kupdate.slot_erased` を確かめる。
 - 修正後、開発版を `make flash-kernel-p4` で ota_0 に戻し、tampered を送った: `kupdate.slot_erased slot=1 ok=true` のあと、`kinfo` で `kupdate.slot_empty slot=1`。
-- 途中で切れた送信（`install_data` の失敗や中断）は消していない。イメージの末尾の SHA-256 が合わないので、ブートローダは起動しないはず（推測。ブートローダのイメージ検証が有効なことは未確認）。
+- 途中で切れた送信（`install_data` の失敗や中断）は消していない。イメージの末尾の SHA-256 が合わないので、ブートローダは起動しない（`boot/sdkconfig:1169-1173` で `BOOTLOADER_SKIP_VALIDATE_*` はすべて無効なので、ブートローダは起動のたびにイメージを検証する）。
