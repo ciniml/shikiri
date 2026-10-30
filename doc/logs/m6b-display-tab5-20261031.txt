@@ -1,0 +1,5 @@
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+   0.118340 I kernel log.prev_begin boot_id=464 bytes=8608
+t5log: undecodable frame (bad COBS, 45 bytes)
+t5log: -> #1 display
