@@ -104,6 +104,14 @@ pub trait Platform {
     fn reset() -> ! {
         Self::exit(0)
     }
+    /// Sets the CPU clock in MHz (the `clock` command); returns the new one.
+    fn set_cpu_mhz(_mhz: u32) -> Result<u32, &'static str> {
+        Err("not supported")
+    }
+    /// Turns the automatic voltage adjustment on or off (the `pvt` command).
+    fn set_pvt(_on: bool) -> Result<u32, &'static str> {
+        Err("not supported")
+    }
     /// Logs the core voltage settings (`stage` names the moment).
     fn log_power(_stage: &'static str) {}
     /// Restarts the system watchdog (no-op where there is none).

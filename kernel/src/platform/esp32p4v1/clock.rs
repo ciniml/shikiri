@@ -197,13 +197,14 @@ fn dividers() -> [u32; 4] {
     }
 }
 
-/// Upscales from APB to CPU, one update each, so no intermediate state
-/// has MEM above 200 MHz or APB above 100 MHz (rtc_clk.c:283-297). Runs
+/// Changes the dividers one update at a time: from APB to CPU when going
+/// up, from CPU to APB when going down, so no intermediate state has MEM
+/// above 200 MHz or APB above 100 MHz (rtc_clk.c:283-308). Runs
 /// from RAM: the cache clock changes under it. Interrupts are off in the
 /// kernel.
 #[unsafe(link_section = ".ram_text")]
 #[inline(never)]
-unsafe fn upscale(d: &[u32; 4]) {
+unsafe fn rescale(d: &[u32; 4], up: bool) {
     #[inline(always)]
     unsafe fn field(addr: usize, shift: u32, v: u32) {
         unsafe {
@@ -215,10 +216,17 @@ unsafe fn upscale(d: &[u32; 4]) {
         }
     }
     unsafe {
-        field(ROOT_CLK_CTRL2, APB_DIV_S, d[3]);
-        field(ROOT_CLK_CTRL1, SYS_DIV_S, d[2]);
-        field(ROOT_CLK_CTRL1, MEM_DIV_S, d[1]);
-        field(ROOT_CLK_CTRL0, CPU_DIV_S, d[0]);
+        if up {
+            field(ROOT_CLK_CTRL2, APB_DIV_S, d[3]);
+            field(ROOT_CLK_CTRL1, SYS_DIV_S, d[2]);
+            field(ROOT_CLK_CTRL1, MEM_DIV_S, d[1]);
+            field(ROOT_CLK_CTRL0, CPU_DIV_S, d[0]);
+        } else {
+            field(ROOT_CLK_CTRL0, CPU_DIV_S, d[0]);
+            field(ROOT_CLK_CTRL1, MEM_DIV_S, d[1]);
+            field(ROOT_CLK_CTRL1, SYS_DIV_S, d[2]);
+            field(ROOT_CLK_CTRL2, APB_DIV_S, d[3]);
+        }
     }
 }
 
@@ -228,20 +236,46 @@ unsafe fn upscale(d: &[u32; 4]) {
 /// the current dividers decide. Returns the CPU clock in MHz the registers
 /// now say.
 pub fn cpu_360() -> Option<u32> {
+    set_cpu_mhz(360)
+}
+
+/// Sets the CPU to 360 or 90 MHz (CPLL / 1 or / 4) if the dividers are in
+/// one of those two known states (the `clock` control command, doc/16
+/// §6.9, as well as boot). Returns the CPU clock the registers now say.
+pub fn set_cpu_mhz(mhz: u32) -> Option<u32> {
     let src = unsafe { rd(LP_CLKRST_HP_CLK_CTRL) } & 3;
     let before = dividers();
     let ok = src == HP_ROOT_CLK_SRC_CPLL && (before == DIV_90 || before == DIV_360);
     event!(Info, "clock.dividers", root_src = src, cpu = before[0], mem = before[1], sys = before[2], apb = before[3], known = ok);
+    let target = match mhz {
+        360 => DIV_360,
+        90 => DIV_90,
+        _ => return None,
+    };
     if !ok {
         return None;
     }
-    if before == DIV_90 {
+    if before != target {
         unsafe {
-            upscale(&DIV_360);
+            rescale(&target, mhz == 360);
             let update: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_UPDATE_CPU_FREQUENCY);
-            update(CPLL_MHZ);
+            update(mhz);
         }
     }
     let after = dividers();
     Some(CPLL_MHZ / (after[0] + 1))
+}
+
+/// Hands the HP dbias back from PVT to the PMU (the `pvt off` control
+/// command, doc/16 §6.9). Unlike ESP-IDF's `pvt_func_enable(false)`, which
+/// keeps the level PVT reached by copying it into `DCM_VSET`
+/// (pmu_pvt.c:141-146), this leaves `DCM_VSET` at the bootloader's value:
+/// the state before PVT was turned on.
+pub fn pvt_off() {
+    clear_bits(DBIAS_TIMER, TIMER_EN);
+    set_bits(PMU_HP_ACTIVE_HP_REGULATOR0, DIG_REGULATOR0_DBIAS_SEL);
+    clear_bits(PERI_CLK_CTRL24, PVT_CLK_EN);
+    delay_us(1000);
+    event!(Info, "clock.pvt_off");
+    log_voltages("pvt_off");
 }

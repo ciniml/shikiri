@@ -277,6 +277,12 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             kup.log_state();
             Ok(0)
         }
+        Command::Clock { mhz } => Current::set_cpu_mhz(mhz),
+        Command::Pvt { on } => Current::set_pvt(on),
+        Command::Power => {
+            Current::log_power("cmd");
+            Ok(0)
+        }
         Command::Reboot => {
             event!(Info, "kernel.reboot");
             // Give the host a moment to read the log (doc/12: what it

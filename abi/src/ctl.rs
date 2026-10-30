@@ -38,6 +38,12 @@ pub mod cmd {
     pub const REBOOT: u8 = 12;
     /// Logs the kernel slots and otadata.
     pub const KINFO: u8 = 13;
+    /// `u32 mhz`: CPU clock (90 or 360 on the P4), for experiments.
+    pub const CLOCK: u8 = 14;
+    /// `u32 on`: automatic voltage adjustment (PVT) on or off.
+    pub const PVT: u8 = 15;
+    /// Logs the core voltage settings.
+    pub const POWER: u8 = 16;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -61,6 +67,9 @@ pub enum Command<'a> {
     KupdateBegin { length: u32 },
     Reboot,
     Kinfo,
+    Clock { mhz: u32 },
+    Pvt { on: bool },
+    Power,
 }
 
 impl Command<'_> {
@@ -79,6 +88,9 @@ impl Command<'_> {
             Command::KupdateBegin { .. } => "kupdate_begin",
             Command::Reboot => "reboot",
             Command::Kinfo => "kinfo",
+            Command::Clock { .. } => "clock",
+            Command::Pvt { .. } => "pvt",
+            Command::Power => "power",
         }
     }
 }
@@ -105,6 +117,9 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::KUPDATE_BEGIN if args.len() == 4 => Command::KupdateBegin { length: u32_at(args, 0)? },
         cmd::REBOOT if args.is_empty() => Command::Reboot,
         cmd::KINFO if args.is_empty() => Command::Kinfo,
+        cmd::CLOCK if args.len() == 4 => Command::Clock { mhz: u32_at(args, 0)? },
+        cmd::PVT if args.len() == 4 => Command::Pvt { on: u32_at(args, 0)? != 0 },
+        cmd::POWER if args.is_empty() => Command::Power,
         cmd::REMOVE => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -147,10 +162,15 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::KupdateBegin { .. } => put(&[cmd::KUPDATE_BEGIN])?,
         Command::Reboot => put(&[cmd::REBOOT])?,
         Command::Kinfo => put(&[cmd::KINFO])?,
+        Command::Clock { .. } => put(&[cmd::CLOCK])?,
+        Command::Pvt { .. } => put(&[cmd::PVT])?,
+        Command::Power => put(&[cmd::POWER])?,
     }
     put(&id.to_le_bytes())?;
     match c {
         Command::Kill { pid } => put(&pid.to_le_bytes())?,
+        Command::Clock { mhz } => put(&mhz.to_le_bytes())?,
+        Command::Pvt { on } => put(&(*on as u32).to_le_bytes())?,
         Command::Run { name, arg0, arg1 } => {
             if name.len() > 32 {
                 return None;
@@ -210,9 +230,16 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("psram") => Command::Psram,
         Some("reboot") => Command::Reboot,
         Some("kinfo") => Command::Kinfo,
+        Some("clock") => Command::Clock { mhz: num(Some(w.next().ok_or("clock MHZ")?))? },
+        Some("pvt") => match w.next() {
+            Some("on") => Command::Pvt { on: true },
+            Some("off") => Command::Pvt { on: false },
+            _ => return Err("pvt on|off"),
+        },
+        Some("power") => Command::Power,
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power");
         }
     };
     if w.next().is_some() {
@@ -241,7 +268,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "flashtest", "reboot", "kinfo"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

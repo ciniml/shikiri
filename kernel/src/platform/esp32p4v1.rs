@@ -615,6 +615,22 @@ impl Platform for Esp32p4v1 {
         clock::log_voltages("cpu360");
     }
 
+    fn set_cpu_mhz(mhz: u32) -> Result<u32, &'static str> {
+        let r = clock::set_cpu_mhz(mhz).ok_or("unsupported clock or state")?;
+        t5_abi::event!(Info, "clock.cpu", mhz = r, measured_khz = cpu_khz());
+        clock::log_voltages("clock_cmd");
+        Ok(r)
+    }
+
+    fn set_pvt(on: bool) -> Result<u32, &'static str> {
+        if on {
+            clock::pvt_on().then_some(1).ok_or("no PVT calibration")
+        } else {
+            clock::pvt_off();
+            Ok(0)
+        }
+    }
+
     fn log_power(stage: &'static str) {
         clock::log_voltages(stage);
     }
