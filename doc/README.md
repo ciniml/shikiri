@@ -17,6 +17,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [11](11-emulator.md) | 自作エミュレータ t5emu（P4 v1.x）。実機用カーネルを無改造で実行して PASS。キャッシュ非一貫性、RWDT、lock-up の検出 |
 | [12](12-structured-logging.md) | 構造化ログサービス（テキストログを廃止。スキーマは ELF、LP SRAM のリング、USB/RTT/前回起動の回収）。L1（USB）、L2（RTT を probe-rs で回収）、L3（lock-up → RWDT のリセット → 次の起動で直前のログを回収）を実装済み |
 | [13](13-probe-rs-p4.md) | probe-rs の P4 対応の調査（上流は 0.31.0 から対応済み。v1.x の L2MEM はプログラムバッファ経由、LP SRAM はメモリマップにない）。実機で LP SRAM の RTT をコアを止めずに読めた |
+| [18](18-m7-sdcard-design.md) | M7 の設計（microSD とファイル。M7a: カードの初期化とセクタ 0 の読み出し、M7b: 4 ビット・DMA・`sd` オブジェクト、M7c: U モードのファイルサービス）。調査は [research/m7-sdcard.md](research/m7-sdcard.md) |
 | [17](17-m6-display-design.md) | M6 の設計（表示とタッチ。M6a: I2C・IO エクスパンダ・パネルの判別・タッチ、M6b: VO3・DSI・DW-GDMA で表示、M6c: アプリへの display/touch）。調査は [research/m6-dsi.md](research/m6-dsi.md) と [research/m6-panel-touch.md](research/m6-panel-touch.md) |
 | [16](16-m5-update-design.md) | M5 の設計（カーネルの A/B 更新とロールバック、T5K パッケージ、アプリの A/B、IPC）。M5a（カーネルの A/B）は実機で更新・確定・3 通りのロールバックを確認。M5b（アプリの A/B）は実機でも確認。M5c（IPC チャネル）を実装し、QEMU・t5emu・実機で確認 |
 | [15](15-m4b-xip.md) | M4b: アプリの text をフラッシュから直接実行し、data を PSRAM に置く（XIP）。実装し、実機で確認。M4c（PVT と 360MHz）は [research/m4-psram-and-clock.md](research/m4-psram-and-clock.md) §10 |
