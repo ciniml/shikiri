@@ -76,6 +76,7 @@ const TO_EN: u32 = 1 << 5;
 /// 2^17 cycles of 40 MHz, about 3.3 ms (IDF's value).
 const TO_VALUE: u32 = 17;
 const SP_RST_SLV_EN: u32 = 1 << 0;
+const SR_BUS_BUSY: u32 = 1 << 4;
 
 const INT_TRANS_COMPLETE: u32 = 1 << 7;
 const INT_NACK: u32 = 1 << 10;
@@ -236,8 +237,22 @@ pub fn transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
             }
             Ok(())
         }
+        // As ESP-IDF: after a NACK the controller ends the transfer by
+        // itself; wait until the bus is free. No reset and no bus clear:
+        // the clear's 9 SCL pulses after every NACK (an I2C scan) made the
+        // GT911 stop answering until its next reset (doc/17 §9).
+        Err(Error::Nack) => {
+            let end = Esp32p4v1::now() + 16 * TRANSFER_US;
+            while unsafe { rd(SR) } & SR_BUS_BUSY != 0 {
+                if Esp32p4v1::now() > end {
+                    recover();
+                    break;
+                }
+            }
+            fifo_reset();
+            Err(Error::Nack)
+        }
         Err(e) => {
-            // A NACK leaves the controller waiting; the stop is not sent.
             recover();
             Err(e)
         }
