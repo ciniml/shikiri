@@ -210,6 +210,60 @@ ets_update_cpu_frequency(360) // ROM の delay を使う場合だけ
 - **命令の一貫性**: L1 D と L2 の書き戻し + L1 I の無効化で、PSRAM に写したコードは正しく動いた。`fence.i` だけで足りるかは、まだ試していない。
 
 ### 9.3 残っていること
-- 360MHz（PVT を調べてから。§6）。
+- 360MHz（PVT を調べてから。§6）。→ §10 で実施。
 - M4b（XIP: text をフラッシュから実行し、data を PSRAM に置く）。
 - スロットの固定割り当て（8MiB × 4）をやめて、必要な大きさだけ割り当てる。
+
+## 10. M4c: PVT（電圧の自動調整）と CPU 360MHz（2026-10-30）
+§6 で後回しにした 360MHz 化を、PVT を移植したうえで行った。ログは [../logs/m4c-clock-tab5-20261030.txt](../logs/m4c-clock-tab5-20261030.txt)。
+
+### 10.1 PVT の手順（ESP-IDF 6.0 の移植）
+- ESP-IDF の app は `pmu_init` の最後で `pvt_auto_dbias_init()` → `pvt_func_enable(true)` → 1ms 待ちを行い [esp_hw_support/port/esp32p4/pmu_init.c:203-214]、そのあとの `esp_clk_init` で 360MHz に上げる（§1.2）。カーネルも **PVT → 360MHz** の順にし、PVT が使えないチップでは 90MHz のままにする（判断）。
+- 対象: eFuse のブロック版（major × 100 + minor）が 2〜99 のとき [port/esp32p4/pmu_pvt.c:77-80; efuse_reg.h:749-791]。Tab5 は 3（v0.3）。master では条件が `!= 100` に変わっている。
+- `pvt_auto_dbias_init` [pmu_pvt.c:77-118]:
+  1. クロックを入れる: `REF_160M_CLK_EN`（REF_CLK_CTRL2 bit0）、`PVT_SYS_CLK_EN`（SOC_CLK_CTRL1 bit25）[hp_sys_clkrst_reg.h:376,558,982,989]
+  2. `PVT_DBIAS_TIMER.TIMER_EN` を落として 100µs 待つ
+  3. 監視チャネル 0/1 に 49/53、チャネル 0〜2 の設定に 0x13E80/0x13E80/0x10000、CMD0〜2 に 0x24/0x5/0x427 [soc/rtc.h:100-107]
+  4. `PMU_HP_ACTIVE_HP_REGULATOR0.DIG_DBIAS_INIT` を立てる（既定値から較正を始める）、`TIMER_TARGET` = 0x7D00
+  5. PVT の機能クロックの分周 1、`PVT_CLK_EN`、周辺グループ 1〜4 のクロック [hp_sys_clkrst_reg.h:2581-2649]
+  6. `PVT_CLK_CFG.MONITOR_CLK_PVT_EN`（一度立てると落とせない）、100µs 待つ
+  7. 監視セル（site 3、unit 0/1、VT1）: エッジモード 1、上限 164、下限 157 [rtc.h:110-112]
+  8. eFuse の `LP_DCDC_DBIAS_VOL_GAP`（RD_MAC_SYS_5 bit[9:5]）から HP と LP の差を求め、符号と絶対値を CMD0〜2 に書く [pmu_pvt.c:31-65]。Tab5 は eFuse 7 → 差 −1 → 符号付きで 17
+- `pvt_func_enable(true)` [pmu_pvt.c:120-139]: クロックを入れ直し、`DIG_DBIAS_INIT` を立て、監視セルを有効にして 1ms 待ち、**`DIG_REGULATOR0_DBIAS_SEL` を落として dbias の制御を PMU から PVT に渡し**、`DIG_DBIAS_INIT` を落とし、`TIMER_EN` を立てる。
+- レジスタの基底: PVT 0x5009_E000、PMU 0x5011_5000、HP_SYS_CLKRST 0x500E_6000 [soc/esp32p4/register/hw_ver1/soc/reg_base.h:60,120,135]。
+- 実装: `kernel/src/platform/esp32p4v1/clock.rs`。各段で `clock.voltage`（DCDC の `DCM_VSET`、HP レギュレータの dbias、PVT が出している `HP_DBIAS_VOL` / `LP_DBIAS_VOL`、制御が PVT にあるか）を記録する。
+
+### 10.2 360MHz への切り替え
+- §1.3 の手順どおり、APB → SYS → MEM → CPU の順に分周値を変え、1 つごとに `SOC_CLK_DIV_UPDATE` を立てて 0 に戻るのを待つ（rtc_clk.c:283-297 の「上げるとき」の順。途中で MEM > 200MHz や APB > 100MHz にならない）。CPU 360、MEM 180、SYS 180、APB 90。キャッシュのクロックが変わるので、関数は `.ram_text`（L2MEM）に置いた（判断。`check-ram-text.sh` の検査対象）。最後に ROM の `ets_update_cpu_frequency(360)`。
+- **今の分周値で決める**: クロック源が CPLL で、分周が 90MHz の組（3,0,0,0）なら上げ、360MHz の組（0,1,0,1）ならそのまま（SW リセットでブートローダがクロックを触らずに戻ってきた場合。bootloader_clock_init.c:51）、それ以外なら触らない。
+- 起動の順は ESP-IDF と同じく、**PSRAM の初期化とチューニングを 90MHz で行ってから** 上げる。PSRAM のクロックは MPLL 系で、CPU の分周とは関係がない。
+
+### 10.3 実機（Tab5）の結果
+| 項目 | 90MHz（M4b まで） | 360MHz（M4c） |
+|---|---|---|
+| 測った CPU クロック（mcycle / SYSTIMER） | 90.0MHz | **360.0MHz** |
+| 署名の検証（hello、7KB） | 89ms | **22.6ms** |
+| 署名の検証（xipcheck、138KB） | 475ms | **127ms** |
+| リセットから自己試験 24 件の完了まで | 2.68 秒 | **1.50 秒** |
+| PSRAM 32MiB 全域テスト（1 ワードずつ） | 書き込み 30MB/s、読み出し 24MB/s | 書き込み 76MB/s、読み出し 66MB/s |
+
+- 電圧（dbias の値。単位は ESP-IDF の内部値）:
+
+  | 時点 | DCM_VSET | HP_DBIAS_VOL | LP_DBIAS_VOL | 制御 |
+  |---|---|---|---|---|
+  | ブートローダの設定のまま | 27 | 26 | 27 | PMU |
+  | PVT を有効にした直後（90MHz） | 27 | 25 | 26 | PVT |
+  | 360MHz にした直後 | 27 | 25 | 26 | PVT |
+  | 自己試験の後（360MHz で約 1.2 秒動いた後） | 27 | **26** | **27** | PVT |
+
+  PVT は、90MHz では電圧を 1 段下げ、360MHz で負荷がかかると 1 段戻した。**自動調整が働いている**（推測。監視セルの遅延から判断する仕組みで、値が負荷とともに動いたことから）。
+- 連続動作: `run xipcheck`（XIP、138KB の検証と表の合計）と `psram`（32MiB 全域の読み書き）を交互に 15 回ずつ、約 80 秒。**誤り 0、リセットなし**。
+- 自己試験 24 件はすべて通った（QEMU virt、t5emu も通過）。
+
+### 10.4 t5emu
+- ブートローダの残す状態（`ROOT_CLK_CTRL0` = 0x60、HP のクロック源 = CPLL、eFuse のブロック版 v0.3）を初期値にし、`SOC_CLK_DIV_UPDATE` はすぐに 0 に戻るようにした。ROM の `ets_update_cpu_frequency` は何もしない。カーネルは実機と同じ道筋（PVT → 360MHz）を通る。
+- **t5emu の CPU の速さは `--mhz` のまま変わらない**（分周値を変えても速くならない）ので、`clock.cpu` の `measured_khz` は 40000 のまま。速さを変えると、命令数と時間の対応（`--max-ms` など）を全部見直す必要があり、今は行わない（判断）。
+
+### 10.5 残っていること
+- SW リセットで 360MHz のまま戻ってくる場合（分周がすでに 360MHz の組）は、実機ではまだ通していない（今のリセットは、プローブのリセットと RWDT で、どちらもブートローダがクロックを設定し直す）。
+- 低消費電力（スリープ）に入るときは、ESP-IDF は PVT を止めて dbias を PMU に戻す（`pvt_func_enable(false)`、sleep_modes.c:792-810）。スリープを作るときに移植する。

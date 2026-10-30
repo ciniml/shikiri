@@ -130,6 +130,7 @@ pub extern "C" fn kmain() -> ! {
         Ok((window, size)) => set_pool(window..window + size),
         Err(why) => event!(Warn, "boot.no_psram", error = why),
     }
+    Current::clock_init();
     let (pool, slot_size) = (pool(), slot(0).1);
     event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
@@ -181,6 +182,7 @@ fn serve(store: &mut store::Store) -> ! {
         }
     }
     let (stack_size, stack_used) = rv::stack_usage();
+    Current::log_power("selftest_done");
     event!(Info, "ctl.ready", slots = sched::MAX_PROCS as u32, stack_size = stack_size, stack_used = stack_used);
     loop {
         s.run(None, &mut |s| {

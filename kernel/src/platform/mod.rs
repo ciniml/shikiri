@@ -89,6 +89,10 @@ pub trait Platform {
     }
     /// Logs platform details worth keeping (called once the log is up).
     fn log_info() {}
+    /// Final clock and voltage setup, after the PSRAM is up (M4c).
+    fn clock_init() {}
+    /// Logs the core voltage settings (`stage` names the moment).
+    fn log_power(_stage: &'static str) {}
     /// Restarts the system watchdog (no-op where there is none).
     fn feed_watchdog() {}
     /// Why the chip last reset (ROM RESET_REASON on the ESP32-P4; 0 = unknown).

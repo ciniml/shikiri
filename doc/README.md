@@ -17,7 +17,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [11](11-emulator.md) | 自作エミュレータ t5emu（P4 v1.x）。実機用カーネルを無改造で実行して PASS。キャッシュ非一貫性、RWDT、lock-up の検出 |
 | [12](12-structured-logging.md) | 構造化ログサービス（テキストログを廃止。スキーマは ELF、LP SRAM のリング、USB/RTT/前回起動の回収）。L1（USB）、L2（RTT を probe-rs で回収）、L3（lock-up → RWDT のリセット → 次の起動で直前のログを回収）を実装済み |
 | [13](13-probe-rs-p4.md) | probe-rs の P4 対応の調査（上流は 0.31.0 から対応済み。v1.x の L2MEM はプログラムバッファ経由、LP SRAM はメモリマップにない）。実機で LP SRAM の RTT をコアを止めずに読めた |
-| [15](15-m4b-xip.md) | M4b: アプリの text をフラッシュから直接実行し、data を PSRAM に置く（XIP）。実装し、実機で確認 |
+| [15](15-m4b-xip.md) | M4b: アプリの text をフラッシュから直接実行し、data を PSRAM に置く（XIP）。実装し、実機で確認。M4c（PVT と 360MHz）は [research/m4-psram-and-clock.md](research/m4-psram-and-clock.md) §10 |
 | [14](14-m3-design.md) | M3 の設計（T5A v1 の署名、アプリストア、制御チャネル、インストール、ハンドル。フラッシュの MMU と書き込みの手順）。M3a（署名と検証）、M3b（フラッシュのアプリストアから起動）、M3c（RTT のコマンドで、再起動なしに起動・停止）、M3d（制御チャネルからのインストール、ハンドルとタイマ）を実装済み。M3 完了。M4a（PSRAM）は [research/m4-psram-and-clock.md](research/m4-psram-and-clock.md) |
 
 記述ルール:

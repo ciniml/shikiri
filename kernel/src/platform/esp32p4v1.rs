@@ -5,6 +5,7 @@
 
 use super::Platform;
 
+mod clock;
 mod psram;
 
 // USB Serial/JTAG (doc/06 §3.1): usb_serial_jtag_reg.h
@@ -322,6 +323,19 @@ static APP_DESC: AppDesc = AppDesc {
     reserv2: [0; 18],
 };
 
+/// The CPU clock, measured: mcycle against SYSTIMER over 1 ms.
+fn cpu_khz() -> u64 {
+    let read_mcycle = || -> u32 {
+        let c: u32;
+        unsafe { core::arch::asm!("csrr {0}, mcycle", out(reg) c) };
+        c
+    };
+    let (t0, c0) = (Esp32p4v1::now(), read_mcycle());
+    while Esp32p4v1::now() - t0 < SYSTIMER_TICKS_PER_MS {}
+    let (t1, c1) = (Esp32p4v1::now(), read_mcycle());
+    c1.wrapping_sub(c0) as u64 * SYSTIMER_TICKS_PER_MS / (t1 - t0)
+}
+
 unsafe fn rd(addr: usize) -> u32 {
     unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
@@ -535,17 +549,23 @@ impl Platform for Esp32p4v1 {
             t5_abi::event!(Debug, "boot.clock_reg", name = name, addr = t5_abi::log::Addr(addr as u32), value = unsafe { rd(addr) });
         }
         t5_abi::event!(Debug, "boot.clock_reg", name = "pmu_ext_ldo_p1_0p1a_ana", addr = t5_abi::log::Addr(PMU_EXT_LDO_P1_0P1A_ANA as u32), value = unsafe { rd(PMU_EXT_LDO_P1_0P1A_ANA) });
-        // The CPU clock, measured: mcycle against SYSTIMER over 1 ms.
-        let read_mcycle = || -> u32 {
-            let c: u32;
-            unsafe { core::arch::asm!("csrr {0}, mcycle", out(reg) c) };
-            c
-        };
-        let (t0, c0) = (Self::now(), read_mcycle());
-        while Self::now() - t0 < SYSTIMER_TICKS_PER_MS {}
-        let (t1, c1) = (Self::now(), read_mcycle());
-        let cpu_khz = c1.wrapping_sub(c0) as u64 * SYSTIMER_TICKS_PER_MS / (t1 - t0);
-        t5_abi::event!(Info, "boot.clock", cpu_khz = cpu_khz);
+        t5_abi::event!(Info, "boot.clock", cpu_khz = cpu_khz());
+    }
+
+    fn clock_init() {
+        // PVT first, then the clock, as ESP-IDF's pmu_init and esp_clk_init
+        // do (doc/research/m4-psram-and-clock.md §10).
+        if !clock::pvt_on() {
+            t5_abi::event!(Warn, "clock.no_pvt");
+            return;
+        }
+        let mhz = clock::cpu_360();
+        t5_abi::event!(Info, "clock.cpu", mhz = mhz.unwrap_or(0), measured_khz = cpu_khz());
+        clock::log_voltages("cpu360");
+    }
+
+    fn log_power(stage: &'static str) {
+        clock::log_voltages(stage);
     }
 
     fn feed_watchdog() {

@@ -1,0 +1,263 @@
+# M4c (PVT + CPU 360MHz) on the Tab5, 2026-10-30. Kernel in ota_0.
+## 1. reset; boot (PVT on, 360MHz), self-test, then the full 32MiB PSRAM test (ctl psram)
+    --name hello-untrusted
+    --name hello-badabi
+  hello                0.1.0  extents 0+1  6988 bytes  Valid
+  fault                0.1.0  extents 1+1  7760 bytes  Valid
+  ticker               0.1.0  extents 2+1  7884 bytes  Valid
+  spin                 0.1.0  extents 3+1  7752 bytes  Valid
+  timers               0.1.0  extents 4+1  9304 bytes  Valid
+  hello-untrusted      0.1.0  extents 5+1  6996 bytes  Valid
+  hello-badabi         0.1.0  extents 6+1  6992 bytes  Valid
+  hello-xip            0.1.0  extents 7+1  7012 bytes  Valid
+  xipcheck             0.1.0  extents 8+3  138344 bytes  Valid
+    --features platform-esp32p4v1 --target-dir target/esp32p4v1
+.ram_text ok (440 bytes checked)
+    --reset --cmd "psram" --until-done \
+   0.113082 I kernel log.prev_begin boot_id=20 bytes=4005
+   0.118295 I kernel log.prev_end boot_id=20 frames=88
+   0.118418 I kernel boot.start platform=esp32p4-v1.x boot_id=21 reset_cause=24 abi_major=0 abi_minor=5
+   0.118526 I kernel boot.cpu misa=1083183397 mstatus=0 mtvec=0x40002583
+   0.118601 I kernel boot.rwdt config0=2953309696 stg0_hold=272000
+   0.118691 D kernel boot.clock_reg name=root_clk_ctrl0 addr=0x500e6004 value=96
+   0.118781 D kernel boot.clock_reg name=root_clk_ctrl1 addr=0x500e6008 value=0
+   0.118868 D kernel boot.clock_reg name=root_clk_ctrl2 addr=0x500e600c value=0
+   0.118955 D kernel boot.clock_reg name=soc_clk_ctrl0 addr=0x500e6014 value=3873413103
+   0.119041 D kernel boot.clock_reg name=peri_clk_ctrl00 addr=0x500e6030 value=53341
+   0.119130 D kernel boot.clock_reg name=ana_pll_ctrl0 addr=0x500e60bc value=844
+   0.119216 D kernel boot.clock_reg name=lp_hp_clk_ctrl addr=0x50111040 value=536870909
+   0.119303 D kernel boot.clock_reg name=pmu_rf_pwc addr=0x5011515c value=218103808
+   0.119385 D kernel boot.clock_reg name=pmu_ext_ldo_p1_0p1a addr=0x501151d0 value=1075839360
+   0.119489 D kernel boot.clock_reg name=pmu_ext_ldo_p1_0p1a_ana addr=0x501151d4 value=2776629248
+   0.120601 I kernel boot.clock cpu_khz=89806
+   0.123881 I kernel flash.mapped window=0x41000000 ota0_crc32=429208694
+   0.132894 I kernel store.open window=0x41000000 catalog_seq=13 apps=9
+   0.133112 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+   0.133240 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+   0.133357 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+   0.133474 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+   0.133605 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+   0.133731 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+   0.133848 I kernel store.app name=timers major=0 minor=1 patch=0 offset=0x00430000 length=9304 state=2 flags=0
+   0.133966 I kernel store.app name=hello-xip major=0 minor=1 patch=0 offset=0x00490000 length=7012 state=2 flags=0
+   0.134088 I kernel store.app name=xipcheck major=0 minor=1 patch=0 offset=0x004a0000 length=138344 state=2 flags=0
+   0.134220 I kernel psram.ldo dref=10 mul=3 efuse=true nominal_mv=1925 ldo=1075839360 ana=2776629248
+   0.134553 I kernel psram.mpll mhz=400 cal_us=19 div_reg=153
+   0.134658 I kernel psram.controller
+   0.134935 I kernel psram.id vendor=13 density=7 kgd=6 size=33554432 echo=1516993677 mr0=48 mr3=160 mr4=32 mr8=75
+   0.301951 I kernel psram.tuned phase=0 phases_ok=15 delayline_id=17 data_delay=2 dqs_delay=0 window=25 delaylines_ok=1073741792 ms=166
+   0.308574 I kernel psram.memtest bytes=33554432 step_words=4096 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=2 read_mb_s=5
+   0.308696 I kernel psram.ready window=0x48000000 size=33554432 ms=174
+   0.308791 I kernel clock.pvt blk_version=3 gap_efuse=7 supported=true
+   0.308883 I kernel clock.voltage stage=bootloader dcm_vset=27 regulator_dbias=22 hp_dbias=26 lp_dbias=27 pvt_control=false
+   0.311226 I kernel clock.pvt_on gap=17
+   0.311290 I kernel clock.voltage stage=pvt dcm_vset=27 regulator_dbias=22 hp_dbias=25 lp_dbias=26 pvt_control=true
+   0.311411 I kernel clock.dividers root_src=1 cpu=3 mem=0 sys=0 apb=0 known=true
+   0.312507 I kernel clock.cpu mhz=360 measured_khz=360000
+   0.312540 I kernel clock.voltage stage=cpu360 dcm_vset=27 regulator_dbias=22 hp_dbias=25 lp_dbias=26 pvt_control=true
+   0.312588 I kernel boot.pool base=0x48000000 size=33554432 slot_size=8388608
+   0.337620 I kernel selftest.case name=verify/tampered ok=true result=Image(BadSignature)
+   0.337698 I kernel selftest.case name=verify/untrusted-key ok=true result=Image(UnknownKey)
+   0.360753 I kernel selftest.case name=verify/abi-mismatch ok=true result=Image(AbiMismatch { major: 9, minor: 0 })
+   0.383574 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 xip=false verify_us=22662
+   0.383840 I kernel proc.start pid=1 name=hello base=0x48000000 data=0x48001880 build_id=a6b2b9658434ae960f4736e9d51704c5
+   0.384057 I pid1   hello.greet text=hello from U-mode
+   0.384125 I kernel proc.exit pid=1 code=0
+   0.384202 I kernel selftest.case name=hello ok=true result=exit code=0
+   0.407596 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=23338
+   0.407752 I kernel proc.start pid=1 name=fault/ok base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.407827 I pid1   fault.start mode=0 addr=0x00000000
+   0.407855 I kernel proc.exit pid=1 code=0
+   0.407890 I kernel selftest.case name=fault/ok ok=true result=exit code=0
+   0.430836 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22896
+   0.430988 I kernel proc.start pid=1 name=fault/load-mmio base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.431067 I pid1   fault.start mode=1 addr=0x500d2000
+   0.431116 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+   0.431177 I kernel selftest.case name=fault/load-mmio ok=true result=load access fault code=5 pc=0x48000084 tval=0x500d2000
+   0.454145 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22896
+   0.454294 I kernel proc.start pid=1 name=fault/load-kernel base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.454375 I pid1   fault.start mode=1 addr=0x40000aac
+   0.454405 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+   0.454463 I kernel selftest.case name=fault/load-kernel ok=true result=load access fault code=5 pc=0x48000084 tval=0x40000aac
+   0.477433 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22896
+   0.477581 I kernel proc.start pid=1 name=fault/store-kernel base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.477663 I pid1   fault.start mode=2 addr=0x40000aac
+   0.477697 W kernel proc.fault: 1 killed by store access fault at 0x480000da
+   0.477755 I kernel selftest.case name=fault/store-kernel ok=true result=store access fault code=7 pc=0x480000da tval=0x40000aac
+   0.500726 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22896
+   0.500874 I kernel proc.start pid=1 name=fault/load-kernel-ram base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.500958 I pid1   fault.start mode=1 addr=0x4ff011d4
+   0.500989 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+   0.501046 I kernel selftest.case name=fault/load-kernel-ram ok=true result=load access fault code=5 pc=0x48000084 tval=0x4ff011d4
+   0.524075 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22952
+   0.524226 I kernel proc.start pid=1 name=fault/store-kernel-ram base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.524311 I pid1   fault.start mode=2 addr=0x4ff011d4
+   0.524342 W kernel proc.fault: 1 killed by store access fault at 0x480000da
+   0.524400 I kernel selftest.case name=fault/store-kernel-ram ok=true result=store access fault code=7 pc=0x480000da tval=0x4ff011d4
+   0.547374 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22895
+   0.547522 I kernel proc.start pid=1 name=fault/exec-data base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.547602 I pid1   fault.start mode=3 addr=0x00000000
+   0.547636 W kernel proc.fault: 1 killed by instruction access fault at 0x48001be8
+   0.547699 I kernel selftest.case name=fault/exec-data ok=true result=instruction access fault code=1 pc=0x48001be8 tval=0x48001be8
+   0.570672 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22896
+   0.570824 I kernel proc.start pid=1 name=fault/store-text base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.570904 I pid1   fault.start mode=4 addr=0x00000000
+   0.570935 W kernel proc.fault: 1 killed by store access fault at 0x480000ce
+   0.570993 I kernel selftest.case name=fault/store-text ok=true result=store access fault code=7 pc=0x480000ce tval=0x4800000a
+   0.593963 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22896
+   0.594115 I kernel proc.start pid=1 name=fault/bad-log base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.594193 I pid1   fault.start mode=5 addr=0x40000aac
+   0.594226 W kernel log.rejected pid=1 len=5
+   0.594255 W kernel log.rejected pid=1 len=7
+   0.594285 I kernel proc.exit pid=1 code=0
+   0.594319 I kernel selftest.case name=fault/bad-log ok=true result=exit code=0
+   0.617270 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22897
+   0.617419 I kernel proc.start pid=1 name=fault/open-denied base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.617500 I pid1   fault.start mode=6 addr=0x40000aac
+   0.617548 W kernel proc.denied pid=1 name=timer
+   0.617580 I pid1   fault.open_denied denied=true bad_address=true
+   0.617604 I kernel proc.exit pid=1 code=0
+   0.617638 I kernel selftest.case name=fault/open-denied ok=true result=exit code=0
+   0.617690 I kernel selftest.m2_start processes=4 slice_ms=10
+   0.641370 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e xip=false verify_us=23625
+   0.641519 I kernel proc.start pid=1 name=ticker1 base=0x48000000 data=0x48001c00 build_id=23dcbe01818507daf03ef6718e8b605e
+   0.664764 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e xip=false verify_us=23169
+   0.664997 I kernel proc.start pid=2 name=ticker2 base=0x48800000 data=0x48801c00 build_id=23dcbe01818507daf03ef6718e8b605e
+   0.688419 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=23345
+   0.688642 I kernel proc.start pid=3 name=spin1 base=0x49000000 data=0x49001b80 build_id=a24822e2c6097d31431cf08bce1421e2
+   0.711654 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=22938
+   0.711869 I kernel proc.start pid=4 name=spin2 base=0x49800000 data=0x49801b80 build_id=a24822e2c6097d31431cf08bce1421e2
+   0.762083 I pid1   ticker.tick id=1 tick=0 slept_us=30013
+   0.777100 I pid2   ticker.tick id=2 tick=0 slept_us=45010
+   0.792133 I pid1   ticker.tick id=1 tick=1 slept_us=30007
+   0.812192 I pid3   spin.done id=1 iterations=22082 gaps=5 fp_mismatches=0
+   0.812228 I kernel proc.exit pid=3 code=0
+   0.822069 I pid4   spin.done id=2 iterations=18436 gaps=4 fp_mismatches=0
+   0.822105 I kernel proc.exit pid=4 code=0
+   0.822148 I pid2   ticker.tick id=2 tick=1 slept_us=45006
+   0.822192 I pid1   ticker.tick id=1 tick=2 slept_us=30018
+   0.852238 I pid1   ticker.tick id=1 tick=3 slept_us=30006
+   0.867253 I pid2   ticker.tick id=2 tick=2 slept_us=45006
+   0.882285 I pid1   ticker.tick id=1 tick=4 slept_us=30006
+   0.882320 I kernel proc.exit pid=1 code=0
+   0.912300 I pid2   ticker.tick id=2 tick=3 slept_us=45006
+   0.957346 I pid2   ticker.tick id=2 tick=4 slept_us=45006
+   0.957381 I kernel proc.exit pid=2 code=0
+   0.957440 I kernel selftest.case name=ticker1 ok=true result=exit code=0
+   0.957482 I kernel selftest.case name=ticker2 ok=true result=exit code=0
+   0.957519 I kernel selftest.case name=spin1 ok=true result=exit code=0
+   0.957555 I kernel selftest.case name=spin2 ok=true result=exit code=0
+   0.957597 I kernel selftest.m2_stats elapsed_ms=245 preemptions=12 fpu_switches=4 fpu_saves=2 idle_waits=6
+   0.982356 I kernel loader.verified name=timers major=0 minor=1 patch=0 build_id=c8e99f38b575ff45116b342bad9c7254 xip=false verify_us=24669
+   0.982555 I kernel proc.start pid=1 name=timers20 base=0x48000000 data=0x48002180 build_id=c8e99f38b575ff45116b342bad9c7254
+   1.006735 I kernel loader.verified name=timers major=0 minor=1 patch=0 build_id=c8e99f38b575ff45116b342bad9c7254 xip=false verify_us=24100
+   1.006947 I kernel proc.start pid=2 name=timers35 base=0x48800000 data=0x48802180 build_id=c8e99f38b575ff45116b342bad9c7254
+   1.030128 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=23089
+   1.030319 I kernel proc.start pid=3 name=spin base=0x49000000 data=0x49001b80 build_id=a24822e2c6097d31431cf08bce1421e2
+   1.030472 W kernel proc.denied pid=1 name=display
+   1.030602 W kernel proc.denied pid=2 name=display
+   1.180674 I pid3   spin.done id=3 iterations=57778 gaps=0 fp_mismatches=0
+   1.180711 I kernel proc.exit pid=3 code=2
+   1.272587 I pid1   timers.done period_ms=20 count=10 elapsed_us=200012 min_gap_us=19992 max_gap_us=20022 coalesced=0
+   1.272644 I kernel proc.exit pid=1 code=0
+   1.312666 I pid2   timers.done period_ms=35 count=6 elapsed_us=210009 min_gap_us=34998 max_gap_us=35010 coalesced=0
+   1.312723 I kernel proc.exit pid=2 code=0
+   1.312763 I kernel selftest.case name=timers20 ok=true result=exit code=0
+   1.312806 I kernel selftest.case name=timers35 ok=true result=exit code=0
+   1.312846 I kernel selftest.case name=spin ok=true result=exit code=2
+   1.335927 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 xip=false verify_us=22974
+   1.336092 I kernel proc.start pid=1 name=hello base=0x48000000 data=0x48001880 build_id=a6b2b9658434ae960f4736e9d51704c5
+   1.358924 I kernel loader.verified name=hello-xip major=0 minor=1 patch=0 build_id=43d2215373f91d729bd120a140443249 xip=true verify_us=22756
+   1.359098 I kernel proc.start pid=2 name=hello-xip base=0x42800080 data=0x4a800080 build_id=43d2215373f91d729bd120a140443249
+   1.486118 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=126588
+   1.486457 I kernel proc.start pid=3 name=xipcheck base=0x43000080 data=0x4b000080 build_id=01f307438c713df1ded6d70c71bf93a2
+   1.486736 I pid1   hello.greet text=hello from U-mode
+   1.486812 I kernel proc.exit pid=1 code=0
+   1.486939 I pid2   hello.greet text=hello from U-mode
+   1.486975 I kernel proc.exit pid=2 code=0
+   1.495699 I pid3   xipcheck.done ok=true pc=0x4300008a table=0x4300156c data=0x4b0000e8 sum=1100105550
+   1.495778 I kernel proc.exit pid=3 code=0
+   1.495868 I kernel selftest.case name=hello ok=true result=exit code=0
+   1.495914 I kernel selftest.case name=hello-xip ok=true result=exit code=0
+   1.495957 I kernel selftest.case name=xipcheck ok=true result=exit code=0
+   1.496015 I kernel selftest.result failures=0 pass=true
+   1.496324 I kernel clock.voltage stage=selftest_done dcm_vset=27 regulator_dbias=22 hp_dbias=26 lp_dbias=27 pvt_control=true
+   1.496399 I kernel ctl.ready slots=4 stack_size=49152 stack_used=16432
+   2.460819 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+   2.460969 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+## 2. soak: 15 x (run xipcheck; psram), one t5log session each (summary lines only)
+  32.008332 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=127719
+  32.008945 I kernel ctl.done request_id=1 cmd=run ok=true value=108
+  32.017838 I pid108 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  34.069642 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  34.069775 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  35.309738 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=129072
+  35.310352 I kernel ctl.done request_id=1 cmd=run ok=true value=109
+  35.319254 I pid109 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  37.365852 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  37.365983 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  38.605024 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=127645
+  38.605635 I kernel ctl.done request_id=1 cmd=run ok=true value=110
+  38.614533 I pid110 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  40.661654 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  40.661782 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  41.900215 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=127703
+  41.900826 I kernel ctl.done request_id=1 cmd=run ok=true value=111
+  41.909723 I pid111 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  43.957311 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  43.957443 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  45.196299 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=129006
+  45.196911 I kernel ctl.done request_id=1 cmd=run ok=true value=112
+  45.205809 I pid112 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  47.244710 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  47.244841 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  48.476613 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=129021
+  48.477225 I kernel ctl.done request_id=1 cmd=run ok=true value=113
+  48.486122 I pid113 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  50.532083 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  50.532215 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  51.772711 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=128977
+  51.773323 I kernel ctl.done request_id=1 cmd=run ok=true value=114
+  51.782220 I pid114 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  53.827007 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  53.827139 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  55.065462 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=127648
+  55.066074 I kernel ctl.done request_id=1 cmd=run ok=true value=115
+  55.074971 I pid115 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  57.122534 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  57.122662 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  58.361600 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=129017
+  58.362216 I kernel ctl.done request_id=1 cmd=run ok=true value=116
+  58.371114 I pid116 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  60.413060 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  60.413192 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  61.650051 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=127688
+  61.650667 I kernel ctl.done request_id=1 cmd=run ok=true value=117
+  61.659564 I pid117 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  63.707204 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  63.707332 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  64.945171 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=129013
+  64.945782 I kernel ctl.done request_id=1 cmd=run ok=true value=118
+  64.954680 I pid118 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  67.001662 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  67.001789 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  68.239942 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=127696
+  68.240558 I kernel ctl.done request_id=1 cmd=run ok=true value=119
+  68.249455 I pid119 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  70.297181 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  70.297312 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  71.536036 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=129010
+  71.536648 I kernel ctl.done request_id=1 cmd=run ok=true value=120
+  71.545546 I pid120 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  73.588604 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  73.588736 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  74.826863 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=129102
+  74.827475 I kernel ctl.done request_id=1 cmd=run ok=true value=121
+  74.836372 I pid121 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  76.881790 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  76.881922 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432
+  78.122208 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=127659
+  78.122820 I kernel ctl.done request_id=1 cmd=run ok=true value=122
+  78.131716 I pid122 xipcheck.done ok=true pc=0x4200008a table=0x4200156c data=0x4a0000e8 sum=1100105550
+  80.177142 I kernel psram.memtest bytes=33554432 step_words=1 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=76 read_mb_s=66
+  80.177270 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432

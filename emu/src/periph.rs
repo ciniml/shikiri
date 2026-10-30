@@ -380,6 +380,23 @@ impl LpWdt {
     }
 }
 
+const ROOT_CLK_CTRL0: u32 = 0x500E_6004;
+const SOC_CLK_DIV_UPDATE: u32 = 1 << 4;
+
+/// Registers the kernel reads before writing, as the Tab5's bootloader
+/// leaves them (doc/research/m4-psram-and-clock.md §7): the CPU at CPLL / 4,
+/// the HP root clock from CPLL, and eFuse block version v0.3 (so the
+/// kernel takes the PVT path). The emulated CPU keeps its `--mhz` whatever
+/// the dividers say.
+fn initial_value(addr: u32) -> u32 {
+    match addr {
+        ROOT_CLK_CTRL0 => 3 << 5,
+        0x5011_1040 => 0x1FFF_FFFD, // LP_CLKRST_HP_CLK_CTRL
+        0x5012_D04C => 3 << 8,      // EFUSE_RD_MAC_SYS_2: BLK_VERSION_MINOR
+        _ => 0,
+    }
+}
+
 /// All modelled peripherals plus a register file for the rest of the
 /// peripheral space, so that unmodelled registers read back what was written.
 #[derive(Default)]
@@ -407,7 +424,7 @@ impl Peripherals {
             LP_CLKRST_RESET_CAUSE => self.reset_cause << 7,
             a => {
                 self.warn(a, "read");
-                self.other.get(&a).copied().unwrap_or(0)
+                self.other.get(&a).copied().unwrap_or_else(|| initial_value(a))
             }
         }
     }
@@ -422,6 +439,10 @@ impl Peripherals {
             }
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.write(a - LP_WDT_BASE, v, now_ms),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.write(a, v),
+            // The divider update completes at once (clk_ll_bus_update).
+            ROOT_CLK_CTRL0 => {
+                self.other.insert(ROOT_CLK_CTRL0, v & !SOC_CLK_DIV_UPDATE);
+            }
             a => {
                 self.warn(a, "write");
                 self.other.insert(a, v);

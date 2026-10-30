@@ -20,20 +20,20 @@ use t5_abi::log::Addr;
 use super::{Esp32p4v1, rd, wr};
 use crate::platform::Platform;
 
-fn set_bits(addr: usize, mask: u32) {
+pub(super) fn set_bits(addr: usize, mask: u32) {
     unsafe { wr(addr, rd(addr) | mask) }
 }
 
-fn clear_bits(addr: usize, mask: u32) {
+pub(super) fn clear_bits(addr: usize, mask: u32) {
     unsafe { wr(addr, rd(addr) & !mask) }
 }
 
-fn set_field(addr: usize, shift: u32, width: u32, v: u32) {
+pub(super) fn set_field(addr: usize, shift: u32, width: u32, v: u32) {
     let mask = ((1u32 << width) - 1) << shift;
     unsafe { wr(addr, (rd(addr) & !mask) | ((v << shift) & mask)) }
 }
 
-fn delay_us(us: u64) {
+pub(super) fn delay_us(us: u64) {
     let end = Esp32p4v1::now() + us * 16;
     while Esp32p4v1::now() < end {}
 }

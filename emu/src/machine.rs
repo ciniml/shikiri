@@ -101,6 +101,8 @@ const ROM_SPI_SET_OP_MODE: u32 = 0x4FC0_0110;
 /// esp32p4.rom.ld:123,125 (rev v1.x).
 const ROM_SPIFLASH_ERASE_SECTOR: u32 = 0x4FC0_014C;
 const ROM_SPIFLASH_WRITE: u32 = 0x4FC0_0154;
+/// ets_update_cpu_frequency (esp32p4.rom.ld:32); the ROM delay is not modelled.
+const ROM_UPDATE_CPU_FREQUENCY: u32 = 0x4FC0_0044;
 /// Flash offsets below this are refused (`Stop::FlashWriteProtected`): the
 /// start of `appmeta` (boot/partitions.csv).
 const FLASH_STORE_START: u32 = 0x41_0000;
@@ -518,7 +520,7 @@ impl Machine {
                     self.bus.psram.cache.writeback_d(0, u32::MAX);
                 }
             }
-            ROM_SPI_SET_OP_MODE => {}
+            ROM_SPI_SET_OP_MODE | ROM_UPDATE_CPU_FREQUENCY => {}
             ROM_SPI_CMD_CONFIG => {
                 // esp_rom_spi_cmd_t: u16 cmd, u16 cmd_bits, u32 *addr,
                 // u32 addr_bits, u32 *tx, u32 tx_bits, u32 *rx, u32 rx_bits,
