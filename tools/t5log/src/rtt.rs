@@ -40,6 +40,41 @@ pub fn control_block_address(elf: &[u8]) -> Result<u64, String> {
     Err("no _SEGGER_RTT symbol (is this a tab5-os kernel ELF?)".into())
 }
 
+/// Halts core 0, reads where it is, and lets it run again (`t5log status`):
+/// for a target that stopped answering (doc/16 §6.5). Returns lines to
+/// print.
+pub fn status(probe: &str, chip: &str, chip_description: Option<&str>) -> Result<Vec<String>, String> {
+    use probe_rs::RegisterId;
+    probe_rs_espressif::register_plugin();
+    let mut registry = Registry::from_builtin_families();
+    if let Some(path) = chip_description {
+        let yaml = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        registry.add_target_family_from_yaml(&yaml).map_err(|e| format!("{path}: {e}"))?;
+    }
+    let selector: DebugProbeSelector = probe.parse().map_err(|e| format!("--probe {probe}: {e}"))?;
+    let p = Lister::new().open(selector).map_err(|e| format!("opening probe {probe}: {e}"))?;
+    let mut session = p.attach_with_registry(chip, Permissions::default(), &registry).map_err(|e| format!("attaching to {chip}: {e}"))?;
+    let mut core = session.core(0).map_err(|e| e.to_string())?;
+    let was_halted = core.core_halted().map_err(|e| e.to_string())?;
+    let info = core.halt(Duration::from_millis(500)).map_err(|e| format!("halt: {e}"))?;
+    let mut out = vec![format!("core 0: {} pc={:#010x}", if was_halted { "was halted" } else { "was running" }, info.pc)];
+    // CSR numbers as debug register ids (RISC-V debug spec: CSRs at 0x0000-0x0FFF).
+    for (name, csr) in [("mstatus", 0x300u16), ("mepc", 0x341), ("mcause", 0x342), ("mtval", 0x343)] {
+        match core.read_core_reg::<u32>(RegisterId(csr)) {
+            Ok(v) => out.push(format!("{name}={v:#010x}")),
+            Err(e) => out.push(format!("{name}: {e}")),
+        }
+    }
+    for (name, reg) in [("ra", core.return_address()), ("sp", core.stack_pointer())] {
+        match core.read_core_reg::<u32>(reg) {
+            Ok(v) => out.push(format!("{name}={v:#010x}")),
+            Err(e) => out.push(format!("{name}: {e}")),
+        }
+    }
+    core.run().map_err(|e| format!("resume: {e}"))?;
+    Ok(out)
+}
+
 /// What the caller wants on each turn of the polling loop.
 pub enum Turn {
     Continue,

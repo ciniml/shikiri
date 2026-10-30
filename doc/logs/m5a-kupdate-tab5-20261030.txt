@@ -40,3 +40,26 @@ t5log: -> #1 kinfo
    1.529613 I kernel kupdate.slot slot=1 running=true version=0.1.1-good secure_version=1 len=98224
    1.529680 W kernel kupdate.rolled_back ota_seq=5 state=aborted slot=0
    1.529741 I kernel ctl.done request_id=1 cmd=kinfo ok=true value=0
+## 4. bad-selftest (user ran make kupdate ... bad-selftest.t5k; second attempt)
+4955.583184 I kernel kupdate.begin length=98316 slot=0
+4957.470807 I kernel kupdate.written length=98316 erases=25 writes=385 max_us=20987 ms=1837
+4957.566224 I kernel kupdate.verified slot=0 version=0.1.1-bad-selftest secure_version=1 chip_rev=100 verify_us=95258
+4957.584232 I kernel kupdate.ready slot=0 ota_seq=7 sector=0 version=0.1.1-bad-selftest
+4957.584412 I kernel kernel.reboot
+   0.139524 I kernel boot.start platform=esp32p4-v1.x boot_id=31 reset_cause=3 abi_major=0 abi_minor=5
+prev#31    0.155169 I kernel kupdate.otadata sector=0 ota_seq=7 state=pending_verify crc_ok=true valid=true
+prev#31    0.155257 I kernel kupdate.otadata sector=1 ota_seq=2 state=valid crc_ok=true valid=true
+prev#31    0.155411 I kernel kupdate.slot slot=0 running=true version=0.1.1-bad-selftest secure_version=1 len=98224
+prev#31    0.155523 I kernel kupdate.slot slot=1 running=false version=0.1.1-good secure_version=1 len=98224
+prev#31    1.512508 E kernel selftest.result failures=1 pass=false
+prev#31    1.531135 E kernel kupdate.rejected ota_seq=7 slot=0 written=true
+## 5. boot 32 (good, after the rollback) stuck; t5log status x4:
+core 0: was running pc=0x4000b2be mstatus=0x00000080 mepc=0x430001dc mcause=0x08000008 mtval=0x00000000 ra=0x4000a7d6 sp=0x4ff09760
+(pc = clear_alarm: read of SYSTIMER_CONF; same pc in all 4 samples)
+## 6. after a chip reset (espflash monitor, rst:0x17)
+   0.106049 I kernel boot.start platform=esp32p4-v1.x boot_id=33 reset_cause=23 abi_major=0 abi_minor=5
+   0.121795 I kernel kupdate.otadata sector=1 ota_seq=2 state=valid crc_ok=true valid=true
+  11.292152 I kernel kupdate.slot slot=0 running=false version=0.1.1-bad-selftest secure_version=1 len=98224
+  11.292292 I kernel kupdate.slot slot=1 running=true version=0.1.1-good secure_version=1 len=98224
+  11.292360 W kernel kupdate.rolled_back ota_seq=7 state=invalid slot=0
+  11.292422 I kernel ctl.done request_id=1 cmd=kinfo ok=true value=0

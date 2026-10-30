@@ -31,7 +31,8 @@ const USAGE: &str = "usage:
   t5log rtt --probe VID:PID:SERIAL --elf KERNEL [--elf APP]... [--schemas FILE]... \
             [--chip esp32p4] [--chip-description YAML] [--reset] [--json] \
             [--cmd COMMAND]... [--until-done]
-  t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]";
+  t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]
+  t5log status --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
         Some("check") => cmd_check(&args[1..]),
         Some("decode") => cmd_decode(&args[1..]),
         Some("rtt") => cmd_rtt(&args[1..]),
+        Some("status") => cmd_status(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match r {
@@ -277,6 +279,26 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
         ));
     }
     r
+}
+
+/// `t5log status`: where core 0 is (halt, read, resume).
+fn cmd_status(args: &[String]) -> Result<(), String> {
+    let (mut probe, mut chip, mut desc) = (None, "esp32p4".to_string(), None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--probe" => probe = Some(val()?),
+            "--chip" => chip = val()?,
+            "--chip-description" => desc = Some(val()?),
+            s => return Err(format!("unknown argument {s}\n{USAGE}")),
+        }
+    }
+    let probe = probe.ok_or("--probe is required")?;
+    for line in t5log::rtt::status(&probe, &chip, desc.as_deref())? {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// Control commands waiting to go to the kernel, and those not yet answered.
