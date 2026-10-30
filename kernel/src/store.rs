@@ -95,9 +95,16 @@ impl Store {
         }
     }
 
+    /// The catalog entry of `name`.
+    pub fn entry(&self, name: &str) -> Option<Entry> {
+        self.entries().find(|e| e.name() == name)
+    }
+
     /// Starts an install of `length` bytes; returns the first extent. Drops
-    /// an install already in progress.
-    pub fn install_begin(&mut self, length: u32) -> Result<u32, &'static str> {
+    /// an install already in progress. `busy` lists extents (first, count)
+    /// still in use outside the catalog: the text of running XIP processes
+    /// whose app was removed or replaced (doc/15 §4).
+    pub fn install_begin(&mut self, length: u32, busy: &[(u16, u16)]) -> Result<u32, &'static str> {
         if let Some(old) = self.install.take() {
             event!(Warn, "store.install_dropped", received = old.next, length = old.length);
         }
@@ -105,8 +112,9 @@ impl Store {
             return Err("bad length");
         }
         let count = store::extents_for(length);
-        let first = store::find_free(self.entries(), count).ok_or("store full")?;
-        event!(Info, "store.install_begin", length = length, extent_first = first, extents = count);
+        let in_use = busy.iter().map(|&(first, count)| Entry { extent_first: first, extent_count: count, ..EMPTY });
+        let first = store::find_free(self.entries().chain(in_use), count).ok_or("store full")?;
+        event!(Info, "store.install_begin", length = length, extent_first = first, extents = count, busy = busy.len() as u32);
         self.install = Some(Install { first, count, length, next: 0, stats: flash::Stats::default(), started: Current::now() });
         Ok(first as u32)
     }
@@ -264,3 +272,15 @@ impl Store {
         if ok { Ok(at) } else { Err("read back differs") }
     }
 }
+
+/// A blank entry, for describing extents in use.
+const EMPTY: Entry = Entry {
+    name: [0; 32],
+    extent_first: 0,
+    extent_count: 0,
+    length: 0,
+    version: [0; 3],
+    secure_version: 0,
+    state: State::Invalid,
+    flags: 0,
+};

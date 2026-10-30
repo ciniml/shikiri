@@ -180,10 +180,11 @@ fn build(args: &[String]) -> Result<(), String> {
     let image = assemble(&app, &name, &o, &Sha256::digest(&data), &kp)?;
     fs::write(&output, &image).map_err(|e| format!("{output}: {e}"))?;
     eprintln!(
-        "elf2t5a: {name} {}.{}.{}: text {:#x}, mem {:#x}, stack {:#x}, {} relocs, {} bytes, key {}",
+        "elf2t5a: {name} {}.{}.{}: {}text {:#x}, mem {:#x}, stack {:#x}, {} relocs, {} bytes, key {}",
         o.version[0],
         o.version[1],
         o.version[2],
+        if app.xip { "XIP, " } else { "" },
         app.text_size,
         app.mem_size,
         app.stack_size,
@@ -217,6 +218,17 @@ fn assemble(app: &App, name: &str, o: &BuildOpts, elf_sha256: &[u8], kp: &KeyPai
     }
     if o.secure_version != 0 {
         push(tlv::SECURE_VERSION, &o.secure_version.to_le_bytes())?;
+    }
+    if app.xip {
+        push(tlv::XIP_DATA, &t5a::XIP_DELTA.to_le_bytes())?;
+        // The image must start on a PMP granule: its text is used in place.
+        let mut pad = (t5a::XIP_IMAGE_ALIGN - (t5a::HEADER_SIZE + at) % t5a::XIP_IMAGE_ALIGN) % t5a::XIP_IMAGE_ALIGN;
+        if pad != 0 && pad < 4 {
+            pad += t5a::XIP_IMAGE_ALIGN;
+        }
+        if pad != 0 {
+            at = t5a::push_tlv(&mut tlvs, at, tlv::PAD, &vec![0u8; pad - 4]).ok_or("TLV area too small")?;
+        }
     }
     tlvs.truncate(at);
 
@@ -305,6 +317,8 @@ struct App {
     mem_size: u32,
     stack_size: u32,
     entry: u32,
+    /// Data linked at `t5a::XIP_DELTA` (doc/15).
+    xip: bool,
 }
 
 fn convert(data: &[u8], stack_size: u32) -> Result<App, String> {
@@ -336,7 +350,9 @@ fn convert(data: &[u8], stack_size: u32) -> Result<App, String> {
     }
 
     // Split into the read-only/executable part and the writable part.
-    let mut text_size = None;
+    let mut data_start = None;
+    let mut ro_file_end = 0u32;
+    let mut ro_mem_end = 0u32;
     let mut file_end = 0u32;
     let mut mem_end = 0u32;
     for ph in &loads {
@@ -350,33 +366,52 @@ fn convert(data: &[u8], stack_size: u32) -> Result<App, String> {
         if writable && flags & elf::PF_X != 0 {
             return Err(format!("segment at {va:#x} is both writable and executable"));
         }
-        match (writable, text_size) {
-            (true, None) => text_size = Some(va),
+        match (writable, data_start) {
+            (true, None) => data_start = Some(va),
             (false, Some(_)) => {
                 return Err(format!("read-only segment at {va:#x} follows a writable one"));
             }
             _ => {}
+        }
+        if !writable {
+            ro_file_end = ro_file_end.max(va + filesz);
+            ro_mem_end = ro_mem_end.max(va + memsz);
         }
         if filesz > 0 {
             file_end = file_end.max(va + filesz);
         }
         mem_end = mem_end.max(va + memsz);
     }
-    let text_size = text_size.unwrap_or(align_up(mem_end, PMP_GRANULE));
+    // XIP (doc/15): the data is linked a fixed distance above the text.
+    let xip = data_start.is_some_and(|d| d >= t5a::XIP_DELTA);
+    if xip && data_start != Some(t5a::XIP_DELTA) {
+        return Err(format!("XIP data must start at {:#x} (check t5app-xip.ld)", t5a::XIP_DELTA));
+    }
+    let (text_size, data_base) = if xip {
+        (align_up(ro_mem_end, PMP_GRANULE), t5a::XIP_DELTA)
+    } else {
+        let t = data_start.unwrap_or(align_up(mem_end, PMP_GRANULE));
+        (t, t)
+    };
     if text_size % PMP_GRANULE != 0 {
         return Err(format!(
             "writable part starts at {text_size:#x}, not {PMP_GRANULE}-byte aligned (check t5app.ld)"
         ));
     }
-    let mem_size = align_up(mem_end, 16);
+    // From the data's link address: data + bss.
+    let mem_size = if xip { align_up(mem_end - t5a::XIP_DELTA, 16) } else { align_up(mem_end, 16) };
 
-    // Flatten the file-backed bytes of every segment.
-    let mut image = vec![0u8; file_end as usize];
+    // Flatten the file-backed bytes: the text, then the data's initial bytes.
+    let data_file_end = if xip { file_end.max(data_base) } else { file_end };
+    let image_len = if xip { (text_size + (data_file_end - data_base)) as usize } else { file_end as usize };
+    let mut image = vec![0u8; image_len];
     for ph in &loads {
         let bytes = ph.data(endian, data).map_err(|_| "segment data out of range")?;
-        let va = ph.p_vaddr(endian) as usize;
-        image[va..va + bytes.len()].copy_from_slice(bytes);
+        let va = ph.p_vaddr(endian);
+        let at = if xip && va >= data_base { (text_size + va - data_base) as usize } else { va as usize };
+        image[at..at + bytes.len()].copy_from_slice(bytes);
     }
+    let _ = ro_file_end;
 
     // Collect dynamic relocations; only R_RISCV_RELATIVE is supported.
     let sections = hdr.sections(endian, data).map_err(|e| e.to_string())?;
@@ -403,17 +438,18 @@ fn convert(data: &[u8], stack_size: u32) -> Result<App, String> {
                 ));
             }
             let offset = r.r_offset(endian);
-            if offset % 4 != 0 || offset + 4 > mem_size {
+            let (lo, hi) = if xip { (data_base, data_base + mem_size) } else { (text_size, mem_size) };
+            if offset % 4 != 0 || offset + 4 > hi {
                 return Err(format!("relocation at {offset:#x} is misaligned or out of range"));
             }
-            if offset < text_size {
+            if offset < lo {
                 return Err(format!("relocation at {offset:#x} targets the read-only part"));
             }
             relocs.push(t5a::Reloc { offset, addend: r.r_addend(endian) as u32 });
         }
     }
 
-    Ok(App { image, relocs, text_size, mem_size, stack_size, entry: hdr.e_entry(endian) })
+    Ok(App { image, relocs, text_size, mem_size, stack_size, entry: hdr.e_entry(endian), xip })
 }
 
 fn align_up(v: u32, a: u32) -> u32 {
@@ -433,6 +469,7 @@ mod tests {
             mem_size: 0x140,
             stack_size: 0x100,
             entry: 0,
+            xip: false,
         };
         let o = BuildOpts {
             name: None,

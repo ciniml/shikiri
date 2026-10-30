@@ -2,14 +2,17 @@
 //!
 //! The kernel itself uses no PMP entries: M-mode accesses that match no entry
 //! are allowed, U-mode accesses that match no entry are denied. Each process
-//! gets a TOR chain over its contiguous image:
+//! gets two TOR pairs, for its text and for its data + stack. They are
+//! adjacent for an image copied into RAM and 128 MiB apart for an XIP image
+//! (doc/15):
 //!
 //! | entry | pmpaddr          | cfg          |
 //! |-------|------------------|--------------|
 //! | 0     | -                | OFF (spare)  |
-//! | 1     | base             | OFF (bottom) |
-//! | 2     | base + text_size | TOR, R-X     |
-//! | 3     | end              | TOR, RW-     |
+//! | 1     | text.start       | OFF (bottom) |
+//! | 2     | text.end         | TOR, R-X     |
+//! | 3     | data.start       | OFF (bottom) |
+//! | 4     | data.end         | TOR, RW-     |
 
 use super::csr::{read_csr, write_csr};
 
@@ -75,21 +78,26 @@ pub fn reset() {
 }
 
 /// Process memory as seen by PMP.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Region {
-    pub base: usize,
-    pub text_end: usize,
-    pub end: usize,
+    /// Text and read-only data (R-X).
+    pub text: core::ops::Range<usize>,
+    /// Data, bss and stack (RW-).
+    pub data: core::ops::Range<usize>,
 }
 
-/// Grants U-mode R-X on `[base, text_end)` and RW- on `[text_end, end)`.
+/// Grants U-mode R-X on `text` and RW- on `data`.
 pub fn set_process(r: &Region) {
-    debug_assert!(r.base % GRANULE == 0 && r.text_end % GRANULE == 0 && r.end % GRANULE == 0);
+    debug_assert!([r.text.start, r.text.end, r.data.start, r.data.end].iter().all(|a| a % GRANULE == 0));
     // Disable the entries before moving their addresses.
     write_csr!("pmpcfg0", 0);
-    write_csr!("pmpaddr1", r.base >> 2);
-    write_csr!("pmpaddr2", r.text_end >> 2);
-    write_csr!("pmpaddr3", r.end >> 2);
-    let cfg = u32::from_le_bytes([0, 0, A_TOR | R | X, A_TOR | R | W]);
-    write_csr!("pmpcfg0", cfg as usize);
+    write_csr!("pmpcfg1", 0);
+    write_csr!("pmpaddr1", r.text.start >> 2);
+    write_csr!("pmpaddr2", r.text.end >> 2);
+    write_csr!("pmpaddr3", r.data.start >> 2);
+    write_csr!("pmpaddr4", r.data.end >> 2);
+    let cfg0 = u32::from_le_bytes([0, 0, A_TOR | R | X, 0]);
+    let cfg1 = u32::from_le_bytes([A_TOR | R | W, 0, 0, 0]);
+    write_csr!("pmpcfg0", cfg0 as usize);
+    write_csr!("pmpcfg1", cfg1 as usize);
 }

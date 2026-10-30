@@ -22,6 +22,9 @@ pub struct Process {
     pub handles: handle::Table,
     /// The image's Permissions TLV: the names `open` accepts.
     permissions: &'static [u8],
+    /// App store extents (first, count) an XIP process runs from; they must
+    /// not be overwritten while it lives (doc/15 §4).
+    pub xip_extents: Option<(u16, u16)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,17 +67,19 @@ impl Process {
             "proc.start",
             pid = pid,
             name = name,
-            base = Addr(loaded.region.base as u32),
+            base = Addr(loaded.region.text.start as u32),
+            data = Addr(loaded.region.data.start as u32),
             build_id = &loaded.build_id[..]
         );
         Process {
             pid,
             name,
             frame,
-            region: loaded.region,
+            region: loaded.region.clone(),
             state: State::Ready,
             handles: handle::Table::new(),
             permissions: loaded.permissions,
+            xip_extents: None,
         }
     }
 
@@ -175,8 +180,8 @@ impl Process {
             return Ok(());
         }
         let end = ptr.checked_add(len).ok_or(Error::BadAddress)?;
-        let lo = if write { self.region.text_end } else { self.region.base };
-        if ptr >= lo && end <= self.region.end {
+        let inside = |r: &core::ops::Range<usize>| ptr >= r.start && end <= r.end;
+        if inside(&self.region.data) || (!write && inside(&self.region.text)) {
             Ok(())
         } else {
             Err(Error::BadAddress)

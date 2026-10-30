@@ -43,6 +43,10 @@ struct Apps {
     /// M3d (handles and timers). Optional: a store written before M3d does
     /// not have it, and installing it needs the kernel running.
     timers: Option<&'static [u8]>,
+    /// M4b (XIP, doc/15): `hello` and `xipcheck` linked for XIP. Optional
+    /// like `timers`.
+    hello_xip: Option<&'static [u8]>,
+    xipcheck: Option<&'static [u8]>,
 }
 
 impl Apps {
@@ -62,6 +66,8 @@ impl Apps {
             hello_untrusted: get("hello-untrusted")?,
             hello_badabi: get("hello-badabi")?,
             timers: s.image("timers"),
+            hello_xip: s.image("hello-xip"),
+            xipcheck: s.image("xipcheck"),
         })
     }
 }
@@ -127,7 +133,7 @@ pub extern "C" fn kmain() -> ! {
     let (pool, slot_size) = (pool(), slot(0).1);
     event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
-        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps),
+        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps) + selftest_m4b(&apps),
         Some(None) => 1,
         None => {
             event!(Error, "selftest.no_flash");
@@ -225,7 +231,15 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
                 Err("no such process")
             }
         }
-        Command::InstallBegin { length } => store.install_begin(length),
+        Command::InstallBegin { length } => {
+            let mut busy = [(0u16, 0u16); sched::MAX_PROCS];
+            let mut n = 0;
+            for e in s.slots.iter().flatten().filter_map(|p| p.xip_extents) {
+                busy[n] = e;
+                n += 1;
+            }
+            store.install_begin(length, &busy[..n])
+        }
         // Answered only on failure (doc/14 §3).
         Command::InstallData { offset, data } => match store.install_data(offset, data) {
             Ok(()) => return,
@@ -248,15 +262,18 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
 fn start(s: &mut sched::Scheduler, store: &store::Store, name: &str, arg0: u32, arg1: u32) -> Result<u32, &'static str> {
     let slot_index = s.free_slot().ok_or("no free slot")?;
     let image = store.image(name).ok_or("no such app")?;
-    let (base, size) = slot(slot_index);
-    let loaded = unsafe { loader::load(image, base, size) }.map_err(|e| {
+    let loaded = unsafe { loader::load(image, &slot_of(slot_index)) }.map_err(|e| {
         let mut why = t5_abi::log::FmtBuf::<64>::new();
         let _ = core::fmt::Write::write_fmt(&mut why, format_args!("{e:?}"));
         event!(Error, "loader.failed", name = name, error = why.as_str());
         "load failed"
     })?;
     let pid = next_pid();
-    s.slots[slot_index] = Some(Process::new(pid, loaded.name, &loaded, arg0 as usize, arg1 as usize));
+    let mut p = Process::new(pid, loaded.name, &loaded, arg0 as usize, arg1 as usize);
+    if loaded.xip {
+        p.xip_extents = store.entry(name).map(|e| (e.extent_first, e.extent_count));
+    }
+    s.slots[slot_index] = Some(p);
     Ok(pid)
 }
 
@@ -292,6 +309,11 @@ fn pool() -> core::ops::Range<usize> {
     unsafe { (*core::ptr::addr_of!(POOL)).clone() }.unwrap_or(Current::APP_POOL)
 }
 
+fn slot_of(index: usize) -> loader::Slot {
+    let (base, capacity) = slot(index);
+    loader::Slot { index, base, capacity }
+}
+
 /// Slot `i` of the app pool; each process gets one.
 fn slot(i: usize) -> (usize, usize) {
     let pool = pool();
@@ -300,8 +322,7 @@ fn slot(i: usize) -> (usize, usize) {
 }
 
 fn load(name: &'static str, image: &'static [u8], slot_index: usize, arg0: usize, arg1: usize) -> Option<Process> {
-    let (base, size) = slot(slot_index);
-    match unsafe { loader::load(image, base, size) } {
+    match unsafe { loader::load(image, &slot_of(slot_index)) } {
         Ok(l) => Some(Process::new(slot_index as u32 + 1, name, &l, arg0, arg1)),
         Err(e) => {
             let mut why = t5_abi::log::FmtBuf::<64>::new();
@@ -391,8 +412,7 @@ fn selftest_m3a(apps: &Apps) -> u32 {
     ];
     let mut failures = 0;
     for (name, image, expected) in cases {
-        let (base, size) = slot(0);
-        let result = unsafe { loader::load(image, base, size) };
+        let result = unsafe { loader::load(image, &slot_of(0)) };
         let mut why = t5_abi::log::FmtBuf::<64>::new();
         let ok = match &result {
             Ok(_) => {
@@ -499,6 +519,43 @@ fn selftest_m3d(apps: &Apps) -> u32 {
         // spin exits 2 when nothing preempted it for long; the timer
         // processes only run for microseconds, so that is expected here.
         let ok = exit == Exit::Code(0) || (p.name == "spin" && exit == Exit::Code(2));
+        log_case(p, &exit, ok);
+        if !ok {
+            failures += 1;
+        }
+    }
+    failures
+}
+
+/// XIP apps (doc/15) run with their text in flash: `hello-xip` and
+/// `xipcheck` (which checks its own addresses and sums a 128 KiB table it
+/// reads in place) in slots 1 and 2, while `hello` runs copied in slot 0.
+fn selftest_m4b(apps: &Apps) -> u32 {
+    let (Some(hello_xip), Some(xipcheck)) = (apps.hello_xip, apps.xipcheck) else {
+        event!(Warn, "selftest.skipped", part = "m4b", reason = "no XIP apps in the store");
+        return 0;
+    };
+    if Current::map_xip(0, 0, 0).is_none() {
+        event!(Warn, "selftest.skipped", part = "m4b", reason = "no XIP on this platform");
+        return 0;
+    }
+    let specs: [(&'static str, &'static [u8]); 3] = [("hello", apps.hello), ("hello-xip", hello_xip), ("xipcheck", xipcheck)];
+    let mut slot_index = 0;
+    let loaded = specs.map(|(name, image)| {
+        let p = load(name, image, slot_index, 0, 0);
+        slot_index += 1;
+        p
+    });
+    let [Some(a), Some(b), Some(c)] = loaded else {
+        return 1;
+    };
+    let mut s = sched::Scheduler::new();
+    s.slots = [Some(a), Some(b), Some(c), None];
+    s.run(Some(2000), &mut |_| {});
+    let mut failures = 0;
+    for p in s.slots.iter().flatten() {
+        let exit = p.exit().unwrap();
+        let ok = exit == Exit::Code(0);
         log_case(p, &exit, ok);
         if !ok {
             failures += 1;

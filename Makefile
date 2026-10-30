@@ -11,7 +11,13 @@ STORE_DIR  := $(BUILD)/store
 APPS       := hello fault ticker spin timers
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
-APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS))
+# Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
+# with t5app-xip.ld into their own target directory; hello is built both ways.
+XIP_APPS   := hello xipcheck spin
+XIP_TARGET := user/target/xip/riscv32imafc-unknown-none-elf/release
+XIP_RUSTFLAGS := -C relocation-model=pie -C link-arg=-pie -C link-arg=--no-dynamic-linker \
+                 -C link-arg=-z -C link-arg=text -C link-arg=-Tt5app-xip.ld
+APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS)) $(XIP_TARGET)/xipcheck
 # All log schemas (doc/12): every event! call site in the kernel and the apps.
 SCHEMAS    := $(BUILD)/t5log.schemas
 
@@ -64,6 +70,7 @@ $(UNTRUSTED_KEY): | tools
 apps: tools $(UNTRUSTED_KEY)
 	@test -f $(DEV_KEY) || { echo "no signing key $(DEV_KEY): run make keys"; exit 1; }
 	cd user && cargo build --release
+	cd user && RUSTFLAGS="$(XIP_RUSTFLAGS)" cargo build --release --target-dir target/xip $(addprefix -p ,$(XIP_APPS))
 	mkdir -p $(APPS_DIR)
 	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) &&) true
 	@# Images the kernel must reject (self-test, doc/14 §1.4).
@@ -71,9 +78,12 @@ apps: tools $(UNTRUSTED_KEY)
 	    --name hello-untrusted
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-badabi.t5a --key $(DEV_KEY) --abi 9.0 \
 	    --name hello-badabi
+	$(ELF2T5A) build $(XIP_TARGET)/hello $(APPS_DIR)/hello-xip.t5a --key $(DEV_KEY) --name hello-xip
+	$(ELF2T5A) build $(XIP_TARGET)/xipcheck $(APPS_DIR)/xipcheck.t5a --key $(DEV_KEY)
+	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip.t5a --key $(DEV_KEY) --name spin-xip
 	@# Not in the store image: installed over the control channel (doc/14 §3).
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter.t5a --key $(DEV_KEY) --name greeter
-	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi))
+	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-xip xipcheck))
 
 kernel-virt: apps
 	cd kernel && cargo build --release \
@@ -190,6 +200,14 @@ test-p4emu: emu kernel-p4
 	    --ctl "list" \
 	    --expect-event flash.test --expect-event store.installed --expect-event hello.greet \
 	    --expect-event store.rejected --expect-event store.removed \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# XIP (doc/15): an XIP app installed over the control channel runs from
+	@# flash; removing it while it runs and installing another must not
+	@# overwrite its extents (it would fault, and spin.done would be missing).
+	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "install $(APPS_DIR)/spin-xip.t5a" --ctl "run spin-xip 4 300" --ctl "remove spin-xip" \
+	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
+	    --expect-event spin.done --expect-event hello.greet \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

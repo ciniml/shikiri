@@ -122,7 +122,13 @@ const CLIC_TIMER_CTRL: u32 = (0x3F << 24) | (1 << 8);
 const MMU_ITEM_CONTENT: usize = 0x5008_C37C;
 const MMU_ITEM_INDEX: usize = 0x5008_C380;
 const MMU_VALID: u32 = 1 << 12;
+const FLASH_WINDOW_BASE: usize = 0x4000_0000;
 const FLASH_WINDOW: usize = 0x4100_0000;
+/// XIP text of process slot k at XIP_TEXT + k * XIP_SLOT (flash MMU entries
+/// 512-1023); its data at the same offset in the PSRAM window's second
+/// alias, 0x4A00_0000 + k * XIP_SLOT (doc/15 §2).
+const XIP_TEXT: usize = 0x4200_0000;
+const XIP_SLOT: usize = 8 << 20;
 const FLASH_SIZE: usize = 16 << 20;
 const MMU_PAGE: usize = 64 << 10;
 // esp32p4.rom.ld:259-260
@@ -137,14 +143,16 @@ const CACHE_MAP_L2_CACHE: u32 = 1 << 5;
 /// (riscv/include/riscv/rv_utils.h:48-52). Off while the map changes.
 const MHCR_BRANCH_PREDICTION: usize = (1 << 4) | (1 << 5) | (1 << 12);
 
-/// Maps the flash at `FLASH_WINDOW`, following ESP-IDF's sequence for P4:
-/// branch prediction off, L2 suspended, entries written, the range
-/// invalidated in L1 I/D and L2, L2 resumed. Runs from RAM: the flash window
-/// (where the rest of the kernel lives) is unusable while L2 is suspended.
-/// Interrupts are off in the kernel.
+/// Points `count` flash MMU entries from `first_entry` at the flash pages
+/// from `first_page` (the first `valid` of them; the rest become invalid),
+/// following ESP-IDF's sequence for P4: L1 D written back, branch
+/// prediction off, L2 suspended, entries written, the range invalidated in
+/// L1 I/D and L2, L2 resumed. Runs from RAM: the flash window (where the
+/// rest of the kernel lives) is unusable while L2 is suspended. Interrupts
+/// are off in the kernel.
 #[unsafe(link_section = ".ram_text")]
 #[inline(never)]
-unsafe fn map_flash_linear() {
+unsafe fn map_flash_pages(first_entry: usize, count: usize, first_page: usize, valid: usize) {
     unsafe {
         let suspend: unsafe extern "C" fn() -> u32 = core::mem::transmute(ROM_CACHE_SUSPEND_L2);
         let resume: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_CACHE_RESUME_L2);
@@ -154,14 +162,14 @@ unsafe fn map_flash_linear() {
         let writeback_all: unsafe extern "C" fn(u32) -> i32 = core::mem::transmute(ROM_CACHE_WRITEBACK_ALL);
         writeback_all(CACHE_MAP_L1_DCACHE);
         let autoload = suspend();
-        let first = (FLASH_WINDOW & 0x03FF_FFFF) / MMU_PAGE;
-        let mut page = 0;
-        while page < FLASH_SIZE / MMU_PAGE {
-            core::ptr::write_volatile(MMU_ITEM_INDEX as *mut u32, (first + page) as u32);
-            core::ptr::write_volatile(MMU_ITEM_CONTENT as *mut u32, page as u32 | MMU_VALID);
-            page += 1;
+        let mut i = 0;
+        while i < count {
+            core::ptr::write_volatile(MMU_ITEM_INDEX as *mut u32, (first_entry + i) as u32);
+            let v = if i < valid { (first_page + i) as u32 | MMU_VALID } else { 0 };
+            core::ptr::write_volatile(MMU_ITEM_CONTENT as *mut u32, v);
+            i += 1;
         }
-        let (a, n) = (FLASH_WINDOW as u32, FLASH_SIZE as u32);
+        let (a, n) = ((FLASH_WINDOW_BASE + first_entry * MMU_PAGE) as u32, (count * MMU_PAGE) as u32);
         invalidate(CACHE_MAP_L1_ICACHE_MASK, a, n);
         invalidate(CACHE_MAP_L1_DCACHE, a, n);
         invalidate(CACHE_MAP_L2_CACHE, a, n);
@@ -438,8 +446,38 @@ impl Platform for Esp32p4v1 {
     }
 
     fn map_flash() -> Option<usize> {
-        unsafe { map_flash_linear() };
+        let first = (FLASH_WINDOW - FLASH_WINDOW_BASE) / MMU_PAGE;
+        let pages = FLASH_SIZE / MMU_PAGE;
+        unsafe { map_flash_pages(first, pages, 0, pages) };
         Some(FLASH_WINDOW)
+    }
+
+    fn flash_offset(addr: usize) -> Option<u32> {
+        (FLASH_WINDOW..FLASH_WINDOW + FLASH_SIZE).contains(&addr).then(|| (addr - FLASH_WINDOW) as u32)
+    }
+
+    fn map_xip(slot: usize, flash_offset: u32, pages: usize) -> Option<usize> {
+        let psram = unsafe { PSRAM_SIZE };
+        let per_slot = XIP_SLOT / MMU_PAGE;
+        if flash_offset as usize % MMU_PAGE != 0 || pages > per_slot || (slot + 1) * XIP_SLOT > psram {
+            return None;
+        }
+        let vbase = XIP_TEXT + slot * XIP_SLOT;
+        let first = (vbase - FLASH_WINDOW_BASE) / MMU_PAGE;
+        unsafe { map_flash_pages(first, per_slot, flash_offset as usize / MMU_PAGE, pages) };
+        Some(vbase)
+    }
+
+    fn retire_alias(addr: usize, len: usize) {
+        // The two linear maps of the PSRAM (doc/15 §2).
+        let half = psram::ALIAS - psram::WINDOW;
+        let other = match addr {
+            a if (psram::WINDOW..psram::ALIAS).contains(&a) => a + half,
+            a if (psram::ALIAS..psram::ALIAS + half).contains(&a) => a - half,
+            _ => return,
+        };
+        cache_writeback(other, len, true);
+        cache_invalidate(other, len, true);
     }
 
     fn flash_erase_sector(offset: u32) -> Result<(), &'static str> {

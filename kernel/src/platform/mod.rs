@@ -49,6 +49,19 @@ pub trait Platform {
     fn map_flash() -> Option<usize> {
         None
     }
+    /// The flash offset of `addr` in the window `map_flash` returned.
+    fn flash_offset(_addr: usize) -> Option<u32> {
+        None
+    }
+    /// XIP (doc/15): maps `pages` 64 KiB flash pages from `flash_offset`
+    /// as the text of process slot `slot`; returns the address
+    /// `flash_offset` now appears at. Its data goes `t5a::XIP_DELTA` above.
+    fn map_xip(_slot: usize, _flash_offset: u32, _pages: usize) -> Option<usize> {
+        None
+    }
+    /// Before `[addr, addr + len)` is used: writes back and drops the same
+    /// memory under any other address it is mapped at (doc/15 §2).
+    fn retire_alias(_addr: usize, _len: usize) {}
     /// Erases the 4 KiB flash sector at `offset` and drops it from the
     /// caches, so the window shows the new contents. Callers go through
     /// `crate::flash`, which checks the range (doc/14 §5.2).

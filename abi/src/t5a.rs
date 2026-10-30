@@ -18,6 +18,13 @@
 //! rodata (R-X), `[text_size, mem_size)` is data + bss (RW-), followed by
 //! `stack_size` bytes of stack (RW-).
 //!
+//! An XIP image (`XipData` TLV, doc/15) runs its text from flash where it
+//! lies: its data is linked at `XIP_DELTA` instead of right after the text.
+//! The image bytes are still the text followed by the data's initial bytes,
+//! `[XIP_DELTA, XIP_DELTA + mem_size)` is data + bss and stack follows it,
+//! and the image starts on a 128-byte boundary in the file (the PMP
+//! granularity), padded with a `Pad` TLV.
+//!
 //! A reader must verify the signature before trusting anything but
 //! `signed_size` and `total_size`: see [`split_signed`].
 
@@ -57,6 +64,10 @@ pub mod tlv {
     pub const PERMISSIONS: u16 = 0x05;
     pub const FLAGS: u16 = 0x06;
     pub const SECURE_VERSION: u16 = 0x07;
+    /// Filler that puts the image on a 128-byte boundary (XIP images).
+    pub const PAD: u16 = 0x08;
+    /// u32: link address of the data of an XIP image (must be `XIP_DELTA`).
+    pub const XIP_DATA: u16 = 0x40;
     pub const SIGNATURE: u16 = 0x80;
 
     pub const MUST_UNDERSTAND: core::ops::RangeInclusive<u16> = 0x40..=0x7F;
@@ -66,6 +77,11 @@ pub mod tlv {
 }
 
 pub const MAX_NAME: usize = 32;
+/// Distance from an XIP image's text to its data: the distance between the
+/// flash and PSRAM windows on the ESP32-P4 (doc/15 §2).
+pub const XIP_DELTA: u32 = 0x0800_0000;
+/// Alignment of the image within an XIP T5A file.
+pub const XIP_IMAGE_ALIGN: usize = 128;
 pub const BUILD_ID_SIZE: usize = 16;
 pub const KEY_ID_SIZE: usize = 8;
 pub const SIGNATURE_SIZE: usize = 64;
@@ -260,6 +276,8 @@ pub struct Info<'a> {
     pub permissions: &'a [u8],
     pub flags: u32,
     pub secure_version: u32,
+    /// `Some(XIP_DELTA)` for an XIP image.
+    pub xip_data: Option<u32>,
 }
 
 impl Info<'_> {
@@ -313,6 +331,7 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
     let mut permissions: &[u8] = &[];
     let mut flags = 0;
     let mut secure_version = 0;
+    let mut xip_data = None;
     for item in Tlvs::new(&signed[h.header_size as usize..image_off]) {
         let (t, v) = item?;
         match t {
@@ -336,6 +355,8 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
             tlv::PERMISSIONS => permissions = v,
             tlv::FLAGS if v.len() == 4 => flags = u32_at(v, 0),
             tlv::SECURE_VERSION if v.len() == 4 => secure_version = u32_at(v, 0),
+            tlv::XIP_DATA if v.len() == 4 && u32_at(v, 0) == XIP_DELTA => xip_data = Some(XIP_DELTA),
+            tlv::XIP_DATA => return Err(Error::BadTlv),
             tlv::VERSION | tlv::ABI_VERSION | tlv::BUILD_ID | tlv::FLAGS | tlv::SECURE_VERSION => {
                 return Err(Error::BadTlv);
             }
@@ -347,6 +368,9 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
     let version = version.ok_or(Error::MissingTlv(tlv::VERSION))?;
     let abi = abi.ok_or(Error::MissingTlv(tlv::ABI_VERSION))?;
     let build_id = build_id.ok_or(Error::MissingTlv(tlv::BUILD_ID))?;
+    if xip_data.is_some() && image_off % XIP_IMAGE_ALIGN != 0 {
+        return Err(Error::BadLayout);
+    }
     if let Some((major, minor)) = want_abi
         && (abi.0 != major || abi.1 > minor)
     {
@@ -354,7 +378,7 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
     }
     Ok(Image {
         header: h,
-        info: Info { name, version, abi, build_id, permissions, flags, secure_version },
+        info: Info { name, version, abi, build_id, permissions, flags, secure_version, xip_data },
         image: &signed[image_off..relocs_off],
         relocs: &signed[relocs_off..],
     })

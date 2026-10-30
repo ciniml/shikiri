@@ -518,6 +518,9 @@ fn tune() -> Result<(), &'static str> {
 
 // ---- map and test ---------------------------------------------------------
 pub const WINDOW: usize = 0x4800_0000;
+/// A second linear map of the whole PSRAM, for the data of XIP apps
+/// (doc/15 §2): PSRAM MMU entries 512-1023.
+pub const ALIAS: usize = 0x4A00_0000;
 /// The same memory without the caches (doc/02 §2).
 pub const UNCACHED: usize = 0x8800_0000;
 const PAGE: usize = 64 << 10;
@@ -525,15 +528,19 @@ const MMU_ACCESS_PSRAM: u32 = 1 << 10;
 const MMU_VALID: u32 = 1 << 11;
 
 fn map(size: usize) {
+    let alias_entry = (ALIAS - WINDOW) / PAGE;
     for page in 0..size / PAGE {
-        unsafe {
-            wr(M2_MMU_ITEM_INDEX, page as u32);
-            wr(M2_MMU_ITEM_CONTENT, page as u32 | MMU_ACCESS_PSRAM | MMU_VALID);
+        for entry in [page, alias_entry + page] {
+            unsafe {
+                wr(M2_MMU_ITEM_INDEX, entry as u32);
+                wr(M2_MMU_ITEM_CONTENT, page as u32 | MMU_ACCESS_PSRAM | MMU_VALID);
+            }
         }
     }
     // Nothing has touched the window yet; drop anything prefetched anyway
     // (esp_psram.c:263-302 writes the entries without suspending L2).
     super::cache_invalidate(WINDOW, size, true);
+    super::cache_invalidate(ALIAS, size, true);
 }
 
 fn pattern(i: usize) -> u32 {

@@ -47,3 +47,10 @@ version = "0.1.0"
 dependencies = [
  "t5-rt",
 ]
+
+[[package]]
+name = "xipcheck"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
+]
