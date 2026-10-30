@@ -226,12 +226,14 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
         pending: std::collections::BTreeSet::new(),
         sent_lines: 0,
         done_at: None,
+        last_activity: std::time::Instant::now(),
+        stalled: false,
     });
     let mut d = StreamDecoder::new();
     let mut ctx = BootContext::new();
     let mut out = std::io::stdout().lock();
     let wanted = cmds.len();
-    t5log::rtt::stream(
+    let r = t5log::rtt::stream(
         &opts,
         |bytes| {
             for item in d.push(bytes) {
@@ -256,12 +258,25 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
                     return t5log::rtt::Turn::Stop;
                 }
             }
+            if until_done && !c.pending.is_empty() && c.last_activity.elapsed() > STALL {
+                c.stalled = true;
+                return t5log::rtt::Turn::Stop;
+            }
             match c.take_frames() {
                 Some(bytes) => t5log::rtt::Turn::Send(bytes),
                 None => t5log::rtt::Turn::Continue,
             }
         },
-    )
+    );
+    let c = ctl.borrow();
+    if c.stalled {
+        return Err(format!(
+            "no answer to request(s) {:?} and no log for {} s: the kernel is not running (a probe attach also stops the watchdog)",
+            c.pending,
+            STALL.as_secs()
+        ));
+    }
+    r
 }
 
 /// Control commands waiting to go to the kernel, and those not yet answered.
@@ -273,10 +288,20 @@ struct Ctl {
     /// Command lines sent so far (an `install` line is many frames).
     sent_lines: usize,
     done_at: Option<std::time::Instant>,
+    /// When the last log event arrived (or the last command went out).
+    last_activity: std::time::Instant,
+    /// Set when --until-done gave up waiting.
+    stalled: bool,
 }
+
+/// --until-done gives up when commands are unanswered and the kernel has
+/// logged nothing for this long (a stopped core would otherwise keep t5log
+/// waiting forever; doc/16 §6.4).
+const STALL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Ctl {
     fn on_event(&mut self, e: &t5log::Event, t: &SchemaTable) {
+        self.last_activity = std::time::Instant::now();
         match e.name(t) {
             Some("ctl.ready") => self.ready = true,
             Some("ctl.done" | "ctl.failed") => {
@@ -312,6 +337,7 @@ impl Ctl {
             }
             self.pending.extend(f.answered);
         }
+        self.last_activity = std::time::Instant::now();
         (!bytes.is_empty()).then_some(bytes)
     }
 }
