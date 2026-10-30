@@ -139,19 +139,15 @@ impl Scheduler {
                 break;
             }
             // The earliest of: the limit (self-test) or the next poll
-            // (service), and the wake-ups of sleeping processes.
+            // (service), and the wake-ups of sleeping or waiting processes.
             let mut wake = limit.unwrap_or(next_poll.max(now));
             let mut woken = None;
             for (i, p) in self.slots.iter_mut().enumerate() {
-                if let Some(p) = p
-                    && let State::Sleeping { until } = p.state
-                {
-                    if until <= now {
-                        p.state = State::Ready;
-                        woken.get_or_insert(i);
-                    } else {
-                        wake = wake.min(until);
-                    }
+                let Some(p) = p else { continue };
+                if p.try_wake(now) {
+                    woken.get_or_insert(i);
+                } else if let Some(t) = p.wake_at() {
+                    wake = wake.min(t);
                 }
             }
 

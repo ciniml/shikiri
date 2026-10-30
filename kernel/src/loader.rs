@@ -40,6 +40,8 @@ pub struct Loaded {
     pub entry: usize,
     pub stack_top: usize,
     pub build_id: [u8; t5a::BUILD_ID_SIZE],
+    /// The signed Permissions TLV.
+    pub permissions: &'static [u8],
 }
 
 fn align_up(v: usize, a: usize) -> usize {
@@ -124,5 +126,6 @@ pub unsafe fn load(bytes: &'static [u8], base: usize, capacity: usize) -> Result
         entry: base + h.entry as usize,
         stack_top: base + mem_size + stack_size,
         build_id: info.build_id,
+        permissions: info.permissions,
     })
 }

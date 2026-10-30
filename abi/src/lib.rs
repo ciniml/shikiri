@@ -14,8 +14,9 @@ pub mod t5a;
 pub const ABI_MAJOR: u16 = 0;
 /// Minor 2 (M2): yield, sleep, time. Minor 3 (L1, doc/12): log_emit and
 /// log_level replace dbg_write. Minor 4 (M3a, doc/14): signed T5A v1 images
-/// (pre-1.0, so no compatibility is kept).
-pub const ABI_MINOR: u16 = 4;
+/// (pre-1.0, so no compatibility is kept). Minor 5 (M3d, doc/14 §4): handles,
+/// open/ctl/wait/close and the timer object.
+pub const ABI_MINOR: u16 = 5;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -34,6 +35,58 @@ pub mod sys {
     /// Returns the lowest level (a1) the kernel currently keeps, so apps can
     /// skip building events that would be dropped.
     pub const LOG_LEVEL: usize = 0x006;
+    /// a0 = handle. Frees the handle.
+    pub const CLOSE: usize = 0x080;
+    /// a0/a1 = array of `u32` handles and its length (at most
+    /// `WAIT_MAX`), a2/a3 = timeout in ns (lo/hi; `FOREVER` = none, 0 =
+    /// just poll). Returns the index of the handle in the array (a1), the
+    /// event (a2) and its value (a3) of the first handle that has one;
+    /// `Error::TimedOut` if none came in time.
+    pub const WAIT: usize = 0x082;
+    /// a0/a1 = object name (UTF-8), a2 = rights (`rights`). Returns the
+    /// handle in a1. Only names in the image's Permissions TLV can be
+    /// opened (`Error::Denied` otherwise).
+    pub const OPEN: usize = 0x100;
+    /// a0 = handle, a1/a2 = buffer. Reserved: no object supports it yet.
+    pub const READ: usize = 0x101;
+    /// a0 = handle, a1/a2 = buffer. Reserved: no object supports it yet.
+    pub const WRITE: usize = 0x102;
+    /// a0 = handle, a1 = operation (per object), a2/a3 = arguments.
+    /// Returns a value in a1.
+    pub const CTL: usize = 0x103;
+}
+
+/// Handles per process.
+pub const MAX_HANDLES: usize = 16;
+/// Handles one `wait` can watch.
+pub const WAIT_MAX: usize = MAX_HANDLES;
+/// `wait` timeout meaning "no timeout".
+pub const FOREVER: u64 = u64::MAX;
+
+/// Rights asked for in `open`, checked on each use of the handle.
+pub mod rights {
+    pub const READ: usize = 1 << 0;
+    pub const WRITE: usize = 1 << 1;
+    pub const CTL: usize = 1 << 2;
+    pub const WAIT: usize = 1 << 3;
+}
+
+/// The `timer` object: a periodic or one-shot timer whose expiries `wait`
+/// reports. Expiries that come before the app waits are added up, not
+/// queued: the event's value is how many there were.
+pub mod timer {
+    pub const NAME: &str = "timer";
+    /// ctl: a2/a3 = period in ns (lo/hi). The first expiry is one period
+    /// from now.
+    pub const SET_PERIODIC: usize = 1;
+    /// ctl: a2/a3 = delay in ns (lo/hi).
+    pub const SET_ONESHOT: usize = 2;
+    /// ctl: stops the timer and drops expiries not yet waited for.
+    pub const STOP: usize = 3;
+    /// Shortest period or delay the kernel accepts (ns).
+    pub const MIN_NS: u64 = 100_000;
+    /// `wait` event: the timer expired (value = how many times).
+    pub const EXPIRED: usize = 1;
 }
 
 /// Error codes. A syscall returns `-(code as isize)` in a0 on failure.
@@ -55,6 +108,10 @@ pub enum Error {
     NoAck = 13,
     /// A user pointer was outside the calling process's memory.
     BadAddress = 14,
+    /// The image's Permissions TLV does not allow this (`open`).
+    Denied = 15,
+    /// `wait` saw no event before its timeout.
+    TimedOut = 16,
 }
 
 impl Error {
@@ -73,6 +130,8 @@ impl Error {
             12 => Error::Uninstalled,
             13 => Error::NoAck,
             14 => Error::BadAddress,
+            15 => Error::Denied,
+            16 => Error::TimedOut,
             _ => Error::Fail,
         }
     }

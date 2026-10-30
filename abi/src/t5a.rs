@@ -265,8 +265,13 @@ pub struct Info<'a> {
 impl Info<'_> {
     /// Whether `open(name)` is allowed by the Permissions TLV.
     pub fn permits(&self, name: &[u8]) -> bool {
-        self.permissions.split(|&b| b == 0).any(|p| !p.is_empty() && p == name)
+        permits(self.permissions, name)
     }
+}
+
+/// Whether the NUL-separated `permissions` (the Permissions TLV) name `name`.
+pub fn permits(permissions: &[u8], name: &[u8]) -> bool {
+    permissions.split(|&b| b == 0).any(|p| !p.is_empty() && p == name)
 }
 
 /// A verified image: the header, what its TLVs say, and its parts.

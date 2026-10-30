@@ -8,7 +8,9 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin
+APPS       := hello fault ticker spin timers
+# Permissions TLV per app (doc/14 §4): the objects it may open.
+PERMIT_timers := --permit timer
 APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS))
 # All log schemas (doc/12): every event! call site in the kernel and the apps.
 SCHEMAS    := $(BUILD)/t5log.schemas
@@ -63,8 +65,7 @@ apps: tools $(UNTRUSTED_KEY)
 	@test -f $(DEV_KEY) || { echo "no signing key $(DEV_KEY): run make keys"; exit 1; }
 	cd user && cargo build --release
 	mkdir -p $(APPS_DIR)
-	for a in $(APPS); do \
-	    $(ELF2T5A) build $(APP_TARGET)/$$a $(APPS_DIR)/$$a.t5a --key $(DEV_KEY) || exit 1; done
+	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) &&) true
 	@# Images the kernel must reject (self-test, doc/14 §1.4).
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-untrusted.t5a --key $(UNTRUSTED_KEY) \
 	    --name hello-untrusted

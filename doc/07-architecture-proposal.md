@@ -145,13 +145,13 @@
 | 0x002 | `sleep` | ns_lo, ns_hi → – | M2 |
 | 0x003 | `sys_info` | buf, len → 書いた長さ（ABI 版、カーネル版、対応 syscall のビットマップ） | M1 |
 | 0x004 | `time` | – → ns_lo, ns_hi（単調時刻） | M2 |
-| 0x040 | `brk` | addr → 新しい brk | M3 |
+| 0x040 | `brk` | addr → 新しい brk | M3 の予定だったが未実装（M4a で PSRAM と合わせて検討） |
 | 0x080 | `close` | h → – | M3 |
-| 0x082 | `wait` | handles, n, timeout, ev_out → イベント数 | M3 |
+| 0x082 | `wait` | handles, n, timeout_lo, timeout_hi → (位置, イベント, 値)（14 §12 で確定） | M3 |
 | 0x0C0 | `chan_create` | – → h_tx, h_rx | M5 以降 |
 | 0x0C1/0x0C2 | `chan_send` / `chan_recv` | h, buf, len → len | M5 以降 |
 | 0x100 | `open` | name, len, rights → h（Permissions TLV で許可されたものだけ） | M3 |
-| 0x101/0x102 | `read` / `write` | h, buf, len → len | M3 |
+| 0x101/0x102 | `read` / `write` | h, buf, len → len | M3（番号と検査のみ。対応するオブジェクトは M6） |
 | 0x103 | `ctl` | h, op, a, b → 値 | M3 |
 | 0x140 | `shm_map` | h → addr, len | M6 |
 | 0xF00 | `dbg_write` | buf, len → len（USB Serial/JTAG へ出力） | **M1** |
@@ -209,7 +209,7 @@ doc/
 | **M1a** | bootloader、パーティションテーブル、カーネルを書き込む。M モードで "hello" を出し、診断（chip rev、PMP/PMA、misa）をダンプ、RWDT を停止 | USB Serial/JTAG にログが出る。ロック済み PMP がない | **あり（要確認）** |
 | **M1b** | **U モードのアプリが ecall で出力する。** カーネルに埋め込んだアプリ（PIE を L2MEM 上側へ再配置、M0 の実験が失敗したら固定アドレスでリンク）を、PMP の 2 領域で U モード実行し、`dbg_write` → USB Serial/JTAG、`exit`。あわせて**保護テスト**: アプリが ① 0x500D_2000 を読む、② カーネル領域に書く、③ data 領域を実行する → それぞれカーネルがアクセスフォールトを捕まえてプロセスを終了させ、カーネルは動き続ける | 正常系と 3 種類の異常系がすべて期待どおり | あり |
 | M2 | SYSTIMER のティック、2 プロセスのプリエンプション、`yield`/`sleep`/`time`、FPU の遅延保存 | 2 つのアプリが交互に出力する | あり（**達成**: 10） |
-| M3 | T5A、`elf2t5a`、`apps` パーティションからのロード、Ed25519 検証、ハンドル、`open`/`read`/`write`/`wait` | 書き込んだアプリを再起動なしで起動・終了できる | あり |
+| M3 | T5A、`elf2t5a`、`apps` パーティションからのロード、Ed25519 検証、ハンドル、`open`/`read`/`write`/`wait` | 書き込んだアプリを再起動なしで起動・終了できる | あり（**達成**: 14） |
 | M4 | クロック 360MHz、PSRAM の初期化（MSPI のタイミング調整を含む）。M4a: アプリを PSRAM にコピーして動かす。M4b: text をフラッシュから XIP で動かし、data を PSRAM に置く（14 §0.1） | PSRAM 上のアプリが動く。大きいアプリを XIP で動かす | あり |
 | M5 | カーネル OTA（otadata とロールバック）、アプリストアの A/B 更新、IPC チャネル | 更新と自動ロールバックの実演 | あり |
 | M6 | I2C → IO エクスパンダ → MIPI-DSI 表示、`shm_map` でアプリに描画させる。パネルの判別は 06 §5 | アプリが画面に描画する | あり |

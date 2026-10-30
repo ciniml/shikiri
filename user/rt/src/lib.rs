@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, event, sys};
+pub use t5_abi::{Error, FOREVER, event, rights, sys, timer};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -42,26 +42,40 @@ macro_rules! entry {
     };
 }
 
-/// Makes syscall `nr`. Returns a0 (0 or -error) and the values in a1/a2.
+/// Makes syscall `nr` with up to four arguments. Returns a0 (0 or -error)
+/// and the values in a1-a3.
 #[inline(always)]
-unsafe fn syscall2(nr: usize, a0: usize, a1: usize) -> (isize, usize, usize) {
+unsafe fn syscall4(nr: usize, a: [usize; 4]) -> (isize, [usize; 3]) {
     let ret: isize;
-    let val: usize;
-    let val2: usize;
+    let v: [usize; 3];
     unsafe {
+        let (v1, v2, v3);
         core::arch::asm!(
             "ecall",
             in("a7") nr,
-            inlateout("a0") a0 => ret,
-            inlateout("a1") a1 => val,
-            lateout("a2") val2, lateout("a3") _, lateout("a4") _, lateout("a5") _,
+            inlateout("a0") a[0] => ret,
+            inlateout("a1") a[1] => v1,
+            inlateout("a2") a[2] => v2,
+            inlateout("a3") a[3] => v3,
+            lateout("a4") _, lateout("a5") _,
             lateout("a6") _, lateout("t0") _, lateout("t1") _, lateout("t2") _,
             lateout("t3") _, lateout("t4") _, lateout("t5") _, lateout("t6") _,
             lateout("ra") _,
             options(nostack),
         );
+        v = [v1, v2, v3];
     }
-    (ret, val, val2)
+    (ret, v)
+}
+
+#[inline(always)]
+unsafe fn syscall2(nr: usize, a0: usize, a1: usize) -> (isize, usize, usize) {
+    let (ret, v) = unsafe { syscall4(nr, [a0, a1, 0, 0]) };
+    (ret, v[0], v[1])
+}
+
+fn result(ret: isize, v: [usize; 3]) -> Result<[usize; 3], Error> {
+    if ret < 0 { Err(Error::from_code(ret.unsigned_abs())) } else { Ok(v) }
 }
 
 /// Raw syscall access for tests and low-level code: returns a0 (0 or
@@ -71,6 +85,91 @@ unsafe fn syscall2(nr: usize, a0: usize, a1: usize) -> (isize, usize, usize) {
 /// Pointer arguments must follow the syscall's contract.
 pub unsafe fn raw_syscall(nr: usize, a0: usize, a1: usize) -> (isize, usize, usize) {
     unsafe { syscall2(nr, a0, a1) }
+}
+
+/// A kernel object the process opened (doc/14 §4). Closed when dropped.
+#[derive(Debug)]
+pub struct Handle(u32);
+
+impl Handle {
+    /// Opens the object `name` with `rights` (`rights::*`). The image's
+    /// Permissions TLV must name it (elf2t5a `--permit NAME`).
+    pub fn open(name: &str, rights: usize) -> Result<Handle, Error> {
+        let (ret, v) = unsafe { syscall4(sys::OPEN, [name.as_ptr() as usize, name.len(), rights, 0]) };
+        result(ret, v).map(|v| Handle(v[0] as u32))
+    }
+
+    pub fn raw(&self) -> u32 {
+        self.0
+    }
+
+    /// Object-specific operation `op` with a 64-bit argument.
+    pub fn ctl(&self, op: usize, arg: u64) -> Result<usize, Error> {
+        let (ret, v) = unsafe { syscall4(sys::CTL, [self.0 as usize, op, arg as usize, (arg >> 32) as usize]) };
+        result(ret, v).map(|v| v[0])
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        let _ = close_raw(self.0);
+    }
+}
+
+/// The `close` syscall on a raw handle number (normally `Handle` does this).
+pub fn close_raw(h: u32) -> Result<(), Error> {
+    let (ret, v) = unsafe { syscall4(sys::CLOSE, [h as usize, 0, 0, 0]) };
+    result(ret, v).map(|_| ())
+}
+
+/// An event `wait` returned: which handle (index into the slice passed),
+/// what happened and a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Event {
+    pub index: usize,
+    pub kind: usize,
+    pub value: usize,
+}
+
+/// Blocks until one of `handles` has an event, or `timeout_ns` passes
+/// (`FOREVER`: no timeout; 0: just check). `Err(Error::TimedOut)` on
+/// timeout.
+pub fn wait_raw(handles: &[u32], timeout_ns: u64) -> Result<Event, Error> {
+    let (ret, v) = unsafe {
+        syscall4(sys::WAIT, [handles.as_ptr() as usize, handles.len(), timeout_ns as usize, (timeout_ns >> 32) as usize])
+    };
+    result(ret, v).map(|v| Event { index: v[0], kind: v[1], value: v[2] })
+}
+
+/// `wait_raw` on handles.
+pub fn wait(handles: &[&Handle], timeout_ns: u64) -> Result<Event, Error> {
+    let mut raw = [0u32; t5_abi::WAIT_MAX];
+    let n = handles.len().min(raw.len());
+    for (r, h) in raw.iter_mut().zip(handles) {
+        *r = h.0;
+    }
+    wait_raw(&raw[..n], timeout_ns)
+}
+
+/// The `timer` object.
+pub struct Timer(pub Handle);
+
+impl Timer {
+    pub fn open() -> Result<Timer, Error> {
+        Handle::open(timer::NAME, rights::CTL | rights::WAIT).map(Timer)
+    }
+
+    pub fn set_periodic_ns(&self, ns: u64) -> Result<(), Error> {
+        self.0.ctl(timer::SET_PERIODIC, ns).map(|_| ())
+    }
+
+    pub fn set_oneshot_ns(&self, ns: u64) -> Result<(), Error> {
+        self.0.ctl(timer::SET_ONESHOT, ns).map(|_| ())
+    }
+
+    pub fn stop(&self) -> Result<(), Error> {
+        self.0.ctl(timer::STOP, 0).map(|_| ())
+    }
 }
 
 /// The `log_emit` syscall: the sink behind [`event!`] in apps. Logging never

@@ -14,6 +14,7 @@
 
 mod arch;
 mod flash;
+mod handle;
 mod loader;
 mod log;
 mod platform;
@@ -39,6 +40,9 @@ struct Apps {
     hello_untrusted: &'static [u8],
     /// Correctly signed, but for ABI 9.0.
     hello_badabi: &'static [u8],
+    /// M3d (handles and timers). Optional: a store written before M3d does
+    /// not have it, and installing it needs the kernel running.
+    timers: Option<&'static [u8]>,
 }
 
 impl Apps {
@@ -57,6 +61,7 @@ impl Apps {
             spin: get("spin")?,
             hello_untrusted: get("hello-untrusted")?,
             hello_badabi: get("hello-badabi")?,
+            timers: s.image("timers"),
         })
     }
 }
@@ -73,6 +78,7 @@ const MODE_STORE: usize = 2;
 const MODE_EXEC_DATA: usize = 3;
 const MODE_STORE_TEXT: usize = 4;
 const MODE_BAD_LOG: usize = 5;
+const MODE_OPEN_DENIED: usize = 6;
 
 pub extern "C" fn kmain() -> ! {
     Current::init();
@@ -114,7 +120,7 @@ pub extern "C" fn kmain() -> ! {
         store
     });
     let failures = match store.as_ref().map(Apps::from_store) {
-        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps),
+        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps),
         Some(None) => 1,
         None => {
             event!(Error, "selftest.no_flash");
@@ -188,9 +194,10 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
                 let state = match p.state {
                     process::State::Ready => "ready",
                     process::State::Sleeping { .. } => "sleeping",
+                    process::State::Waiting { .. } => "waiting",
                     process::State::Exited(_) => "exited",
                 };
-                event!(Info, "proc.info", pid = p.pid, name = p.name, state = state);
+                event!(Info, "proc.info", pid = p.pid, name = p.name, state = state, handles = p.handles.count() as u32);
                 n += 1;
             }
             let (size, used) = rv::stack_usage();
@@ -280,7 +287,7 @@ fn selftest_m1(apps: &Apps) -> u32 {
     let kernel_addr = &KERNEL_SECRET as *const u32 as usize;
     let kernel_ram = core::ptr::addr_of!(KERNEL_RAM_CANARY) as usize;
     unsafe { core::ptr::write_volatile(kernel_ram as *mut u32, 0xC0FFEE) };
-    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 10] = [
+    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 11] = [
         ("hello", apps.hello, 0, 0, Exit::Code(0)),
         ("fault/ok", apps.fault, MODE_OK, 0, Exit::Code(0)),
         ("fault/load-mmio", apps.fault, MODE_LOAD, Current::PROTECTED_MMIO, fault(cause::LOAD_ACCESS)),
@@ -291,6 +298,7 @@ fn selftest_m1(apps: &Apps) -> u32 {
         ("fault/exec-data", apps.fault, MODE_EXEC_DATA, 0, fault(cause::INSN_ACCESS)),
         ("fault/store-text", apps.fault, MODE_STORE_TEXT, 0, fault(cause::STORE_ACCESS)),
         ("fault/bad-log", apps.fault, MODE_BAD_LOG, kernel_addr, Exit::Code(0)),
+        ("fault/open-denied", apps.fault, MODE_OPEN_DENIED, kernel_addr, Exit::Code(0)),
     ];
 
     let mut failures = 0;
@@ -428,6 +436,42 @@ fn selftest_m2(apps: &Apps) -> u32 {
     ] {
         if n == 0 {
             event!(Error, "selftest.path_not_taken", path = what);
+            failures += 1;
+        }
+    }
+    failures
+}
+
+/// Two processes wait on timers of different periods while a third keeps
+/// the CPU busy; each checks its own intervals and the handle rules and
+/// exits 0 if they held (user/apps/timers).
+fn selftest_m3d(apps: &Apps) -> u32 {
+    let Some(timers) = apps.timers else {
+        event!(Warn, "selftest.skipped", part = "m3d", reason = "no timers app in the store");
+        return 0;
+    };
+    let specs: [(&'static str, &'static [u8], usize, usize); 3] =
+        [("timers20", timers, 20, 10), ("timers35", timers, 35, 6), ("spin", apps.spin, 3, 150)];
+    let mut slot_index = 0;
+    let loaded = specs.map(|(name, image, arg0, arg1)| {
+        let p = load(name, image, slot_index, arg0, arg1);
+        slot_index += 1;
+        p
+    });
+    let [Some(a), Some(b), Some(c)] = loaded else {
+        return 1;
+    };
+    let mut s = sched::Scheduler::new();
+    s.slots = [Some(a), Some(b), Some(c), None];
+    s.run(Some(2000), &mut |_| {});
+    let mut failures = 0;
+    for p in s.slots.iter().flatten() {
+        let exit = p.exit().unwrap();
+        // spin exits 2 when nothing preempted it for long; the timer
+        // processes only run for microseconds, so that is expected here.
+        let ok = exit == Exit::Code(0) || (p.name == "spin" && exit == Exit::Code(2));
+        log_case(p, &exit, ok);
+        if !ok {
             failures += 1;
         }
     }

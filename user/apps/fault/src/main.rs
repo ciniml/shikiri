@@ -22,6 +22,10 @@ pub const MODE_STORE_TEXT: usize = 4;
 /// Malformed `log_emit` payloads must be rejected with an error (exit 0 if
 /// all are).
 pub const MODE_BAD_LOG: usize = 5;
+/// `open` must refuse what the Permissions TLV does not list (this app
+/// lists nothing) and names in memory the process may not read (exit 0 if
+/// both are refused).
+pub const MODE_OPEN_DENIED: usize = 6;
 
 fn main(mode: usize, addr: usize) -> usize {
     event!(Info, "fault.start", mode = mode, addr = Addr(addr as u32));
@@ -42,10 +46,21 @@ fn main(mode: usize, addr: usize) -> usize {
                 core::ptr::write_volatile(p, 0);
             }
             MODE_BAD_LOG => return bad_log(addr),
+            MODE_OPEN_DENIED => return open_denied(addr),
             _ => {}
         }
     }
     if mode == MODE_OK { 0 } else { 1 }
+}
+
+/// `kernel_addr` is memory the process may not read.
+fn open_denied(kernel_addr: usize) -> usize {
+    use t5_rt::{Error, Handle, rights, sys};
+    let denied = Handle::open("timer", rights::WAIT).err() == Some(Error::Denied);
+    let (ret, _, _) = unsafe { t5_rt::raw_syscall(sys::OPEN, kernel_addr, 5) };
+    let bad_address = ret == -(Error::BadAddress as isize);
+    event!(Info, "fault.open_denied", denied = denied, bad_address = bad_address);
+    if denied && bad_address { 0 } else { 1 }
 }
 
 /// `kernel_addr` is memory the process may not read.

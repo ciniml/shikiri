@@ -31,6 +31,7 @@ pub mod reg {
     pub const A0: usize = 10;
     pub const A1: usize = 11;
     pub const A2: usize = 12;
+    pub const A3: usize = 13;
     pub const A7: usize = 17;
 }
 
