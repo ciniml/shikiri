@@ -163,3 +163,19 @@ ets_update_cpu_frequency(360) // ROM の delay を使う場合だけ
 ## 6. 調査の後の判断（2026-10-30）
 - **PSRAM の電源は LDO チャネル 2（VO2）で確定とする**。この Tab5 で動いていた元のファーム（~/repos/tab5_claude_client）の設定が `CONFIG_ESP_LDO_CHAN_PSRAM_DOMAIN=2`、1800mV である（§2.1 の引用と同じ箇所）。回路図での確認ではないが、実機で動いていた設定なので、これに従う（判断）。VO1 には触らない。
 - **元のファームは `CONFIG_ESP_ENABLE_PVT=y` で 360MHz を使っていた** [TCC/sdkconfig:2177]。PVT を移植していない今、360MHz にするのは電圧のマージンが分からないので、**§5 の段階 1（360MHz 化）は後回しにする**。ESP-IDF も PSRAM の初期化は 90MHz のうちに行う（§2）ので、段階 0 → 2 → 3 → 4 の順に進め、360MHz は PVT を調べてから行う（判断）。
+
+## 7. 段階 0 の結果（実機、2026-10-30）
+カーネルの起動時に読んだ値（`boot.clock_reg`、`boot.clock`。書き込みはしていない）。
+
+| レジスタ | 値 | 読み取れること |
+|---|---|---|
+| ROOT_CLK_CTRL0 | 0x0000_0060 | `CPU_CLK_DIV_NUM` = 3 → CPLL 360MHz の 4 分周（§1 の推測どおり） |
+| ROOT_CLK_CTRL1 / 2 | 0 / 0 | MEM、SYS、APB は分周 1（CPU クロックから） |
+| SOC_CLK_CTRL0 | 0xE6E0_7FEF | （未解読） |
+| PERI_CLK_CTRL00 | 0x0000_C05D | （未解読。`PSRAM_CLK_SRC_SEL` は bit[13:12] = 0） |
+| ANA_PLL_CTRL0 | 0x0000_004C | （未解読） |
+| LP HP_CLK_CTRL | 0x1FFF_FFFD | bit28 `HP_MPLL_500M_CLK_EN` は立っている |
+| PMU_RF_PWC | 0x0C00_0000 | bit24 `MSPI_PHY_XPD` = 0 → **MPLL は電源が入っていない** |
+| PMU_EXT_LDO_P1_0P1A / _ANA | 0x4020_0000 / 0xA000_0000 | VO2 の現在の設定（フィールドの解読は段階 2 で行う） |
+
+- **mcycle と SYSTIMER で測った CPU クロックは 90.004MHz**。§1 のとおり、ブートローダは 90MHz のまま渡している。

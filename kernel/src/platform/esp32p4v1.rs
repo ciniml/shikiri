@@ -47,6 +47,23 @@ const LP_WDT_STG_RESET_SYSTEM: u32 = 3;
 // [12:7]); values are RESET_REASON in esp_rom/esp32p4/include/esp32p4/rom/rtc.h.
 const LP_CLKRST_RESET_CAUSE: usize = 0x5011_1010;
 
+// Clock, LDO and PLL state, logged at boot for M4 (doc/research/
+// m4-psram-and-clock.md §5 step 0): hp_sys_clkrst_reg.h:29,69,102,147,1057,
+// 2989; lp_clkrst_reg.h:662; pmu_reg.h:2563,4339,4407.
+const HP_SYS_CLKRST: usize = 0x500E_6000;
+const CLOCK_REGS: [(&str, usize); 9] = [
+    ("root_clk_ctrl0", HP_SYS_CLKRST + 0x04),
+    ("root_clk_ctrl1", HP_SYS_CLKRST + 0x08),
+    ("root_clk_ctrl2", HP_SYS_CLKRST + 0x0C),
+    ("soc_clk_ctrl0", HP_SYS_CLKRST + 0x14),
+    ("peri_clk_ctrl00", HP_SYS_CLKRST + 0x30),
+    ("ana_pll_ctrl0", HP_SYS_CLKRST + 0xBC),
+    ("lp_hp_clk_ctrl", 0x5011_1040),
+    ("pmu_rf_pwc", 0x5011_515C),
+    ("pmu_ext_ldo_p1_0p1a", 0x5011_51D0),
+];
+const PMU_EXT_LDO_P1_0P1A_ANA: usize = 0x5011_51D4;
+
 // Timer group MWDTs: timer_group_reg.h
 const TIMG_BASES: [usize; 2] = [0x500C_2000, 0x500C_3000];
 const TIMG_WDTCONFIG0: usize = 0x48;
@@ -420,6 +437,21 @@ impl Platform for Esp32p4v1 {
         // timeout to the setting (doc/12 §7).
         let (config0, hold) = unsafe { (rd(LP_WDT_CONFIG0), rd(LP_WDT_CONFIG1)) };
         t5_abi::event!(Info, "boot.rwdt", config0 = config0, stg0_hold = hold);
+        for (name, addr) in CLOCK_REGS {
+            t5_abi::event!(Debug, "boot.clock_reg", name = name, addr = t5_abi::log::Addr(addr as u32), value = unsafe { rd(addr) });
+        }
+        t5_abi::event!(Debug, "boot.clock_reg", name = "pmu_ext_ldo_p1_0p1a_ana", addr = t5_abi::log::Addr(PMU_EXT_LDO_P1_0P1A_ANA as u32), value = unsafe { rd(PMU_EXT_LDO_P1_0P1A_ANA) });
+        // The CPU clock, measured: mcycle against SYSTIMER over 1 ms.
+        let read_mcycle = || -> u32 {
+            let c: u32;
+            unsafe { core::arch::asm!("csrr {0}, mcycle", out(reg) c) };
+            c
+        };
+        let (t0, c0) = (Self::now(), read_mcycle());
+        while Self::now() - t0 < SYSTIMER_TICKS_PER_MS {}
+        let (t1, c1) = (Self::now(), read_mcycle());
+        let cpu_khz = c1.wrapping_sub(c0) as u64 * SYSTIMER_TICKS_PER_MS / (t1 - t0);
+        t5_abi::event!(Info, "boot.clock", cpu_khz = cpu_khz);
     }
 
     fn feed_watchdog() {
