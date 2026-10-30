@@ -15,6 +15,7 @@
 mod arch;
 mod flash;
 mod handle;
+mod kupdate;
 mod loader;
 mod log;
 mod platform;
@@ -115,7 +116,8 @@ pub extern "C" fn kmain() -> ! {
     }
     pmp::reset();
 
-    let store = Current::map_flash().map(|window| {
+    let window = Current::map_flash();
+    let store = window.map(|window| {
         // A check that the window shows the flash: the CRC of the first
         // 4 KiB of ota_0 (0x10000), which is the start of the kernel's own
         // image file, so the host can compare.
@@ -125,6 +127,14 @@ pub extern "C" fn kmain() -> ! {
         store.log_contents();
         store
     });
+    // Kernel slots and otadata (M5a); a rollback is reported here.
+    let mut kup = window.map(kupdate::Kupdate::new);
+    if let Some(k) = &kup {
+        k.log_state();
+    }
+    if cfg!(feature = "test-bad-panic") {
+        panic!("test-bad-panic: this kernel must be rolled back");
+    }
     // Apps run from PSRAM when there is one (M4a), else from the L2MEM pool.
     match Current::psram_init() {
         Ok((window, size)) => set_pool(window..window + size),
@@ -141,15 +151,20 @@ pub extern "C" fn kmain() -> ! {
             1
         }
     };
+    #[cfg(feature = "test-bad-selftest")]
+    let failures = failures + 1;
     if failures == 0 {
         event!(Info, "selftest.result", failures = failures, pass = true);
     } else {
         event!(Error, "selftest.result", failures = failures, pass = false);
     }
+    if let Some(k) = &kup {
+        k.after_selftest(failures == 0);
+    }
     #[cfg(feature = "test-lockup")]
     lockup_test();
-    match store {
-        Some(mut store) if Current::SERVE => serve(&mut store),
+    match (store, kup.as_mut()) {
+        (Some(mut store), Some(kup)) if Current::SERVE => serve(&mut store, kup),
         _ => Current::exit(failures),
     }
 }
@@ -173,7 +188,7 @@ const FRAMES_PER_POLL: usize = 4;
 /// Runs apps for good: starts the autostart apps, then starts and stops
 /// apps on commands from the host (RTT down-channel, doc/14 §3). Results
 /// are log events.
-fn serve(store: &mut store::Store) -> ! {
+fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     let mut s = sched::Scheduler::new();
     for e in store.entries().filter(|e| e.flags & t5_abi::t5a::tlv::FLAG_AUTOSTART as u8 != 0) {
         let name = e.name();
@@ -192,13 +207,13 @@ fn serve(store: &mut store::Store) -> ! {
             let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND];
             for _ in 0..FRAMES_PER_POLL {
                 let Some(n) = log::read_command(&mut frame) else { break };
-                handle(s, store, &frame[..n]);
+                handle(s, store, kup, &frame[..n]);
             }
         });
     }
 }
 
-fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
+fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate::Kupdate, frame: &[u8]) {
     use t5_abi::ctl::Command;
     let Some((id, cmd)) = t5_abi::ctl::decode(frame) else {
         event!(Warn, "ctl.bad_command", len = frame.len() as u32);
@@ -234,6 +249,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
             }
         }
         Command::InstallBegin { length } => {
+            kup.cancel();
             let mut busy = [(0u16, 0u16); sched::MAX_PROCS];
             let mut n = 0;
             for e in s.slots.iter().flatten().filter_map(|p| p.xip_extents) {
@@ -242,12 +258,33 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
             }
             store.install_begin(length, &busy[..n])
         }
-        // Answered only on failure (doc/14 §3).
-        Command::InstallData { offset, data } => match store.install_data(offset, data) {
-            Ok(()) => return,
-            Err(e) => Err(e),
-        },
+        // Answered only on failure (doc/14 §3). Data and end go to the
+        // session begun last: a kernel update or an app install.
+        Command::InstallData { offset, data } => {
+            let r = if kup.active() { kup.data(offset, data) } else { store.install_data(offset, data) };
+            match r {
+                Ok(()) => return,
+                Err(e) => Err(e),
+            }
+        }
+        Command::InstallEnd if kup.active() => kup.end(),
         Command::InstallEnd => store.install_end().map(|e| e.length),
+        Command::KupdateBegin { length } => {
+            store.install_cancel();
+            kup.begin(length)
+        }
+        Command::Kinfo => {
+            kup.log_state();
+            Ok(0)
+        }
+        Command::Reboot => {
+            event!(Info, "kernel.reboot");
+            // Give the host a moment to read the log (doc/12: what it
+            // misses comes back as log.prev on the next boot).
+            let until = Current::now() + time::ns_to_ticks(200_000_000);
+            while Current::now() < until {}
+            Current::reset()
+        }
         Command::Remove { name } => store.remove(name),
         Command::FlashTest => store.flash_test(),
         // The full test overwrites the whole PSRAM, processes included.

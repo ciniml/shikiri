@@ -17,6 +17,10 @@ platform-virt = []
 platform-esp32p4v1 = []
 # L3 test: lock the core up after the self-test (doc/12 §7). Never ship.
 test-lockup = []
+# M5a rollback tests (doc/16 §3.6): a kernel that panics right after it
+# starts, and one whose self-test always fails. Never ship.
+test-bad-panic = []
+test-bad-selftest = []
 
 [dependencies]
 t5-abi = { path = "../abi" }

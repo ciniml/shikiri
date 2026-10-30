@@ -9,29 +9,32 @@ pub struct Frames {
     /// COBS frames, each ending in 0x00.
     pub bytes: Vec<u8>,
     /// Request ids the kernel always answers (`ctl.done`/`ctl.failed`).
-    /// `install_data` frames are answered only when they fail.
+    /// `install_data` frames are answered only when they fail, and `reboot`
+    /// not at all (the kernel logs `kernel.reboot` and restarts).
     pub answered: Vec<u32>,
 }
 
 /// Checks a line without reading files or numbering it.
 pub fn check_line(line: &str) -> Result<(), String> {
     match line.split_whitespace().collect::<Vec<_>>()[..] {
-        ["install", _] => Ok(()),
+        ["install" | "kupdate", _] => Ok(()),
         ["install", ..] => Err("install FILE".into()),
+        ["kupdate", ..] => Err("kupdate FILE".into()),
         _ => ctl::parse_line(line).map(|_| ()).map_err(str::to_string),
     }
 }
 
 /// Encodes `line`, numbering its frames from `*next_id`. `install FILE`
 /// reads the signed image and becomes install_begin, install_data...,
-/// install_end.
+/// install_end; `kupdate FILE` the same with a T5K kernel package and
+/// kupdate_begin.
 pub fn frames(line: &str, next_id: &mut u32) -> Result<Frames, String> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let image;
     let commands: Vec<Command> = match words[..] {
-        ["install", file] => {
+        [verb @ ("install" | "kupdate"), file] => {
             image = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
-            ctl::install_commands(&image).collect()
+            ctl::install_commands(&image, verb == "kupdate").collect()
         }
         _ => vec![ctl::parse_line(line)?],
     };
@@ -44,7 +47,7 @@ pub fn frames(line: &str, next_id: &mut u32) -> Result<Frames, String> {
         let mut frame = [0u8; ctl::MAX_COMMAND + ctl::MAX_COMMAND / 254 + 2];
         let k = t5_abi::log::cobs_encode(&raw[..n], &mut frame).ok_or("COBS")?;
         f.bytes.extend_from_slice(&frame[..k]);
-        if !matches!(c, Command::InstallData { .. }) {
+        if !matches!(c, Command::InstallData { .. } | Command::Reboot) {
             f.answered.push(id);
         }
     }

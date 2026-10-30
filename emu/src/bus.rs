@@ -82,6 +82,18 @@ pub struct Bus {
 const ANA_PLL_CTRL0: u32 = 0x500E_60BC;
 const MSPI_CAL_END: u32 = 1 << 8;
 
+/// The flash MMU as the bootloader leaves it: entries 0-31 map the kernel
+/// image from ota_0 (flash 0x1_0000; doc/16 §3.1). The emulator itself
+/// serves the kernel from the ELF (`flash`), so this only answers the
+/// kernel when it asks which slot it runs from.
+fn kernel_mmu() -> Vec<u32> {
+    let mut mmu = vec![0; 1024];
+    for (i, e) in mmu.iter_mut().take(32).enumerate() {
+        *e = (1 + i as u32) | MMU_VALID;
+    }
+    mmu
+}
+
 fn rd(mem: &[u8], off: u32, size: u32) -> u32 {
     let o = off as usize;
     match size {
@@ -119,7 +131,7 @@ impl Bus {
             cpu_hz,
             flash: vec![0xFF; FLASH_SIZE as usize],
             phys_flash: vec![0xFF; PHYS_FLASH_SIZE],
-            mmu: vec![0; 1024],
+            mmu: kernel_mmu(),
             mmu_index: 0,
             l2_suspended: false,
             flash_violation: None,
@@ -218,7 +230,7 @@ impl Bus {
         self.cache = Cache::new(self.cache.mode, L2MEM_BASE, L2MEM_SIZE);
         // The bootloader clears the MMU and maps only the kernel again; the
         // PSRAM keeps its contents but its MMU is cleared too.
-        self.mmu.fill(0);
+        self.mmu = kernel_mmu();
         self.psram.mmu.fill(0);
         self.psram.cache = Cache::new(self.cache.mode, crate::psram::WINDOW, crate::psram::WINDOW_SIZE);
         self.l2_suspended = false;

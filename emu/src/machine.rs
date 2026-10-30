@@ -41,10 +41,14 @@ pub enum Stop {
     /// A page changed by erase/write was read through the window before it
     /// was invalidated in the L1 D-cache and L2: stale data on the chip.
     StaleFlashRead { addr: u32, pc: u32 },
-    /// An erase/write below the app store (bootloader, partition table,
-    /// the kernel's ota_0/ota_1). Not a chip rule: the kernel promises it
-    /// never does this (doc/14 §5.2), and the emulator holds it to that.
+    /// An erase/write outside otadata, ota_1 and the app store (the
+    /// bootloader, the partition table, the running kernel's ota_0). Not a
+    /// chip rule: the kernel promises it never does this (doc/14 §5.2,
+    /// doc/16 §3.2), and the emulator holds it to that.
     FlashWriteProtected { offset: u32 },
+    /// The kernel asked the ROM for a system reset (after a kernel update
+    /// the bootloader would start the new kernel; not modelled).
+    SoftwareReset,
 }
 
 /// An exception (cause, tval) or a reason to stop emulation.
@@ -103,9 +107,12 @@ const ROM_SPIFLASH_ERASE_SECTOR: u32 = 0x4FC0_014C;
 const ROM_SPIFLASH_WRITE: u32 = 0x4FC0_0154;
 /// ets_update_cpu_frequency (esp32p4.rom.ld:32); the ROM delay is not modelled.
 const ROM_UPDATE_CPU_FREQUENCY: u32 = 0x4FC0_0044;
-/// Flash offsets below this are refused (`Stop::FlashWriteProtected`): the
-/// start of `appmeta` (boot/partitions.csv).
-const FLASH_STORE_START: u32 = 0x41_0000;
+/// Flash the kernel may change (boot/partitions.csv, doc/16 §3.2): otadata,
+/// ota_1 (the emulated kernel runs from ota_0, see `Bus::new`) and the app
+/// store onwards. Anything else is refused (`Stop::FlashWriteProtected`).
+const FLASH_WRITABLE: [core::ops::Range<u32>; 2] = [0xD000..0xF000, 0x21_0000..0x100_0000];
+/// esp_rom_software_reset_system (esp32p4.rom.ld:52).
+const ROM_SOFTWARE_RESET: u32 = 0x4FC0_0094;
 /// Typical times of a 4 KiB erase and a page program on a 128 Mbit NOR
 /// flash (W25Q128JV datasheet: tSE 45 ms, tPP 0.4 ms). The Tab5's chip is
 /// not known yet; the kernel measures it (flashtest).
@@ -495,7 +502,7 @@ impl Machine {
                 }
                 let erase = pc == ROM_SPIFLASH_ERASE_SECTOR;
                 let offset = if erase { a0.wrapping_mul(crate::bus::FLASH_SECTOR) } else { a0 };
-                if offset < FLASH_STORE_START {
+                if !FLASH_WRITABLE.iter().any(|r| r.contains(&offset)) {
                     return Err(Ex::Stop(Stop::FlashWriteProtected { offset }));
                 }
                 let (r, us) = if erase {
@@ -545,6 +552,7 @@ impl Machine {
             ROM_CACHE_RESUME_L2 => {
                 self.bus.l2_suspended = false;
             }
+            ROM_SOFTWARE_RESET => return Err(Ex::Stop(Stop::SoftwareReset)),
             _ => return Err(Ex::Stop(Stop::UnknownRom { pc })),
         }
         // Call overhead, plus roughly one cycle per cache line for the

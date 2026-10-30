@@ -1,0 +1,124 @@
+# 16. M5: 更新（カーネルの A/B とロールバック、アプリの A/B、IPC）
+
+- 日付: 2026-10-30
+- 状態: **M5a を実装した。t5emu で確認し、実機では otadata の読み取り（CRC が実物と一致）まで確認した。実機での更新とロールバックの試験は未実施（§6）**
+- 前提: doc/05（更新の調査）、doc/14（T5A、アプリストア、制御チャネル、インストール）、boot/（ロールバック有効の ESP-IDF 6.0 ブートローダ、パーティション表）
+- 出典の表記: `~/esp-idf/6.0/components/` からの相対パス。（推測）は推測、（判断）は設計判断。
+
+## 0. 範囲と順序
+| 段 | 内容 | 完了の条件 |
+|---|---|---|
+| **M5a** | **カーネルの更新**: 制御チャネルで受け取った新しいカーネルを、動いていない側のスロット（ota_0 / ota_1）に書き、署名を確かめてから otadata を切り替えて再起動する。新しいカーネルは自己試験に通ったら自分を確定する。確定しないまま落ちたら、ブートローダが元のカーネルに戻す | 実機で、正しいカーネルへの更新と、壊れたカーネルからの自動ロールバックの両方を見せる |
+| M5b | アプリの A/B: 更新したアプリの前の版をストアに残し、新しい版が確定しなければ前の版に戻す | 落ちるアプリを入れると、前の版に戻る |
+| M5c | IPC チャネル（ハンドルの新しい種類）。プロセス間でメッセージを送る | 2 つのアプリがチャネルでやりとりする |
+
+この文書は M5a を詳しく決め、M5b・M5c は方針だけ書く（実装の前に節を足す）。
+
+## 1. ブートローダの仕組み（使うところだけ）
+- otadata は 2 セクタ（0xD000、0xE000）。各セクタの先頭が `esp_ota_select_entry_t { u32 ota_seq; u8 seq_label[20]; u32 ota_state; u32 crc; }`（32 バイト）[bootloader_support/include/esp_flash_partitions.h:66-84]。
+- `crc` は `ota_seq` の 4 バイトだけの CRC-32。`esp_rom_crc32_le(UINT32_MAX, …)` で、zlib の CRC-32 と多項式・反転は同じだが **初期値が 0**（レジスタの初期値が `~UINT32_MAX`）[bootloader_support/src/bootloader_common_loader.c:66-69]。esp-bootloader-esp-idf 0.6.0 も `init: 0, refin/refout: true, xorout: 0xFFFF_FFFF` としている [non_rom.rs:5-14]。
+- **有効なエントリ**: `ota_seq` が 0xFFFF_FFFF でなく、状態が INVALID（3）でも ABORTED（4）でもなく、`crc` が合うもの [bootloader_common_loader.c:71-79]。2 つとも有効なら `ota_seq` の大きいほう [同:144-160]。起動するスロットは `(ota_seq - 1) % 2`（0 = ota_0、1 = ota_1）[bootloader_utility.c:440-444]。
+- **ロールバック**（`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`。boot/sdkconfig.defaults で有効にしてある）[bootloader_utility.c:395-450]:
+  1. 起動のたびに、まず `PENDING_VERIFY`（1）のエントリを `ABORTED` に書き換える（前回の起動で確定されなかった）。
+  2. 有効なエントリのうち新しいほうを選ぶ。その状態が `NEW`（0）なら `PENDING_VERIFY` にしてから起動する。
+  3. アプリ（ここではカーネル）が `VALID`（2）に書き換えれば確定。確定しないまま再起動すると、1 によって ABORTED になり、古いほうのエントリが選ばれる。
+- 選んだスロットのイメージが壊れていれば、ブートローダはほかのスロットを順に試す [bootloader_utility.c:578-628]。
+- otadata が 2 つとも初期状態（0xFF）なら ota_0 を起動し、`ota_seq = 1, VALID` をセクタ 0 に書く [bootloader_utility.c:410-421,490-505]。
+
+## 2. 更新パッケージ T5K（判断）
+```text
++---------------------------+ 0
+| ESP app image             | espflash save-image の出力そのまま（ヘッダ、セグメント、
+|                           | チェックサム、SHA-256）。長さ L は 16 の倍数
++---------------------------+ L
+| T5K ヘッダ（16 バイト）    | "T5K1", u16 header_version = 1, u16 header_size = 16,
+|                           | u32 signed_size = L + 16, u32 total_size
++---------------------------+ L + 16 = signed_size   <- 署名は [0, signed_size) を覆う
+| フッタ: Signature TLV      | T5A と同じ（鍵 ID 8 バイト + Ed25519 署名 64 バイト）
++---------------------------+ total_size
+```
+- **パッケージ全体を、そのままスロットの先頭から書く**。ブートローダは ESP image の後ろを読まないので、末尾の T5K は起動の邪魔にならない。署名は、書き込んだ後にフラッシュ上のバイトで確かめる（RAM に全体を持たなくてよい。T5A のインストールと同じ）。
+- 版と `secure_version` は、ESP image の中の `esp_app_desc_t`（最初のセグメントの先頭。magic 0xABCD_5432）から読む。カーネルの `APP_DESC` がそのまま唯一の出所になる（TLV に重ねて書かない）。
+- ESP image の検査（署名が合った後に行う）: magic 0xE9、セグメント数 1〜16、各セグメントが image に収まる、`chip_id` = 18（ESP32-P4）、`min_chip_rev_full` ≤ 100 ≤ `max_chip_rev_full`（Tab5 は v1.0）、`hash_appended` = 1、セグメントを歩いた長さ（+ チェックサムの詰め物 + SHA-256 の 32 バイト）が L と一致、`esp_app_desc_t` の magic [bootloader_support/include/esp_app_format.h:76-122; esp_app_format/include/esp_app_desc.h:21-41]。
+- 付加された SHA-256 とチェックサムは、カーネルでは計算しない（判断）。Ed25519 の署名が image 全体を覆っているので、書き込みの誤りも改ざんも署名で分かる。SHA-256 はブートローダが起動のたびに確かめる。
+- 鍵はアプリと同じ信頼鍵（`TRUSTED_KEYS`）。カーネル用に鍵を分けるのは、鍵の階層（doc/05 §5.3）を作るときにする。
+- ツール: `elf2t5a kernel IN.bin OUT.t5k --key K`（署名だけを足す）。Makefile が `build/t5-kernel-esp32p4v1.t5k` を作る。
+
+## 3. カーネルの手順（M5a）
+### 3.1 自分のスロットを知る
+- ブートローダは、カーネルのイメージをフラッシュの MMU のエントリ 0 から対応付けている。エントリ 0 の物理ページ × 64KiB が、自分のスロットの先頭（0x1_0000 か 0x21_0000）（推測。M3b でエントリ 0〜31 がカーネルに使われていることは確認済み）。どちらでもなければ、更新は受け付けない。
+- 起動時に `kupdate.boot` で、自分のスロット、otadata の 2 エントリ（seq、state、crc の正否）、自分の版と secure_version を記録する。**ロールバックが起きた後**（新しいほうのエントリが ABORTED か INVALID で、もう一方のスロットを指している）なら、`kupdate.rolled_back` を出す。
+
+### 3.2 受信と書き込み（制御チャネル）
+- `kupdate_begin(length)`（新しいコマンド 11）→ `install_data`（今までのデータフレームをそのまま使う）→ `install_end`。カーネルは、最後に始まったほう（アプリかカーネル）のセッションにデータを渡す。
+- 書き込み先は **動いていないスロット** だけ。`flash.rs` の書き込みの許可を「ストア + otadata + 動いていないスロット」にする。動いているスロットとブートローダ、パーティション表には、今までどおり書けない。
+- 各 4KiB セクタは、データがそこに来たときに消去する（アプリのインストールと同じ）。スロットの残り（パッケージの後ろ）は消さない（判断。ブートローダは L の後ろを読まない）。
+
+### 3.3 確認と切り替え（`install_end`）
+1. 受け取った長さが `total_size` と一致する。
+2. フラッシュの線形の窓の上で、署名を確かめる。
+3. ESP image を検査する（§2）。
+4. **ダウングレードの防止**: 新しい `secure_version` ≥ 動いているカーネルの `secure_version`。
+5. otadata を書く: 新しい `ota_seq` は「今の最大の seq より大きく、`(seq - 1) % 2` が書き込んだスロットになる最小の値」（2 つとも初期状態なら、スロット番号 + 1）。書く先は、**今有効なエントリのない側のセクタ**（有効なエントリが 1 つもなければセクタ 0。esp_ota_ops.c の `esp_rewrite_ota_data` と同じ考え方）。状態は `NEW`。セクタを消去してから 32 バイトを書き、読み戻して確かめる。
+6. `kupdate.ready`（スロット、seq、版）を出す。**再起動はしない**。ホストが `reboot`（新しいコマンド 12）を送る（判断。更新と再起動を分けておくと、書き込みだけを試せる）。
+
+### 3.4 新しいカーネルの確定
+- 起動時に、選ばれたエントリ（自分のスロットを指す、新しいほうの有効なエントリ）が `PENDING_VERIFY` なら、**自己試験が通ったときに `VALID` に書き換える**（`kupdate.confirmed`）。
+- 自己試験が失敗したら `INVALID` に書き換えて再起動する（`kupdate.rejected`）。ブートローダは古いほうを起動する。
+- パニックや固まった場合は、RWDT（約 4 秒）でリセットされ、ブートローダが ABORTED にして古いほうを起動する（§1）。
+- エントリの書き換えは、同じセクタの消去 → 書き込み。消去と書き込みの間に電源が切れると、そのセクタは初期状態になり、もう一方のセクタのエントリ（古いカーネル）が選ばれる。**古いカーネルに戻るだけで、起動できなくはならない**（推測。もう一方のセクタが有効である限り）。
+
+### 3.5 再起動
+- ROM の `software_reset`（0x4FC0_0094、`esp_rom_software_reset_system`）[esp_rom/esp32p4/ld/esp32p4.rom.ld:52; esp32p4.rom.api.ld:48]。システム全体がリセットされ、ブートローダがクロックを設定し直す（推測。§3.6 の試験で reset_cause を記録する）。
+
+### 3.6 試験
+- **t5emu**: エミュレータはブートローダを持たないので、受信、書き込み、署名の確認、otadata の書き込みまでを試す。エミュレータの MMU のエントリ 0〜31 を、ブートローダと同じく ota_0 に向けておく。書き込みの保護は「otadata と ota_1 とストア」だけを許す（ota_0 やブートローダへの書き込みは止める）。`reboot` は ROM の `software_reset` で止まる（`Stop::SoftwareReset`）。
+- **単体試験**（abi）: otadata の CRC（ブートローダが書いた実物の値と比べる）、seq の選び方、ESP image の検査。
+- **実機**（Tab5）:
+  1. 正しい更新: 版を上げたカーネル（0.2.0）を `kupdate` → `reboot` → ota_1 で起動し、自己試験の後に確定。もう一度 `reboot` しても ota_1 から起動する。
+  2. 戻る更新（自己試験の失敗）: 自己試験を必ず失敗させるカーネル（cargo の feature）を入れる → INVALID にして再起動 → 元のカーネルが起動し、`kupdate.rolled_back`。
+  3. 戻る更新（パニック）: 起動直後にパニックするカーネル → RWDT → ブートローダが ABORTED に → 元のカーネル。
+  4. 署名の壊れたパッケージ、secure_version の低いパッケージは、otadata を書かずに拒否される。
+
+### 3.7 実機の扱い（作業の約束）
+- 試験の後、カーネルは ota_0 と ota_1 のどちらで動いているか分からない。**`espflash write-bin 0x10000`（ota_0 だけ）で書いても起動しない**ことがある（otadata が ota_1 を指していれば）。開発時の書き込みは、①カーネル自身の `kupdate`（`make kupdate`）か、②ota_0 に書いて otadata を消す（`make flash-kernel-p4`。otadata が初期状態なら ota_0 が起動する）にする。
+- 元のファームウェアのバックアップ（~/tab5-backups/）はそのまま。ブートローダとパーティション表は書き換えない。
+
+## 4. M5b: アプリの A/B（方針）
+- 同じ名前のアプリをインストールしたとき、前の版のエントリを消さずに `previous` として残す（カタログのエントリに状態を足す。エクステントも残す）。
+- 新しい版は `PendingVerify` で入る。最初の起動から一定時間（例: 2 秒）異常終了しないか、アプリが `confirm` を呼べば `Valid` にし、前の版を消す。`PendingVerify` のまま異常終了すれば、前の版に戻す。
+- 詳しい状態遷移と、カタログの形式の変更（版を上げる）は、実装の前にここへ足す。
+
+## 5. M5c: IPC チャネル（方針）
+- ハンドルの種類に「チャネル」を足す。`open("chan:NAME")` で両端をつなぎ、`write` でメッセージ（最大 256 バイト程度）を送り、相手は `wait` で受信を待って `read` で取り出す。権限は Permissions TLV の名前で与える。
+- カーネルの中にメッセージのキュー（固定長）を持つ。共有メモリ（`shm_map`）は M6 の表示で考える。
+
+## 6. M5a の実装の記録（2026-10-30）
+
+### 6.1 実装したもの
+- `abi/src/otadata.rs`: otadata のエントリ（読み書き、CRC、有効性）、ブートローダと同じ選び方（`active`）、次のエントリの置き場所と seq（`next`）。単体試験で、Python の `binascii.crc32(data, 0xFFFFFFFF)`（初期値 0 の CRC と同じ）と値を比べた。
+- `abi/src/t5k.rs`: ESP app image を歩く（セグメント、チェックサムの詰め物、SHA-256、`esp_app_desc_t`）、チップの判定、T5K のヘッダと署名の切り出し。
+- `abi/src/ctl.rs`: コマンド `kupdate_begin`（11）、`reboot`（12）、`kinfo`（13）。`install_commands(image, kernel)`。ホストの `kupdate FILE` は、`install FILE` と同じくフレームに展開する。`reboot` には返事がない（ホストは待たない）。
+- `elf2t5a kernel IN.bin OUT.t5k --key K`、`elf2t5a verify-kernel`。`make image-p4` が `build/t5-kernel-esp32p4v1.t5k` も作る。
+- カーネル:
+  - `kernel/src/kupdate.rs`: 受信、書き込み、署名と image の確認、ダウングレードの拒否、otadata の書き込みと読み戻し、起動時の記録（`kupdate.otadata`、`kupdate.slot`、`kupdate.rolled_back`）、自己試験の後の確定・拒否。
+  - `flash.rs`: 書き込めるのは「ストア + otadata + 動いていないスロット」だけにした。動いているスロットは、MMU のエントリ 0 から求める（`Platform::kernel_slot`）。
+  - `Platform::chip_revision`（eFuse の WAFER_VERSION。Tab5 は 100）、`Platform::reset`（ROM の `software_reset`）。
+  - `APP_DESC` の版と secure_version を、ビルド時の環境変数（`T5_KERNEL_VERSION`、`T5_KERNEL_SECURE_VERSION`）で変えられるようにした（試験用のカーネル）。
+  - 試験用の feature: `test-bad-panic`（起動直後にパニック）、`test-bad-selftest`（自己試験が必ず 1 件失敗）。
+- `make kupdate-test-kernels`: `build/kupdate/` に good（0.1.1-good、secure_version 1）、bad-selftest、bad-panic、tampered（署名の後に 1 バイト変えたもの）を作る。
+- `make kupdate PROBE=… [T5K=FILE]`: 動いているカーネルに更新させて再起動する。`make flash-kernel-p4`: ota_0 に書いて otadata を消す（どちらのスロットが選ばれていても、ota_0 から起動する状態に戻す）。
+- t5emu: MMU のエントリ 0〜31 をブートローダと同じく ota_0 に向けた。書き込みの許可を「otadata、ota_1、ストア」にした。ROM の `software_reset` で止まる（`Stop::SoftwareReset`）。eFuse のチップの版を v1.0 にした。
+
+### 6.2 確かめたこと
+- **t5emu**（`make test-p4emu` の 5 本目）: 改ざんしたパッケージは `bad signature` で拒否され、otadata は変わらない。正しいパッケージは ota_1 に入り（98KB、消去 24 回、書き込み 384 回）、otadata のセクタ 0 に `seq 2, new`（CRC 正）が書かれ、`reboot` で止まる。ota_0 やブートローダへの書き込みがあれば t5emu が止める。
+- **実機**: 新しいカーネル（ota_0）の起動時の `kinfo` で、ブートローダが書いたエントリ（`seq 1, valid`）の CRC が、カーネルの計算と一致した（`crc_ok=true`）。自分のスロットを 0 と正しく判定した。
+- QEMU virt: スロットが分からないので、更新は受け付けない（自己試験は通る）。
+
+### 6.3 実機の試験の手順（未実施。ota_1 と otadata を書き換える）
+`PROBE=303a:1001:30:ED:A0:E0:CB:86` として:
+1. `make kupdate PROBE=$PROBE T5K=build/kupdate/good.t5k` → 再起動後、`make rtt PROBE=$PROBE CMD=kinfo` で、ota_1 の 0.1.1-good が動き、`kupdate.confirmed` が出て、otadata の seq 2 が `valid` になっていること。
+2. `make kupdate PROBE=$PROBE T5K=build/kupdate/bad-selftest.t5k` → 新しいカーネル（ota_0）は自己試験に失敗して `kupdate.rejected` を出し、再起動する。ブートローダは ota_1 の 0.1.1-good を起動し、`kupdate.rolled_back`（seq 3、invalid）が出ること。
+3. `make kupdate PROBE=$PROBE T5K=build/kupdate/bad-panic.t5k` → **10 秒ほどプローブをつながない**（つなぐとウォッチドッグが止まり、リセットされない）。パニック → RWDT → ブートローダが ABORTED にして ota_1 に戻る。そのあと `kinfo` で `kupdate.rolled_back`（aborted）が出ること。
+4. `make kupdate PROBE=$PROBE`（開発版。secure_version 0）→ `secure_version rollback` で拒否されること。`make kupdate PROBE=$PROBE T5K=build/kupdate/tampered.t5k` → `bad signature`。
+5. 元に戻す: `make flash-kernel-p4 PORT=/dev/ttyACM3`（ota_0 に開発版を書き、otadata を消す）。

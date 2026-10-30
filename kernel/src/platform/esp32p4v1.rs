@@ -49,6 +49,8 @@ const LP_WDT_STG_RESET_SYSTEM: u32 = 3;
 // Reset cause (lp_clkrst_reg.h LP_CLKRST_RESET_CAUSE_REG, HPCORE0 bits
 // [12:7]); values are RESET_REASON in esp_rom/esp32p4/include/esp32p4/rom/rtc.h.
 const LP_CLKRST_RESET_CAUSE: usize = 0x5011_1010;
+const ROM_SOFTWARE_RESET: usize = 0x4FC0_0094;
+const EFUSE_RD_MAC_SYS_2: usize = 0x5012_D04C;
 
 // Clock, LDO and PLL state, logged at boot for M4 (doc/research/
 // m4-psram-and-clock.md §5 step 0): hp_sys_clkrst_reg.h:29,69,102,147,1057,
@@ -302,13 +304,37 @@ const fn cstr<const N: usize>(s: &str) -> [u8; N] {
     out
 }
 
+/// The kernel's version and secure_version as the bootloader and kernel
+/// updates see them (doc/16 §2). The update tests build kernels with other
+/// values (`T5_KERNEL_VERSION`, `T5_KERNEL_SECURE_VERSION`).
+const VERSION: &str = match option_env!("T5_KERNEL_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+const SECURE_VERSION: u32 = match option_env!("T5_KERNEL_SECURE_VERSION") {
+    Some(v) => parse_u32(v),
+    None => 0,
+};
+
+const fn parse_u32(s: &str) -> u32 {
+    let b = s.as_bytes();
+    let mut v = 0u32;
+    let mut i = 0;
+    while i < b.len() {
+        assert!(b[i].is_ascii_digit(), "T5_KERNEL_SECURE_VERSION must be a decimal number");
+        v = v * 10 + (b[i] - b'0') as u32;
+        i += 1;
+    }
+    v
+}
+
 #[used]
 #[unsafe(link_section = ".flash.appdesc")]
 static APP_DESC: AppDesc = AppDesc {
     magic_word: 0xABCD_5432,
-    secure_version: 0,
+    secure_version: SECURE_VERSION,
     reserv1: [0; 2],
-    version: cstr(env!("CARGO_PKG_VERSION")),
+    version: cstr(VERSION),
     project_name: cstr("tab5-os"),
     time: [0; 16],
     date: [0; 16],
@@ -464,6 +490,31 @@ impl Platform for Esp32p4v1 {
         let pages = FLASH_SIZE / MMU_PAGE;
         unsafe { map_flash_pages(first, pages, 0, pages) };
         Some(FLASH_WINDOW)
+    }
+
+    fn kernel_slot() -> Option<u32> {
+        // The bootloader maps the kernel image from flash MMU entry 0
+        // (0x4000_0000), as M3b found; reading an entry needs no cache stop.
+        let entry = unsafe {
+            wr(MMU_ITEM_INDEX, 0);
+            rd(MMU_ITEM_CONTENT)
+        };
+        (entry & MMU_VALID != 0).then(|| (entry & (MMU_VALID - 1)) * MMU_PAGE as u32)
+    }
+
+    fn chip_revision() -> u16 {
+        // efuse_ll.h:58-67; efuse_reg.h:749-824.
+        let v = unsafe { rd(EFUSE_RD_MAC_SYS_2) };
+        let major = ((v >> 23) & 1) << 2 | ((v >> 4) & 3);
+        (major * 100 + (v & 0xF)) as u16
+    }
+
+    fn reset() -> ! {
+        // esp_rom_software_reset_system (esp32p4.rom.ld:52).
+        unsafe {
+            let reset: unsafe extern "C" fn() -> ! = core::mem::transmute(ROM_SOFTWARE_RESET);
+            reset()
+        }
     }
 
     fn flash_offset(addr: usize) -> Option<u32> {

@@ -385,14 +385,14 @@ const SOC_CLK_DIV_UPDATE: u32 = 1 << 4;
 
 /// Registers the kernel reads before writing, as the Tab5's bootloader
 /// leaves them (doc/research/m4-psram-and-clock.md §7): the CPU at CPLL / 4,
-/// the HP root clock from CPLL, and eFuse block version v0.3 (so the
-/// kernel takes the PVT path). The emulated CPU keeps its `--mhz` whatever
+/// the HP root clock from CPLL, and the eFuse of the Tab5: chip revision
+/// v1.0 and block version v0.3 (so the kernel takes the PVT path). The emulated CPU keeps its `--mhz` whatever
 /// the dividers say.
 fn initial_value(addr: u32) -> u32 {
     match addr {
         ROOT_CLK_CTRL0 => 3 << 5,
         0x5011_1040 => 0x1FFF_FFFD, // LP_CLKRST_HP_CLK_CTRL
-        0x5012_D04C => 3 << 8,      // EFUSE_RD_MAC_SYS_2: BLK_VERSION_MINOR
+        0x5012_D04C => 3 << 8 | 1 << 4, // EFUSE_RD_MAC_SYS_2: BLK_VERSION_MINOR, WAFER_VERSION_MAJOR_LO
         _ => 0,
     }
 }

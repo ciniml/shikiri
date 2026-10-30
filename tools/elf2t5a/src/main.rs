@@ -13,6 +13,12 @@
 //!                 [--stack BYTES] [--permit NAME]... [--autostart]
 //!                 [--secure-version N] [--abi MAJOR.MINOR]
 //!   elf2t5a verify IMAGE.t5a --public FILE
+//!   elf2t5a kernel IN.bin OUT.t5k --key SECRET
+//!   elf2t5a verify-kernel PACKAGE.t5k --public FILE
+//!
+//! `kernel` signs an ESP app image (espflash save-image) as a T5K kernel
+//! package (`t5_abi::t5k`, doc/16 §2): the image, a 16-byte header and the
+//! signature footer.
 //!
 //! Keys are hex files: the secret file holds the 32-byte Ed25519 seed, the
 //! public file the 32-byte public key. `--abi` overrides the ABI version and
@@ -26,6 +32,7 @@ use object::read::elf::{FileHeader, ProgramHeader, Rela as _, SectionHeader};
 use object::Endianness;
 use sha2::{Digest, Sha256};
 use t5_abi::t5a::{self, tlv};
+use t5_abi::t5k;
 
 const PMP_GRANULE: u32 = 128;
 const DEFAULT_STACK: u32 = 4096;
@@ -33,7 +40,9 @@ const USAGE: &str = "usage:
   elf2t5a keygen --secret FILE --public FILE [--seed HEX]
   elf2t5a build IN.elf OUT.t5a --key SECRET [--name NAME] [--version X.Y.Z] [--stack BYTES]
                 [--permit NAME]... [--autostart] [--secure-version N] [--abi MAJOR.MINOR]
-  elf2t5a verify IMAGE.t5a --public FILE";
+  elf2t5a verify IMAGE.t5a --public FILE
+  elf2t5a kernel IN.bin OUT.t5k --key SECRET
+  elf2t5a verify-kernel PACKAGE.t5k --public FILE";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -41,6 +50,8 @@ fn main() -> ExitCode {
         Some("keygen") => keygen(&args[1..]),
         Some("build") => build(&args[1..]),
         Some("verify") => verify(&args[1..]),
+        Some("kernel") => kernel(&args[1..]),
+        Some("verify-kernel") => verify_kernel(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match r {
@@ -299,6 +310,69 @@ fn verify(args: &[String]) -> Result<(), String> {
         img.header.text_size,
         img.header.mem_size
     );
+    Ok(())
+}
+
+/// Signs an ESP app image as a T5K package.
+fn kernel(args: &[String]) -> Result<(), String> {
+    let (mut files, mut key) = (Vec::new(), None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--key" => key = Some(it.next().cloned().ok_or("--key needs a value")?),
+            s => files.push(s.to_string()),
+        }
+    }
+    let ([input, output], Some(key)) = (&files[..], key) else { return Err(USAGE.into()) };
+    let image = fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+    let esp = t5k::esp_image(&image).map_err(|e| format!("{input}: {e:?}"))?;
+    if esp.len != image.len() {
+        return Err(format!("{input}: {} bytes after the image", image.len() - esp.len));
+    }
+    esp.check_chip(100).map_err(|e| format!("{input}: {e:?}"))?;
+    let kp = KeyPair::from_seed(Seed::new(read_hex32(&key)?));
+    let mut out = image.clone();
+    out.extend_from_slice(&t5k::header(image.len()));
+    let sig = kp.sk.sign(&out, None);
+    out.extend_from_slice(&tlv::SIGNATURE.to_le_bytes());
+    out.extend_from_slice(&((t5a::KEY_ID_SIZE + t5a::SIGNATURE_SIZE) as u16).to_le_bytes());
+    out.extend_from_slice(&t5a::key_id(&kp.pk));
+    out.extend_from_slice(sig.as_ref());
+    t5k::split(&out).map_err(|e| format!("internal: {e:?}"))?;
+    fs::write(output, &out).map_err(|e| format!("{output}: {e}"))?;
+    eprintln!(
+        "elf2t5a: kernel {} {} secure_version {}, chip rev {}..{}, {} bytes, key {}",
+        esp.project,
+        esp.version,
+        esp.secure_version,
+        esp.min_rev,
+        esp.max_rev,
+        out.len(),
+        to_hex(&t5a::key_id(&kp.pk))
+    );
+    Ok(())
+}
+
+fn verify_kernel(args: &[String]) -> Result<(), String> {
+    let (mut package, mut public) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--public" => public = Some(it.next().cloned().ok_or("--public needs a value")?),
+            s => package = Some(s.to_string()),
+        }
+    }
+    let (package, public) = package.zip(public).ok_or(USAGE)?;
+    let pk_bytes = read_hex32(&public)?;
+    let data = fs::read(&package).map_err(|e| format!("{package}: {e}"))?;
+    let p = t5k::split(&data).map_err(|e| format!("{e:?}"))?;
+    if p.signed.key_id != t5a::key_id(&pk_bytes) {
+        return Err(format!("signed with key {}", to_hex(&p.signed.key_id)));
+    }
+    PublicKey::new(pk_bytes)
+        .verify(p.signed.message, &Signature::new(p.signed.signature))
+        .map_err(|_| "bad signature")?;
+    println!("{package}: kernel {} {} secure_version {}: signature OK", p.image.project, p.image.version, p.image.secure_version);
     Ok(())
 }
 

@@ -119,6 +119,13 @@ impl Store {
         Ok(first as u32)
     }
 
+    /// Drops an install in progress (a kernel update begins).
+    pub fn install_cancel(&mut self) {
+        if let Some(old) = self.install.take() {
+            event!(Warn, "store.install_dropped", received = old.next, length = old.length);
+        }
+    }
+
     /// Writes the next piece of the image, erasing each sector as the data
     /// reaches it. Any error drops the install.
     pub fn install_data(&mut self, offset: u32, data: &[u8]) -> Result<(), &'static str> {

@@ -386,8 +386,10 @@ fn main() -> ExitCode {
     }
     let all_ok = passed && rtt_ok && missing.is_empty() && mon.pending.is_empty();
     match stop {
-        Stop::Halted { .. } | Stop::Requested if all_ok => ExitCode::SUCCESS,
-        Stop::Halted { .. } | Stop::Requested => ExitCode::from(1),
+        // A reset is an end like any other once everything expected was
+        // seen (`reboot`, doc/16 §3.6).
+        Stop::Halted { .. } | Stop::Requested | Stop::SoftwareReset if all_ok => ExitCode::SUCCESS,
+        Stop::Halted { .. } | Stop::Requested | Stop::SoftwareReset => ExitCode::from(1),
         Stop::TimeLimit => ExitCode::from(3),
         _ => ExitCode::from(2),
     }
@@ -421,7 +423,8 @@ fn describe(s: &Stop) -> String {
              the L1 D-cache and L2 (stale data on real hardware)"
         ),
         Stop::FlashWriteProtected { offset } => {
-            format!("flash erase/write at offset {offset:#x}, below the app store (doc/14 §5.2)")
+            format!("flash erase/write at offset {offset:#x}, outside otadata, ota_1 and the app store (doc/16 §3.2)")
         }
+        Stop::SoftwareReset => "software reset (the bootloader is not modelled)".into(),
     }
 }

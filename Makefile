@@ -31,7 +31,7 @@ QEMU_STORE := -device loader,file=$(BUILD)/store/appmeta.bin,addr=0x84410000,for
 
 .PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
         schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 flash-store monitor \
-        probe-rs rtt clean
+        probe-rs rtt clean kupdate-test-kernels flash-kernel-p4 kupdate
 
 all: kernel-virt image-p4 boot
 
@@ -103,10 +103,33 @@ kernel-p4: apps
 	mkdir -p $(BUILD) && cp kernel/target/esp32p4v1/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-esp32p4v1.elf
 	tools/check-ram-text.sh $(BUILD)/t5-kernel-esp32p4v1.elf
 
-# ESP app image for the 2nd stage bootloader (rev v1.x only).
+# ESP app image for the 2nd stage bootloader (rev v1.x only), and the same
+# image signed as a kernel update package (T5K, doc/16 §2).
+KERNEL_T5K := $(BUILD)/t5-kernel-esp32p4v1.t5k
 image-p4: kernel-p4
 	espflash save-image --chip esp32p4 --min-chip-rev 1.0 --flash-size 16mb \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf $(BUILD)/t5-kernel-esp32p4v1.bin
+	$(ELF2T5A) kernel $(BUILD)/t5-kernel-esp32p4v1.bin $(KERNEL_T5K) --key $(DEV_KEY)
+
+# Kernels for the update tests (doc/16 §3.6), as T5K packages in
+# build/kupdate/: good (0.1.1, secure_version 1), bad-selftest (its self-test
+# always fails), bad-panic (panics before it can confirm itself), and
+# tampered (the dev kernel with one byte changed after signing).
+KUPDATE_DIR := $(BUILD)/kupdate
+define test_kernel
+	cd kernel && T5_KERNEL_VERSION=0.1.1-$(1) T5_KERNEL_SECURE_VERSION=1 cargo build --release \
+	    --features "platform-esp32p4v1 $(2)" --target-dir target/kupdate-$(1)
+	espflash save-image --chip esp32p4 --min-chip-rev 1.0 --flash-size 16mb \
+	    kernel/target/kupdate-$(1)/riscv32imac-unknown-none-elf/release/t5-kernel $(KUPDATE_DIR)/$(1).bin
+	$(ELF2T5A) kernel $(KUPDATE_DIR)/$(1).bin $(KUPDATE_DIR)/$(1).t5k --key $(DEV_KEY)
+endef
+kupdate-test-kernels: image-p4
+	mkdir -p $(KUPDATE_DIR)
+	$(call test_kernel,good,)
+	$(call test_kernel,bad-selftest,test-bad-selftest)
+	$(call test_kernel,bad-panic,test-bad-panic)
+	cp $(KERNEL_T5K) $(KUPDATE_DIR)/tampered.t5k
+	printf 'X' | dd of=$(KUPDATE_DIR)/tampered.t5k bs=1 seek=100 conv=notrunc status=none
 
 # ESP-IDF bootloader + partition table (boot/sdkconfig.defaults, boot/partitions.csv).
 boot:
@@ -127,6 +150,22 @@ flash-p4: image-p4 boot
 	espflash erase-region --port $(PORT) 0xd000 0x2000
 	espflash write-bin --port $(PORT) 0x2000 $(BUILD)/boot/bootloader/bootloader.bin
 	espflash write-bin --port $(PORT) 0x8000 $(BUILD)/boot/partition_table/partition-table.bin
+	espflash write-bin --port $(PORT) 0x10000 $(BUILD)/t5-kernel-esp32p4v1.bin
+
+# Kernel update over RTT (doc/16 §3): the running kernel writes the T5K
+# package (default: this build; T5K=FILE for another) into the other slot,
+# selects it in otadata, and restarts. The new kernel confirms itself after
+# its self-test; `make rtt PROBE=... CMD=kinfo` shows the slots afterwards.
+kupdate: image-p4 schemas-p4
+	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
+	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
+	    --cmd "kupdate $(or $(T5K),$(KERNEL_T5K))" --cmd reboot --until-done \
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
+
+# Kernel to ota_0 with otadata erased, so the bootloader starts ota_0
+# whichever slot a kernel update left selected (doc/16 §3.7).
+flash-kernel-p4: image-p4
+	espflash erase-region --port $(PORT) 0xd000 0x2000
 	espflash write-bin --port $(PORT) 0x10000 $(BUILD)/t5-kernel-esp32p4v1.bin
 
 # Decoded log of the device (the console carries log frames, doc/12).
@@ -182,7 +221,7 @@ test-emu:
 # The app store goes into the emulated flash at its partition offsets.
 EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.bin@420000
 
-test-p4emu: emu kernel-p4
+test-p4emu: emu schemas-p4 kupdate-test-kernels
 	$(T5EMU) $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Control commands after the self-test (doc/14 §3): start two apps, stop
 	@# one, and check the events.
@@ -208,6 +247,15 @@ test-p4emu: emu kernel-p4
 	    --ctl "install $(APPS_DIR)/spin-xip.t5a" --ctl "run spin-xip 4 300" --ctl "remove spin-xip" \
 	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
 	    --expect-event spin.done --expect-event hello.greet \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
+	@# tampered package is refused, the signed one goes into ota_1 and is
+	@# selected in otadata, and reboot ends the run (no bootloader here).
+	$(T5EMU) --quiet --max-ms 20000 $(EMU_FLASH) --flash $(BUILD)/t5-kernel-esp32p4v1.bin@10000 $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "kinfo" --ctl "kupdate $(KUPDATE_DIR)/tampered.t5k" --ctl "kupdate $(KERNEL_T5K)" --ctl "kinfo" \
+	    --ctl "reboot" \
+	    --expect-event kupdate.slot --expect-event ctl.failed --expect-event kupdate.ready \
+	    --expect-event kernel.reboot \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

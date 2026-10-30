@@ -57,11 +57,17 @@ fn align_up(v: usize, a: usize) -> usize {
 /// signed part.
 pub fn verify(bytes: &[u8]) -> Result<&[u8], t5a::Error> {
     let s = t5a::split_signed(bytes)?;
+    check_signature(&s)?;
+    Ok(s.message)
+}
+
+/// Checks a signature against the trusted keys (apps and kernel packages
+/// alike, doc/16 §2).
+pub fn check_signature(s: &t5a::Signed) -> Result<(), t5a::Error> {
     let key = TRUSTED_KEYS.iter().find(|k| t5a::key_id(k) == s.key_id).ok_or(t5a::Error::UnknownKey)?;
     ed25519_compact::PublicKey::new(*key)
         .verify(s.message, &ed25519_compact::Signature::new(s.signature))
-        .map_err(|_| t5a::Error::BadSignature)?;
-    Ok(s.message)
+        .map_err(|_| t5a::Error::BadSignature)
 }
 
 /// Where a process goes: its slot number and the slot's memory (for images

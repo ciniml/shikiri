@@ -6,8 +6,10 @@
 
 pub mod ctl;
 pub mod log;
+pub mod otadata;
 pub mod store;
 pub mod t5a;
+pub mod t5k;
 
 /// ABI version carried by every app image. The kernel accepts an image when
 /// the major numbers match and the image's minor is not newer than its own.

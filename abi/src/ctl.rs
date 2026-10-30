@@ -10,6 +10,10 @@
 //! starting on a `INSTALL_CHUNK` boundary), `install_end`. Data frames are
 //! answered only when they fail; the kernel then drops the install, and
 //! `install_end` fails too. The name comes from the signed image.
+//!
+//! A kernel update (M5a, doc/16 §3) is the same with `kupdate_begin` in
+//! place of `install_begin`: the data and end frames go to whichever
+//! session was begun last. `reboot` restarts the chip.
 
 pub mod cmd {
     pub const LIST: u8 = 1;
@@ -29,6 +33,11 @@ pub mod cmd {
     pub const FLASH_TEST: u8 = 9;
     /// Bring up the PSRAM (M4a bring-up; later done at boot).
     pub const PSRAM: u8 = 10;
+    /// `u32 length`: a T5K kernel package follows (doc/16 §2).
+    pub const KUPDATE_BEGIN: u8 = 11;
+    pub const REBOOT: u8 = 12;
+    /// Logs the kernel slots and otadata.
+    pub const KINFO: u8 = 13;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -49,6 +58,9 @@ pub enum Command<'a> {
     Remove { name: &'a str },
     FlashTest,
     Psram,
+    KupdateBegin { length: u32 },
+    Reboot,
+    Kinfo,
 }
 
 impl Command<'_> {
@@ -64,6 +76,9 @@ impl Command<'_> {
             Command::Remove { .. } => "remove",
             Command::FlashTest => "flashtest",
             Command::Psram => "psram",
+            Command::KupdateBegin { .. } => "kupdate_begin",
+            Command::Reboot => "reboot",
+            Command::Kinfo => "kinfo",
         }
     }
 }
@@ -87,6 +102,9 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::INSTALL_END if args.is_empty() => Command::InstallEnd,
         cmd::FLASH_TEST if args.is_empty() => Command::FlashTest,
         cmd::PSRAM if args.is_empty() => Command::Psram,
+        cmd::KUPDATE_BEGIN if args.len() == 4 => Command::KupdateBegin { length: u32_at(args, 0)? },
+        cmd::REBOOT if args.is_empty() => Command::Reboot,
+        cmd::KINFO if args.is_empty() => Command::Kinfo,
         cmd::REMOVE => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -126,6 +144,9 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Remove { .. } => put(&[cmd::REMOVE])?,
         Command::FlashTest => put(&[cmd::FLASH_TEST])?,
         Command::Psram => put(&[cmd::PSRAM])?,
+        Command::KupdateBegin { .. } => put(&[cmd::KUPDATE_BEGIN])?,
+        Command::Reboot => put(&[cmd::REBOOT])?,
+        Command::Kinfo => put(&[cmd::KINFO])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -139,7 +160,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
             put(&arg0.to_le_bytes())?;
             put(&arg1.to_le_bytes())?;
         }
-        Command::InstallBegin { length } => put(&length.to_le_bytes())?,
+        Command::InstallBegin { length } | Command::KupdateBegin { length } => put(&length.to_le_bytes())?,
         Command::InstallData { offset, data } => {
             if data.is_empty() || data.len() > INSTALL_CHUNK {
                 return None;
@@ -160,8 +181,9 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
 }
 
 /// Parses a command line as typed on the host: `list`, `ps`, `kill PID`,
-/// `run NAME [ARG0 [ARG1]]`, `remove NAME`, `flashtest`. (`install FILE`
-/// reads a file, so the host tools expand it; see `install_frames`.)
+/// `run NAME [ARG0 [ARG1]]`, `remove NAME`, `flashtest`, `psram`, `reboot`,
+/// `kinfo`. (`install FILE` and `kupdate FILE` read a file, so the host
+/// tools expand them; see `install_commands`.)
 pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
     let mut w = line.split_whitespace();
     let num = |s: Option<&str>| -> Result<u32, &'static str> {
@@ -186,10 +208,11 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("remove") => Command::Remove { name: w.next().ok_or("remove NAME")? },
         Some("flashtest") => Command::FlashTest,
         Some("psram") => Command::Psram,
+        Some("reboot") => Command::Reboot,
+        Some("kinfo") => Command::Kinfo,
         _ => {
-            return Err(
-                "commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | flashtest | psram",
-            );
+            return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | \
+                 flashtest | psram | kupdate FILE | kinfo | reboot");
         }
     };
     if w.next().is_some() {
@@ -199,9 +222,10 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
 }
 
 /// The commands that install `image`: begin, one data frame per
-/// `INSTALL_CHUNK`, end.
-pub fn install_commands(image: &[u8]) -> impl Iterator<Item = Command<'_>> {
-    core::iter::once(Command::InstallBegin { length: image.len() as u32 })
+/// `INSTALL_CHUNK`, end. With `kernel`, `image` is a T5K kernel package.
+pub fn install_commands(image: &[u8], kernel: bool) -> impl Iterator<Item = Command<'_>> {
+    let length = image.len() as u32;
+    core::iter::once(if kernel { Command::KupdateBegin { length } } else { Command::InstallBegin { length } })
         .chain(
             image
                 .chunks(INSTALL_CHUNK)
@@ -217,7 +241,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "flashtest"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "flashtest", "reboot", "kinfo"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();
@@ -233,7 +257,7 @@ mod tests {
     fn install_roundtrip() {
         let image: [u8; 600] = core::array::from_fn(|i| i as u8);
         let cmds: [Command; 5] = {
-            let mut it = install_commands(&image);
+            let mut it = install_commands(&image, false);
             core::array::from_fn(|_| it.next().unwrap())
         };
         assert_eq!(cmds[0], Command::InstallBegin { length: 600 });
@@ -244,6 +268,10 @@ mod tests {
             let n = encode(7, &c, &mut b).unwrap();
             assert_eq!(decode(&b[..n]), Some((7, c)));
         }
+        assert_eq!(install_commands(&image, true).next(), Some(Command::KupdateBegin { length: 600 }));
+        let mut b = [0u8; MAX_COMMAND];
+        let n = encode(8, &Command::KupdateBegin { length: 600 }, &mut b).unwrap();
+        assert_eq!(decode(&b[..n]), Some((8, Command::KupdateBegin { length: 600 })));
         let too_big = [0u8; INSTALL_CHUNK + 1];
         assert!(encode(1, &Command::InstallData { offset: 0, data: &too_big }, &mut [0u8; 512]).is_none());
     }

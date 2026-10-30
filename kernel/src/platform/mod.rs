@@ -91,6 +91,19 @@ pub trait Platform {
     fn log_info() {}
     /// Final clock and voltage setup, after the PSRAM is up (M4c).
     fn clock_init() {}
+    /// Flash offset of the kernel image the bootloader started (doc/16
+    /// §3.1); `None` where kernels are not updated in place.
+    fn kernel_slot() -> Option<u32> {
+        None
+    }
+    /// The chip revision, major * 100 + minor.
+    fn chip_revision() -> u16 {
+        0
+    }
+    /// Restarts the whole chip (the bootloader runs again).
+    fn reset() -> ! {
+        Self::exit(0)
+    }
     /// Logs the core voltage settings (`stage` names the moment).
     fn log_power(_stage: &'static str) {}
     /// Restarts the system watchdog (no-op where there is none).
