@@ -7,8 +7,11 @@ use t5_abi::{Error, event};
 use crate::platform::{Current, Platform, TouchPoint};
 use crate::time;
 
-/// Quarter turns clockwise from the panel's top to the user's top.
-static mut ORIENTATION: u32 = 0;
+/// Quarter turns clockwise from the panel's top to the user's top. The
+/// Tab5's standard position is landscape with the panel's top on the
+/// user's left: 270 degrees, as with the keyboard and as the ports are
+/// laid out (doc/17 §11). `rotate` changes it until the next boot.
+static mut ORIENTATION: u32 = 3;
 
 pub fn orientation() -> u32 {
     unsafe { ORIENTATION }
