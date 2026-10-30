@@ -54,6 +54,10 @@ pub mod cmd {
     pub const DISPLAY: u8 = 20;
     /// `u32 degrees` (0, 90, 180, 270): the screen orientation (M6c).
     pub const ROTATE: u8 = 21;
+    /// Initialise the SD card and log its partitions (M7a).
+    pub const SD_INFO: u8 = 22;
+    /// `u32 lba`: log one SD sector.
+    pub const SD_READ: u8 = 23;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -85,6 +89,8 @@ pub enum Command<'a> {
     I2cScan,
     Display,
     Rotate { degrees: u32 },
+    SdInfo,
+    SdRead { lba: u32 },
 }
 
 impl Command<'_> {
@@ -111,6 +117,8 @@ impl Command<'_> {
             Command::I2cScan => "i2cscan",
             Command::Display => "display",
             Command::Rotate { .. } => "rotate",
+            Command::SdInfo => "sdinfo",
+            Command::SdRead { .. } => "sdread",
         }
     }
 }
@@ -144,6 +152,8 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::I2C_SCAN if args.is_empty() => Command::I2cScan,
         cmd::DISPLAY if args.is_empty() => Command::Display,
         cmd::ROTATE if args.len() == 4 => Command::Rotate { degrees: u32_at(args, 0)? },
+        cmd::SD_INFO if args.is_empty() => Command::SdInfo,
+        cmd::SD_READ if args.len() == 4 => Command::SdRead { lba: u32_at(args, 0)? },
         cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -195,6 +205,8 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::I2cScan => put(&[cmd::I2C_SCAN])?,
         Command::Display => put(&[cmd::DISPLAY])?,
         Command::Rotate { .. } => put(&[cmd::ROTATE])?,
+        Command::SdInfo => put(&[cmd::SD_INFO])?,
+        Command::SdRead { .. } => put(&[cmd::SD_READ])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -202,6 +214,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Clock { mhz } => put(&mhz.to_le_bytes())?,
         Command::Touch { seconds } => put(&seconds.to_le_bytes())?,
         Command::Rotate { degrees } => put(&degrees.to_le_bytes())?,
+        Command::SdRead { lba } => put(&lba.to_le_bytes())?,
         Command::Pvt { on } => put(&(*on as u32).to_le_bytes())?,
         Command::Run { name, arg0, arg1 } => {
             if name.len() > 32 {
@@ -273,10 +286,12 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("touch") => Command::Touch { seconds: num(Some(w.next().ok_or("touch SECONDS")?))? },
         Some("i2cscan") => Command::I2cScan,
         Some("display") => Command::Display,
+        Some("sdinfo") => Command::SdInfo,
+        Some("sdread") => Command::SdRead { lba: num(Some(w.next().ok_or("sdread LBA")?))? },
         Some("rotate") => Command::Rotate { degrees: num(Some(w.next().ok_or("rotate 0|90|180|270")?))? },
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA");
         }
     };
     if w.next().is_some() {
@@ -305,7 +320,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

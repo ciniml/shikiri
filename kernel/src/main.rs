@@ -423,6 +423,8 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::I2cScan => Current::i2c_scan(),
         Command::Display => Current::display_stats(),
         Command::Rotate { degrees } => screen::set_orientation(degrees),
+        Command::SdInfo => Current::sd_info(),
+        Command::SdRead { lba } => Current::sd_dump(lba),
         Command::Power => {
             Current::log_power("cmd");
             Ok(0)

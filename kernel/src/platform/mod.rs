@@ -153,6 +153,14 @@ pub trait Platform {
     fn handle_irq(_code: usize) -> bool {
         false
     }
+    /// Initialises the SD card if needed and logs what is on it (M7a).
+    fn sd_info() -> Result<u32, &'static str> {
+        Err("no SD card slot")
+    }
+    /// Logs sector `lba` of the SD card.
+    fn sd_dump(_lba: u32) -> Result<u32, &'static str> {
+        Err("no SD card slot")
+    }
     /// Logs every I2C address on the board bus that acknowledges.
     fn i2c_scan() -> Result<u32, &'static str> {
         Err("no I2C")

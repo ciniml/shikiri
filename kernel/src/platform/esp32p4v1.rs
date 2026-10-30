@@ -9,6 +9,7 @@ mod clock;
 mod display;
 mod i2c;
 mod psram;
+mod sd;
 mod tab5;
 
 // USB Serial/JTAG (doc/06 §3.1): usb_serial_jtag_reg.h
@@ -245,7 +246,7 @@ type RomCacheFn = unsafe extern "C" fn(map: u32, addr: u32, size: u32) -> i32;
 
 /// Invalidates `[addr, addr + len)` in L1 I and D, and in L2 if `l2`
 /// (external memory: flash and PSRAM sit behind L2).
-fn cache_invalidate(addr: usize, len: usize, l2: bool) {
+pub(super) fn cache_invalidate(addr: usize, len: usize, l2: bool) {
     unsafe {
         let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
         invalidate(CACHE_MAP_L1_ICACHE_MASK, addr as u32, len as u32);
@@ -258,7 +259,7 @@ fn cache_invalidate(addr: usize, len: usize, l2: bool) {
 
 /// Writes `[addr, addr + len)` back from L1 D, then from L2 if `l2`
 /// (cache_ll.h:644-693: the levels are written back in order).
-fn cache_writeback(addr: usize, len: usize, l2: bool) {
+pub(super) fn cache_writeback(addr: usize, len: usize, l2: bool) {
     unsafe {
         let writeback: RomCacheFn = core::mem::transmute(ROM_CACHE_WRITEBACK_ADDR);
         writeback(CACHE_MAP_L1_DCACHE, addr as u32, len as u32);
@@ -701,6 +702,14 @@ impl Platform for Esp32p4v1 {
             return true;
         }
         false
+    }
+
+    fn sd_info() -> Result<u32, &'static str> {
+        sd::info()
+    }
+
+    fn sd_dump(lba: u32) -> Result<u32, &'static str> {
+        sd::dump(lba)
     }
 
     fn i2c_scan() -> Result<u32, &'static str> {

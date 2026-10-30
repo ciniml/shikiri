@@ -1,0 +1,484 @@
+//! The Tab5's microSD card (M7a, doc/18): the SDMMC host (Synopsys
+//! DesignWare MMC) on slot 0's fixed IO_MUX pins, polled, one data line at
+//! 400 kHz. Data moves by the host's internal DMA (IDMAC): CPU reads of the
+//! FIFO window return the same word and do not pop the FIFO on this chip
+//! (seen on the Tab5; ESP-IDF never uses the FIFO by CPU either).
+//!
+//! The card's power is wired to the SoC's 3.3 V rail and cannot be switched
+//! (doc/research/m7-sdcard.md §1.2): nothing to enable, nothing to touch.
+//! CMD11 (switch to 1.8 V) is never sent: only a power cycle would undo it.
+//! Register addresses, values and the order are from
+//! doc/research/m7-sdcard.md §2-§4 and §8 (ESP-IDF 6.0 esp_driver_sdmmc).
+
+use t5_abi::event;
+
+use super::i2c::{func_out_sel, io_mux_reg};
+use super::psram::{clear_bits, delay_us, set_bits, set_field, wait};
+use super::{Esp32p4v1, rd, wr};
+use crate::platform::Platform;
+
+// Clocks and reset (m7-sdcard.md §2.1).
+const SOC_CLK_CTRL1: usize = 0x500E_6018;
+const SDMMC_SYS_CLK_EN: u32 = 1 << 14;
+const LP_SDMMC_EMAC_RST_CTRL: usize = 0x5011_104C;
+const RST_EN_SDMMC: u32 = 1 << 28;
+const REF_CLK_CTRL0: usize = 0x500E_6024;
+const REF_CLK_CTRL2: usize = 0x500E_602C;
+const REF_160M_CLK_EN: u32 = 1 << 0;
+const PERI_CLK_CTRL01: usize = 0x500E_6034;
+const SDIO_HS_MODE: u32 = 1 << 22;
+const SDIO_LS_CLK_SRC_PLL_200M: u32 = 1 << 23;
+const SDIO_LS_CLK_EN: u32 = 1 << 24;
+const PERI_CLK_CTRL02: usize = 0x500E_6038;
+const SDIO_CFG_UPDATE: u32 = 1 << 8;
+/// SLF, DRV and SAM clock enables.
+const SDIO_PHASE_CLK_EN: u32 = 0b111 << 27;
+
+// Host registers (sdmmc_reg.h; m7-sdcard.md §2.2).
+const HOST: usize = 0x5008_3000;
+const CTRL: usize = HOST;
+const CLKDIV: usize = HOST + 0x08;
+const CLKSRC: usize = HOST + 0x0C;
+const CLKENA: usize = HOST + 0x10;
+const TMOUT: usize = HOST + 0x14;
+const CTYPE: usize = HOST + 0x18;
+const BLKSIZ: usize = HOST + 0x1C;
+const BYTCNT: usize = HOST + 0x20;
+const INTMASK: usize = HOST + 0x24;
+const CMDARG: usize = HOST + 0x28;
+const CMD: usize = HOST + 0x2C;
+const RESP0: usize = HOST + 0x30;
+const RINTSTS: usize = HOST + 0x44;
+const STATUS: usize = HOST + 0x48;
+const CDETECT: usize = HOST + 0x50;
+const WRTPRT: usize = HOST + 0x54;
+const VERID: usize = HOST + 0x6C;
+const HCON: usize = HOST + 0x70;
+const BMOD: usize = HOST + 0x80;
+const PLDMND: usize = HOST + 0x84;
+const DBADDR: usize = HOST + 0x88;
+const IDSTS: usize = HOST + 0x8C;
+const IDINTEN: usize = HOST + 0x90;
+const CTRL_DMA_ENABLE: u32 = 1 << 5;
+const CTRL_USE_IDMAC: u32 = 1 << 25;
+const BMOD_SWR: u32 = 1 << 0;
+const BMOD_FB: u32 = 1 << 1;
+const BMOD_DE: u32 = 1 << 7;
+const IDSTS_TI: u32 = 1 << 0;
+const IDSTS_RI: u32 = 1 << 1;
+/// FBE, DU, CES: bus error, descriptor unavailable, card error.
+const IDSTS_ERRORS: u32 = (1 << 2) | (1 << 4) | (1 << 5);
+// IDMAC descriptor DES0 bits.
+const DES0_LD: u32 = 1 << 2;
+const DES0_FS: u32 = 1 << 3;
+const DES0_OWN: u32 = 1 << 31;
+/// The non-cacheable alias of L2MEM, for the descriptor (as M6's DMA list).
+const L2MEM_NON_CACHE: usize = 0x4000_0000;
+const CLK_EDGE_SEL: usize = HOST + 0x800;
+
+const CTRL_RESETS: u32 = 0b111; // controller, FIFO, DMA
+const CTRL_FIFO_RESET: u32 = 1 << 1;
+const CMD_START: u32 = 1 << 31;
+
+// RINTSTS bits.
+const RE: u32 = 1 << 1;
+const CMD_DONE: u32 = 1 << 2;
+const DTO: u32 = 1 << 3;
+const RCRC: u32 = 1 << 6;
+const DCRC: u32 = 1 << 7;
+const RTO: u32 = 1 << 8;
+const DRTO: u32 = 1 << 9;
+const HTO: u32 = 1 << 10;
+const HLE: u32 = 1 << 12;
+const SBE: u32 = 1 << 13;
+const EBE: u32 = 1 << 15;
+const CMD_ERRORS: u32 = RTO | RCRC | RE | HLE;
+const DATA_ERRORS: u32 = DRTO | DCRC | HTO | SBE | EBE;
+
+// Pins: CLK 43, CMD 44, D0-D3 39-42, IO_MUX function 0 (m7-sdcard.md §2.3).
+const DATA_PINS: [usize; 3] = [39, 40, 41];
+const D3: usize = 42;
+const CLK_CMD_PINS: [usize; 2] = [43, 44];
+/// MCU_SEL 0 (SD), drive 3, input enabled, no pulls (external 5.1 kOhm).
+const IO_MUX_SD: u32 = 0x0E00;
+const SIG_GPIO_OUT: u32 = 256;
+const GPIO_ENABLE1_W1TC: usize = 0x500E_0034;
+// Slot 0's card detect, write protect and interrupt inputs: constant
+// "present", "writable", "no interrupt" (signals 126, 130, 128).
+const IN_SEL_CD: usize = 0x500E_0350;
+const IN_SEL_WP: usize = 0x500E_0360;
+const IN_SEL_INT: usize = 0x500E_0358;
+const IN_CONST_LOW: u32 = 0xBE;
+const IN_CONST_HIGH: u32 = 0xBF;
+
+// Command register values (slot 0, use_hold_reg; m7-sdcard.md §3.1).
+const UPDATE_CLOCK: u32 = 0xA020_2000;
+const CMD0: u32 = 0xA000_8000;
+const CMD8: u32 = 0xA000_2148;
+const CMD55: u32 = 0xA000_2177;
+const ACMD41: u32 = 0xA000_2069;
+const CMD2: u32 = 0xA000_21C2;
+const CMD3: u32 = 0xA000_2143;
+const CMD9: u32 = 0xA000_21C9;
+const CMD7: u32 = 0xA000_2147;
+const CMD13: u32 = 0xA000_214D;
+const CMD16: u32 = 0xA000_2150;
+const CMD17: u32 = 0xA000_2351;
+
+/// HCS and the 2.7-3.6 V window; never S18R (no 1.8 V).
+const ACMD41_ARG: u32 = 0x40FF_8000;
+const OCR_BUSY_DONE: u32 = 1 << 31;
+const OCR_CCS: u32 = 1 << 30;
+
+pub const SECTOR: usize = 512;
+
+/// One IDMAC descriptor, cache-line aligned (IDF pads them to 64 bytes).
+#[repr(C, align(64))]
+struct Desc([u32; 16]);
+static mut DESC: Desc = Desc([0; 16]);
+/// The DMA's buffer in internal SRAM, whole cache lines.
+#[repr(C, align(64))]
+struct Bounce([u8; 4096]);
+static mut BOUNCE: Bounce = Bounce([0; 4096]);
+
+#[derive(Clone, Copy)]
+pub struct Card {
+    rca: u32,
+    /// SDHC/SDXC: addressed in sectors (else in bytes).
+    block_addressed: bool,
+    pub sectors: u32,
+}
+
+static mut CARD: Option<Card> = None;
+
+pub fn card() -> Option<Card> {
+    unsafe { CARD }
+}
+
+// ---- host ----
+
+/// The first divider of the 160 MHz source (sdmmc_ll_set_clock_div), then
+/// the phase setup (sdmmc_ll_init_phase_delay).
+fn set_source_div(div: u32) {
+    set_field(PERI_CLK_CTRL02, 13, 4, div / 2 - 1); // EDGE_H
+    set_field(PERI_CLK_CTRL02, 9, 4, div - 1); // EDGE_L
+    set_field(PERI_CLK_CTRL02, 17, 4, div - 1); // EDGE_N
+    set_bits(PERI_CLK_CTRL02, SDIO_CFG_UPDATE);
+    clear_bits(PERI_CLK_CTRL02, SDIO_CFG_UPDATE);
+}
+
+fn host_init() -> Result<(), &'static str> {
+    let ref160_div = (unsafe { rd(REF_CLK_CTRL0) } >> 24) & 0xFF;
+    let ref160_en = unsafe { rd(REF_CLK_CTRL2) } & REF_160M_CLK_EN != 0;
+    if ref160_div != 2 || !ref160_en {
+        event!(Error, "sd.no_clock", ref160_div = ref160_div, ref160_en = ref160_en);
+        return Err("PLL_F160M not as expected");
+    }
+    set_bits(SOC_CLK_CTRL1, SDMMC_SYS_CLK_EN);
+    set_bits(LP_SDMMC_EMAC_RST_CTRL, RST_EN_SDMMC);
+    delay_us(10);
+    clear_bits(LP_SDMMC_EMAC_RST_CTRL, RST_EN_SDMMC);
+    set_source_div(10); // 16 MHz; the host divides by 2 x 20 for 400 kHz
+    clear_bits(PERI_CLK_CTRL01, SDIO_HS_MODE | SDIO_LS_CLK_SRC_PLL_200M);
+    set_bits(PERI_CLK_CTRL01, SDIO_LS_CLK_EN);
+    set_bits(PERI_CLK_CTRL02, SDIO_PHASE_CLK_EN);
+    set_field(PERI_CLK_CTRL02, 23, 2, 1); // DRV edge
+    set_field(PERI_CLK_CTRL02, 25, 2, 0); // SAM edge
+    set_field(PERI_CLK_CTRL02, 21, 2, 0); // SLF edge
+    set_bits(PERI_CLK_CTRL02, SDIO_CFG_UPDATE);
+    clear_bits(PERI_CLK_CTRL02, SDIO_CFG_UPDATE);
+    delay_us(10);
+
+    unsafe { wr(CTRL, CTRL_RESETS) };
+    if !wait(100_000, || unsafe { rd(CTRL) } & CTRL_RESETS == 0) {
+        return Err("SDMMC host reset did not finish");
+    }
+    unsafe {
+        wr(INTMASK, 0);
+        wr(RINTSTS, 0xFFFF_FFFF);
+        wr(IDSTS, 0x3FF);
+        // Pins.
+        for p in DATA_PINS.iter().chain(&CLK_CMD_PINS) {
+            wr(io_mux_reg(*p), IO_MUX_SD);
+            wr(func_out_sel(*p), SIG_GPIO_OUT);
+        }
+        // D3 stays an input (pulled up) until 4-bit mode: a high D3 at CMD0
+        // selects SD mode.
+        wr(io_mux_reg(D3), (1 << 12) | (1 << 9));
+        wr(GPIO_ENABLE1_W1TC, 1 << (D3 - 32));
+        wr(IN_SEL_CD, IN_CONST_LOW);
+        wr(IN_SEL_WP, IN_CONST_LOW);
+        wr(IN_SEL_INT, IN_CONST_HIGH);
+        wr(CTYPE, 0); // one data line
+        // IDMAC: reset, then on (sdmmc_ll_init_dma); polled through IDSTS.
+        wr(CTRL, rd(CTRL) | CTRL_DMA_ENABLE | CTRL_USE_IDMAC);
+        wr(BMOD, BMOD_SWR);
+        wr(IDINTEN, IDSTS_TI | IDSTS_RI | (1 << 8));
+    }
+    event!(
+        Info,
+        "sd.host",
+        verid = unsafe { rd(VERID) },
+        hcon = unsafe { rd(HCON) },
+        clk_edge_sel = unsafe { rd(CLK_EDGE_SEL) },
+        cdetect = unsafe { rd(CDETECT) },
+        wrtprt = unsafe { rd(WRTPRT) }
+    );
+    set_card_clock(20, 400)
+}
+
+/// Sends the "update clock registers" command.
+fn update_clock() -> Result<(), &'static str> {
+    unsafe {
+        wr(CMDARG, 0);
+        wr(CMD, UPDATE_CLOCK);
+    }
+    if !wait(100_000, || unsafe { rd(CMD) } & CMD_START == 0) {
+        return Err("SDMMC clock update not taken");
+    }
+    Ok(())
+}
+
+/// The card clock: the host's divider (`div2`, 0 = bypass) on the first
+/// stage's output; `khz` sets the data timeout (m7-sdcard.md §3.2).
+fn set_card_clock(div2: u32, khz: u32) -> Result<(), &'static str> {
+    unsafe { wr(CLKENA, 0) };
+    update_clock()?;
+    unsafe {
+        wr(CLKDIV, div2);
+        wr(CLKSRC, 0);
+    }
+    update_clock()?;
+    unsafe { wr(CLKENA, 1) }; // running, not stopped when idle
+    update_clock()?;
+    unsafe { wr(TMOUT, ((100 * khz).min(0xFF_FFFF) << 8) | 255) };
+    event!(Info, "sd.clock", khz = khz);
+    Ok(())
+}
+
+// ---- commands ----
+
+/// Issues `cmd` with `arg`; with `data`, reads that many bytes through the
+/// FIFO. Returns the four response words (RESP0 = bits 31:0).
+fn command(cmd: u32, arg: u32, data: Option<&mut [u8]>) -> Result<[u32; 4], &'static str> {
+    if !wait(1_000_000, || unsafe { rd(CMD) } & CMD_START == 0) {
+        return Err("SDMMC busy");
+    }
+    unsafe {
+        wr(RINTSTS, 0xFFFF_FFFF);
+        if let Some(d) = &data {
+            wr(CTRL, rd(CTRL) | CTRL_FIFO_RESET);
+            let _ = wait(10_000, || rd(CTRL) & CTRL_FIFO_RESET == 0);
+            wr(BLKSIZ, d.len() as u32);
+            wr(BYTCNT, d.len() as u32);
+            dma_start(d.len());
+        }
+        wr(CMDARG, arg);
+        wr(CMD, cmd);
+    }
+    if !wait(1_000_000, || unsafe { rd(CMD) } & CMD_START == 0) {
+        return Err("SDMMC command not taken");
+    }
+    let mut ints = 0;
+    if !wait(1_000_000, || {
+        ints = unsafe { rd(RINTSTS) };
+        ints & (CMD_DONE | CMD_ERRORS) != 0
+    }) {
+        return Err("SDMMC command timed out");
+    }
+    if ints & RTO != 0 {
+        return Err("no response");
+    }
+    if ints & CMD_ERRORS != 0 {
+        event!(Warn, "sd.cmd_error", cmd = cmd & 0x3F, rintsts = ints, status = unsafe { rd(STATUS) });
+        return Err("response error");
+    }
+    let resp = unsafe { [rd(RESP0), rd(RESP0 + 4), rd(RESP0 + 8), rd(RESP0 + 12)] };
+    if let Some(buf) = data {
+        dma_finish(buf)?;
+    }
+    unsafe { wr(RINTSTS, 0xFFFF_FFFF) };
+    Ok(resp)
+}
+
+/// Sets the IDMAC up to receive `len` bytes into the bounce buffer.
+fn dma_start(len: usize) {
+    let buf = core::ptr::addr_of!(BOUNCE) as usize;
+    let desc = core::ptr::addr_of!(DESC) as usize;
+    // Nothing of the buffer may be dirty in the cache, or a later write-back
+    // would overwrite what the DMA put there.
+    super::cache_writeback(buf, len.next_multiple_of(64), false);
+    let d = (desc + L2MEM_NON_CACHE) as *mut u32;
+    unsafe {
+        core::ptr::write_volatile(d, DES0_OWN | DES0_FS | DES0_LD);
+        core::ptr::write_volatile(d.add(1), len as u32);
+        core::ptr::write_volatile(d.add(2), buf as u32);
+        core::ptr::write_volatile(d.add(3), 0);
+        wr(IDSTS, 0x3FF);
+        wr(DBADDR, desc as u32);
+        wr(CTRL, rd(CTRL) | CTRL_DMA_ENABLE | CTRL_USE_IDMAC);
+        wr(BMOD, BMOD_DE | BMOD_FB);
+        wr(PLDMND, 1);
+    }
+}
+
+/// Waits for the DMA of a read and copies it out.
+fn dma_finish(out: &mut [u8]) -> Result<(), &'static str> {
+    let mut ids = 0;
+    let mut ints = 0;
+    let done = wait(1_000_000, || {
+        ids = unsafe { rd(IDSTS) };
+        ints = unsafe { rd(RINTSTS) };
+        ids & (IDSTS_RI | IDSTS_ERRORS) != 0 && ints & (DTO | DATA_ERRORS) != 0 || ints & DATA_ERRORS != 0
+    });
+    if !done || ids & IDSTS_ERRORS != 0 || ints & DATA_ERRORS != 0 {
+        event!(Warn, "sd.dma_error", idsts = ids, rintsts = ints, status = unsafe { rd(STATUS) }, done = done);
+        unsafe {
+            wr(CTRL, rd(CTRL) | (1 << 2)); // dma_reset
+            let _ = wait(10_000, || rd(CTRL) & (1 << 2) == 0);
+            wr(BMOD, 0);
+            wr(IDSTS, 0x3FF);
+        }
+        return Err("data error");
+    }
+    unsafe { wr(IDSTS, 0x3FF) };
+    let buf = core::ptr::addr_of!(BOUNCE) as usize;
+    super::cache_invalidate(buf, out.len().next_multiple_of(64), false);
+    let src = core::ptr::addr_of!(BOUNCE).cast::<u8>();
+    unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len()) };
+    Ok(())
+}
+
+fn app_command(rca: u32, cmd: u32, arg: u32) -> Result<[u32; 4], &'static str> {
+    command(CMD55, rca << 16, None)?;
+    command(cmd, arg, None)
+}
+
+/// Capacity in sectors from the CSD (versions 1 and 2).
+fn csd_sectors(csd: [u32; 4]) -> u32 {
+    let bits = |hi: u32, lo: u32| -> u32 {
+        // CSD bits [hi:lo] (at most 32 wide); RESP3 holds bits 127:96.
+        let mut v = 0u64;
+        for b in (lo..=hi).rev() {
+            let word = csd[(b / 32) as usize];
+            v = (v << 1) | ((word >> (b % 32)) & 1) as u64;
+        }
+        v as u32
+    };
+    match bits(127, 126) {
+        1 => (bits(69, 48) + 1) * 1024,
+        0 => {
+            let c_size = bits(73, 62);
+            let mult = bits(49, 47);
+            let read_bl_len = bits(83, 80);
+            ((c_size + 1) << (mult + 2)) << read_bl_len >> 9
+        }
+        _ => 0,
+    }
+}
+
+/// Initialises the host and the card (m7-sdcard.md §8 steps 2-16).
+pub fn init() -> Result<Card, &'static str> {
+    if let Some(c) = card() {
+        return Ok(c);
+    }
+    host_init()?;
+    delay_us(1000);
+    command(CMD0, 0, None)?;
+    delay_us(20_000);
+    // CMD8: version 2 cards answer with the check pattern.
+    let v2 = match command(CMD8, 0x1AA, None) {
+        Ok(r) if r[0] & 0xFFF == 0x1AA => true,
+        Ok(r) => {
+            event!(Warn, "sd.if_cond", resp = r[0]);
+            return Err("bad CMD8 answer");
+        }
+        Err("no response") => false,
+        Err(e) => return Err(e),
+    };
+    let arg = if v2 { ACMD41_ARG } else { ACMD41_ARG & !OCR_CCS };
+    let mut ocr = 0;
+    let mut tries = 0;
+    while tries < 300 {
+        tries += 1;
+        ocr = app_command(0, ACMD41, arg)?[0];
+        if ocr & OCR_BUSY_DONE != 0 {
+            break;
+        }
+        delay_us(10_000);
+    }
+    let block_addressed = ocr & OCR_CCS != 0;
+    event!(Info, "sd.ocr", ocr = ocr, tries = tries, v2 = v2, ccs = block_addressed);
+    if ocr & OCR_BUSY_DONE == 0 {
+        return Err("card did not power up");
+    }
+    let cid = command(CMD2, 0, None)?;
+    let rca = command(CMD3, 0, None)?[0] >> 16;
+    let csd = command(CMD9, rca << 16, None)?;
+    let sectors = csd_sectors(csd);
+    // CID: manufacturer [127:120], OEM [119:104], name [103:64].
+    let name = [(cid[3] & 0xFF) as u8, (cid[2] >> 24) as u8, (cid[2] >> 16) as u8, (cid[2] >> 8) as u8, cid[2] as u8];
+    event!(
+        Info,
+        "sd.card",
+        mid = cid[3] >> 24,
+        oid = (cid[3] >> 8) & 0xFFFF,
+        name = core::str::from_utf8(&name).unwrap_or("?"),
+        rca = rca,
+        csd_ver = csd[3] >> 30,
+        sectors = sectors,
+        mib = sectors / 2048
+    );
+    command(CMD7, rca << 16, None)?;
+    if !block_addressed {
+        command(CMD16, SECTOR as u32, None)?;
+    }
+    let c = Card { rca, block_addressed, sectors };
+    unsafe { CARD = Some(c) };
+    let _ = command(CMD13, rca << 16, None).map(|r| event!(Info, "sd.status", status = r[0]));
+    Ok(c)
+}
+
+/// Reads sector `lba` (polled, through the FIFO).
+pub fn read(lba: u32, buf: &mut [u8; SECTOR]) -> Result<(), &'static str> {
+    let c = init()?;
+    if lba >= c.sectors {
+        return Err("past the end of the card");
+    }
+    let addr = if c.block_addressed { lba } else { lba * SECTOR as u32 };
+    command(CMD17, addr, Some(&mut buf[..]))?;
+    Ok(())
+}
+
+/// `sdinfo`: initialises the card if needed and logs sector 0's partition
+/// table (MBR) or, without one, whether it starts with a FAT boot sector.
+pub fn info() -> Result<u32, &'static str> {
+    let c = init()?;
+    let mut s = [0u8; SECTOR];
+    let t = Esp32p4v1::now();
+    read(0, &mut s)?;
+    let us = ((Esp32p4v1::now() - t) / 16) as u32;
+    let sig = u16::from_le_bytes([s[510], s[511]]);
+    let fat_boot = (s[0] == 0xEB || s[0] == 0xE9) && (&s[82..87] == b"FAT32" || &s[54..59] == b"FAT16" || &s[54..59] == b"FAT12");
+    event!(Info, "sd.sector0", rca = c.rca, sig = sig, fat_boot_sector = fat_boot, read_us = us);
+    for i in 0..4 {
+        let e = &s[446 + 16 * i..446 + 16 * (i + 1)];
+        let kind = e[4];
+        if kind != 0 {
+            let start = u32::from_le_bytes([e[8], e[9], e[10], e[11]]);
+            let len = u32::from_le_bytes([e[12], e[13], e[14], e[15]]);
+            event!(Info, "sd.partition", index = i as u32, kind = kind, start = start, sectors = len, mib = len / 2048);
+        }
+    }
+    Ok(c.sectors)
+}
+
+/// `sdread LBA`: logs one sector in 32-byte pieces.
+pub fn dump(lba: u32) -> Result<u32, &'static str> {
+    let mut s = [0u8; SECTOR];
+    read(lba, &mut s)?;
+    for (i, chunk) in s.chunks(32).enumerate() {
+        event!(Info, "sd.bytes", lba = lba, offset = (i * 32) as u32, data = chunk);
+    }
+    Ok(lba)
+}
