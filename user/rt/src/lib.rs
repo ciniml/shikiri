@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, fs, rights, sd, shm, svc, sys, timer, touch};
+pub use t5_abi::{Error, FOREVER, chan, display, event, fs, net, rights, sd, shm, svc, sys, timer, touch};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -499,6 +499,161 @@ impl Files {
 
     pub fn mkdir(&self, path: &str) -> Result<(), FsError> {
         self.call(fs::op::MKDIR, 0, 0, 0, path).map(|_| ())
+    }
+}
+
+/// A connection to the network service (N1). Needs `--permit svc:net`.
+/// Socket data moves through the granted slice; calls never block in the
+/// service, and the blocking helpers here retry after 1 ms.
+pub struct Net {
+    chan: Channel,
+    _shm: Shm,
+    pub slice: &'static mut [u8],
+}
+
+/// A failed network request: the service's `net::status`, or IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetError {
+    Status(u32),
+    Ipc(Error),
+    TimedOut,
+}
+
+/// What `recv_now` found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Received {
+    pub len: usize,
+    /// The peer closed and nothing is left.
+    pub ended: bool,
+}
+
+impl Net {
+    pub fn connect() -> Result<Net, NetError> {
+        let chan = Channel::connect(net::SERVICE).map_err(NetError::Ipc)?;
+        let ev = wait(&[&chan.0], FOREVER).map_err(NetError::Ipc)?;
+        if ev.kind != chan::SHM {
+            return Err(NetError::Ipc(Error::Off));
+        }
+        let shm = chan.take_shm().map_err(NetError::Ipc)?;
+        let slice = shm.map().map_err(NetError::Ipc)?;
+        Ok(Net { chan, _shm: shm, slice })
+    }
+
+    fn call(&self, op: u8, sock: u16, a: u32, b: u32) -> Result<(u32, u32), NetError> {
+        self.chan.send(&net::request(op, sock, a, b)).map_err(NetError::Ipc)?;
+        let mut r = [0u8; chan::MSG_MAX];
+        let k = self.chan.recv(&mut r).map_err(NetError::Ipc)?;
+        if k < net::REPLY_SIZE {
+            return Err(NetError::Ipc(Error::Size));
+        }
+        let u = |o: usize| u32::from_le_bytes([r[o], r[o + 1], r[o + 2], r[o + 3]]);
+        match u(0) {
+            net::status::OK => Ok((u(4), u(8))),
+            s => Err(NetError::Status(s)),
+        }
+    }
+
+    pub fn tcp_listen(&self, port: u16) -> Result<u16, NetError> {
+        self.call(net::op::TCP_LISTEN, 0, 0, port as u32).map(|(s, _)| s as u16)
+    }
+
+    pub fn tcp_connect(&self, ip: u32, port: u16) -> Result<u16, NetError> {
+        self.call(net::op::TCP_CONNECT, 0, ip, port as u32).map(|(s, _)| s as u16)
+    }
+
+    /// (`net::state`, bytes waiting).
+    pub fn tcp_state(&self, s: u16) -> Result<(u32, u32), NetError> {
+        self.call(net::op::TCP_STATE, s, 0, 0)
+    }
+
+    /// Waits up to `ms` until the socket is established.
+    pub fn wait_established(&self, s: u16, ms: u64) -> Result<(), NetError> {
+        let end = time_ns() + ms * 1_000_000;
+        loop {
+            match self.tcp_state(s)?.0 {
+                net::state::ESTABLISHED => return Ok(()),
+                net::state::CLOSED => return Err(NetError::Status(net::status::NOT_CONNECTED)),
+                _ if time_ns() > end => return Err(NetError::TimedOut),
+                _ => sleep_ms(1),
+            }
+        }
+    }
+
+    /// Queues what fits of `data` (up to the slice); returns how much.
+    pub fn send(&mut self, s: u16, data: &[u8]) -> Result<usize, NetError> {
+        let n = data.len().min(self.slice.len());
+        self.slice[..n].copy_from_slice(&data[..n]);
+        self.call(net::op::SEND, s, 0, n as u32).map(|(k, _)| k as usize)
+    }
+
+    /// Sends all of `data`, waiting for room.
+    pub fn send_all(&mut self, s: u16, mut data: &[u8]) -> Result<(), NetError> {
+        while !data.is_empty() {
+            let k = self.send(s, data)?;
+            data = &data[k..];
+            if k == 0 {
+                sleep_ms(1);
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes what has arrived, without waiting.
+    pub fn recv_now(&mut self, s: u16, buf: &mut [u8]) -> Result<Received, NetError> {
+        let max = buf.len().min(self.slice.len());
+        let (n, ended) = self.call(net::op::RECV, s, 0, max as u32)?;
+        buf[..n as usize].copy_from_slice(&self.slice[..n as usize]);
+        Ok(Received { len: n as usize, ended: ended != 0 })
+    }
+
+    /// Waits for data; 0 means the peer closed.
+    pub fn recv(&mut self, s: u16, buf: &mut [u8]) -> Result<usize, NetError> {
+        loop {
+            let r = self.recv_now(s, buf)?;
+            if r.len > 0 || r.ended {
+                return Ok(r.len);
+            }
+            sleep_ms(1);
+        }
+    }
+
+    pub fn close(&self, s: u16) -> Result<(), NetError> {
+        self.call(net::op::CLOSE, s, 0, 0).map(|_| ())
+    }
+
+    pub fn udp_bind(&self, port: u16) -> Result<u16, NetError> {
+        self.call(net::op::UDP_BIND, 0, 0, port as u32).map(|(s, _)| s as u16)
+    }
+
+    /// Sends one datagram, waiting for room in the queue.
+    pub fn udp_send(&mut self, s: u16, ip: u32, port: u16, data: &[u8]) -> Result<(), NetError> {
+        let n = data.len().min(0xFFFF).min(self.slice.len());
+        self.slice[..n].copy_from_slice(&data[..n]);
+        loop {
+            let (k, _) = self.call(net::op::UDP_SEND, s, ip, (port as u32) << 16 | n as u32)?;
+            if k > 0 {
+                return Ok(());
+            }
+            sleep_ms(1);
+        }
+    }
+
+    /// Waits up to `ms` for a datagram: (length, source IPv4, source port).
+    pub fn udp_recv(&mut self, s: u16, buf: &mut [u8], ms: u64) -> Result<(usize, u32, u16), NetError> {
+        let end = time_ns() + ms * 1_000_000;
+        loop {
+            let (n, ip) = self.call(net::op::UDP_RECV, s, 0, 0)?;
+            if n > 0 {
+                let n = (n as usize).min(buf.len());
+                buf[..n].copy_from_slice(&self.slice[net::UDP_HEADER..net::UDP_HEADER + n]);
+                let port = u16::from_le_bytes([self.slice[0], self.slice[1]]);
+                return Ok((n, ip, port));
+            }
+            if time_ns() > end {
+                return Err(NetError::TimedOut);
+            }
+            sleep_ms(1);
+        }
     }
 }
 
