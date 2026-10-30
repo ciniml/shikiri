@@ -6,6 +6,11 @@
 //! the app it replaces; only then is the catalog rewritten, into the sector
 //! that does not hold the catalog in force. An install cut short at any point
 //! leaves the old catalog, and with it the old app, in force.
+//!
+//! Updates (M5b, doc/16 §4): installing over a valid app keeps the old one
+//! as `Previous` and puts the new one in as `PendingVerify`. Its first run
+//! decides: a normal end (or 2 s of running) confirms it and drops the old
+//! one; a fault brings the old one back.
 
 use t5_abi::store::{self, Catalog, Entry, State};
 use t5_abi::t5a;
@@ -72,10 +77,15 @@ impl Store {
         self.catalog.into_iter().flat_map(|c| c.entries())
     }
 
-    /// The image bytes of the app named `name` (not yet verified).
+    /// The image bytes of the current version of `name` (not yet verified).
     pub fn image(&self, name: &str) -> Option<&'static [u8]> {
-        let e = self.entries().find(|e| e.name() == name)?;
+        let e = self.entry(name)?;
         Some(self.bytes(e.offset(), e.length as usize))
+    }
+
+    /// The version of `name` kept to go back to.
+    fn previous(&self, name: &str) -> Option<Entry> {
+        self.entries().find(|e| e.name() == name && e.state == State::Previous)
     }
 
     pub fn log_contents(&self) {
@@ -95,9 +105,9 @@ impl Store {
         }
     }
 
-    /// The catalog entry of `name`.
+    /// The catalog entry of the current version of `name`.
     pub fn entry(&self, name: &str) -> Option<Entry> {
-        self.entries().find(|e| e.name() == name)
+        self.entries().find(|e| e.name() == name && e.is_current())
     }
 
     /// Starts an install of `length` bytes; returns the first extent. Drops
@@ -161,11 +171,13 @@ impl Store {
                 return Err("image rejected");
             }
         };
-        let old = self.entries().find(|e| e.name() == info.name);
-        if let Some(old) = old
-            && old.secure_version > info.secure_version
+        let old = self.entry(info.name);
+        let prev = self.previous(info.name);
+        let installed = old.iter().chain(prev.iter()).map(|e| e.secure_version).max();
+        if let Some(installed) = installed
+            && installed > info.secure_version
         {
-            event!(Warn, "store.rollback", name = info.name, installed = old.secure_version, offered = info.secure_version);
+            event!(Warn, "store.rollback", name = info.name, installed = installed, offered = info.secure_version);
             return Err("secure_version rollback");
         }
         let mut name = [0u8; 32];
@@ -180,7 +192,16 @@ impl Store {
             state: State::Valid,
             flags: info.flags as u8,
         };
-        let seq = self.commit(|e| e.name() != info.name, Some(entry), &mut i.stats)?;
+        // Over a valid version, the new one must prove itself and the old
+        // one stays as `Previous`; over an unconfirmed one, that one goes
+        // and the `Previous` stays (doc/16 §4.2).
+        let keep = match (old, prev) {
+            (Some(o), _) if o.state == State::Valid => Some(Entry { state: State::Previous, ..o }),
+            (Some(_), Some(p)) => Some(p),
+            _ => None,
+        };
+        let entry = Entry { state: if keep.is_some() { State::PendingVerify } else { State::Valid }, ..entry };
+        let seq = self.commit(|e| e.name() != info.name, [Some(entry), keep], &mut i.stats)?;
         let s = i.stats;
         event!(
             Info,
@@ -193,6 +214,7 @@ impl Store {
             length = i.length,
             catalog_seq = seq,
             replaced = old.is_some(),
+            pending = keep.is_some(),
             erases = s.erases,
             writes = s.writes,
             erase_us = s.erase_us,
@@ -207,19 +229,44 @@ impl Store {
         if self.entries().all(|e| e.name() != name) {
             return Err("no such app");
         }
-        let seq = self.commit(|e| e.name() != name, None, &mut flash::Stats::default())?;
+        let seq = self.commit(|e| e.name() != name, [None, None], &mut flash::Stats::default())?;
         event!(Info, "store.removed", name = name, catalog_seq = seq);
         Ok(seq)
     }
 
-    /// Writes a catalog of the entries `keep` accepts plus `add`, with the
+    /// Makes the unconfirmed version of `name` valid and drops the previous
+    /// one, if that version is still the one at extent `first` (another may
+    /// have been installed meanwhile). `how` says what proved it.
+    pub fn confirm(&mut self, name: &str, first: u16, how: &'static str) -> Result<u32, &'static str> {
+        let e = self.entry(name).filter(|e| e.state == State::PendingVerify && e.extent_first == first).ok_or("no longer pending")?;
+        let seq = self.commit(|x| x.name() != name, [Some(Entry { state: State::Valid, ..e }), None], &mut flash::Stats::default())?;
+        event!(Info, "store.confirmed", name = name, major = e.version[0], minor = e.version[1], patch = e.version[2], by = how, catalog_seq = seq);
+        Ok(seq)
+    }
+
+    /// Brings back the previous version of `name`, dropping the current one
+    /// (with `Some(first)`: only if that is still the unconfirmed version at
+    /// extent `first`).
+    pub fn rollback(&mut self, name: &str, first: Option<u16>, why: &'static str) -> Result<u32, &'static str> {
+        if let Some(first) = first
+            && !self.entry(name).is_some_and(|e| e.state == State::PendingVerify && e.extent_first == first)
+        {
+            return Err("no longer pending");
+        }
+        let p = self.previous(name).ok_or("no previous version")?;
+        let seq = self.commit(|x| x.name() != name, [Some(Entry { state: State::Valid, ..p }), None], &mut flash::Stats::default())?;
+        event!(Warn, "store.rolled_back", name = name, major = p.version[0], minor = p.version[1], patch = p.version[2], reason = why, catalog_seq = seq);
+        Ok(seq)
+    }
+
+    /// Writes a catalog of the entries `keep` accepts plus those in `add`, with the
     /// next sequence number, into the sector not in force; returns the new
     /// sequence number.
-    fn commit(&mut self, keep: impl Fn(&Entry) -> bool, add: Option<Entry>, stats: &mut flash::Stats) -> Result<u32, &'static str> {
+    fn commit(&mut self, keep: impl Fn(&Entry) -> bool, add: [Option<Entry>; 2], stats: &mut flash::Stats) -> Result<u32, &'static str> {
         let seq = self.catalog.map_or(1, |c| c.seq.wrapping_add(1));
         let target = if self.active == Some(0) { 1 } else { 0 };
         let buf = unsafe { &mut *core::ptr::addr_of_mut!(SECTOR_BUF) };
-        if !store::build_sector(seq, self.entries().filter(|e| keep(e)).chain(add), buf) {
+        if !store::build_sector(seq, self.entries().filter(|e| keep(e)).chain(add.into_iter().flatten()), buf) {
             return Err("catalog full");
         }
         let at = store::APPMETA_OFFSET + target * store::SECTOR_SIZE as u32;

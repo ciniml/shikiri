@@ -25,12 +25,15 @@ pub const EXTENT_SIZE: u32 = 0x1_0000;
 pub const EXTENTS: u32 = APPS_SIZE / EXTENT_SIZE;
 
 pub const MAGIC: [u8; 4] = *b"T5AM";
-pub const VERSION: u16 = 1;
+/// v2 (M5b, doc/16 §4.1) adds `State::Previous`; v1 catalogs still read.
+pub const VERSION: u16 = 2;
+pub const MIN_VERSION: u16 = 1;
 pub const HEADER_SIZE: usize = 16;
 pub const ENTRY_SIZE: usize = 64;
 pub const MAX_ENTRIES: usize = (SECTOR_SIZE - HEADER_SIZE - 4) / ENTRY_SIZE;
 
-/// Install state (doc/05 §5.2; only `Valid` is used until M5).
+/// Install state (doc/05 §5.2, doc/16 §4). A name has at most one current
+/// entry (`Valid` or `PendingVerify`) and one `Previous`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -38,6 +41,8 @@ pub enum State {
     PendingVerify = 1,
     Valid = 2,
     Invalid = 3,
+    /// The version an update replaced, kept until the update is confirmed.
+    Previous = 4,
 }
 
 impl State {
@@ -47,6 +52,7 @@ impl State {
             1 => State::PendingVerify,
             2 => State::Valid,
             3 => State::Invalid,
+            4 => State::Previous,
             _ => return None,
         })
     }
@@ -68,6 +74,11 @@ impl Entry {
     pub fn name(&self) -> &str {
         let n = self.name.iter().position(|&b| b == 0).unwrap_or(self.name.len());
         core::str::from_utf8(&self.name[..n]).unwrap_or("")
+    }
+
+    /// The version `run` and autostart use (not one kept to go back to).
+    pub fn is_current(&self) -> bool {
+        self.state != State::Previous
     }
 
     /// Flash offset of the image.
@@ -146,7 +157,7 @@ impl<'a> Catalog<'a> {
         let u32_at = |o: usize| u32::from_le_bytes([sector[o], sector[o + 1], sector[o + 2], sector[o + 3]]);
         let version = u16::from_le_bytes([sector[4], sector[5]]);
         let count = u16::from_le_bytes([sector[6], sector[7]]) as usize;
-        if version != VERSION || count > MAX_ENTRIES || u32_at(SECTOR_SIZE - 4) != crc32(&sector[..SECTOR_SIZE - 4]) {
+        if !(MIN_VERSION..=VERSION).contains(&version) || count > MAX_ENTRIES || u32_at(SECTOR_SIZE - 4) != crc32(&sector[..SECTOR_SIZE - 4]) {
             return None;
         }
         Some(Catalog { seq: u32_at(8), count, sector })
@@ -292,6 +303,26 @@ mod tests {
         assert_eq!(active_index(&a, &b), Some(0));
         assert!(build_sector(4, [], &mut b));
         assert_eq!(active_index(&a, &b), Some(1));
+    }
+
+    #[test]
+    fn v1_catalogs_and_previous_entries() {
+        let mut s = [0u8; SECTOR_SIZE];
+        let mut prev = entry("app", 1);
+        prev.state = State::Previous;
+        assert!(build_sector(1, [entry("app", 0), prev], &mut s));
+        let es: Vec<_> = Catalog::parse(&s).unwrap().entries().collect();
+        assert_eq!(es[1].state, State::Previous);
+        assert!(es[0].is_current() && !es[1].is_current());
+        // A v1 sector (written before M5b) still reads.
+        s[4..6].copy_from_slice(&1u16.to_le_bytes());
+        let crc = crc32(&s[..SECTOR_SIZE - 4]);
+        s[SECTOR_SIZE - 4..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(Catalog::parse(&s).unwrap().count, 2);
+        s[4..6].copy_from_slice(&3u16.to_le_bytes());
+        let crc = crc32(&s[..SECTOR_SIZE - 4]);
+        s[SECTOR_SIZE - 4..].copy_from_slice(&crc.to_le_bytes());
+        assert!(Catalog::parse(&s).is_none());
     }
 
     #[test]

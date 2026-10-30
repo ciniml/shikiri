@@ -83,6 +83,11 @@ apps: tools $(UNTRUSTED_KEY)
 	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip.t5a --key $(DEV_KEY) --name spin-xip
 	@# Not in the store image: installed over the control channel (doc/14 §3).
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter.t5a --key $(DEV_KEY) --name greeter
+	@# App updates (M5b, doc/16 §4.3): a newer greeter, one that faults
+	@# (the fault app under greeter's name) and a newer XIP spin.
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter-0.2.t5a --key $(DEV_KEY) --name greeter --version 0.2.0
+	$(ELF2T5A) build $(APP_TARGET)/fault $(APPS_DIR)/greeter-bad.t5a --key $(DEV_KEY) --name greeter --version 0.3.0
+	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip-0.2.t5a --key $(DEV_KEY) --name spin-xip --version 0.2.0
 	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-xip xipcheck))
 
 kernel-virt: apps
@@ -249,6 +254,21 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "install $(APPS_DIR)/spin-xip.t5a" --ctl "run spin-xip 4 300" --ctl "remove spin-xip" \
 	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
 	    --expect-event spin.done --expect-event hello.greet \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# App update (M5b, doc/16 §4.3): over a valid greeter, 0.2 goes in
+	@# pending and its normal end confirms it; a version that faults is rolled
+	@# back and the next run is 0.2 again; an XIP update is confirmed after
+	@# 2 s of running; `rollback` by command; `remove` drops both versions.
+	$(T5EMU) --quiet --max-ms 40000 --linger-ms 3500 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "install $(APPS_DIR)/greeter-0.2.t5a" --ctl "list" \
+	    --ctl "run greeter" --ctl "wait-ms 300" --ctl "list" \
+	    --ctl "install $(APPS_DIR)/greeter-bad.t5a" --ctl "run greeter 1" --ctl "wait-ms 300" --ctl "list" \
+	    --ctl "run greeter" --ctl "wait-ms 300" \
+	    --ctl "install $(APPS_DIR)/spin-xip.t5a" --ctl "install $(APPS_DIR)/spin-xip-0.2.t5a" --ctl "run spin-xip 4 3000" \
+	    --ctl "wait-ms 2500" --ctl "list" \
+	    --ctl "install $(APPS_DIR)/greeter-bad.t5a" --ctl "rollback greeter" --ctl "remove greeter" --ctl "list" \
+	    --expect-event store.confirmed --expect-event store.rolled_back --expect-event proc.fault \
+	    --expect-event hello.greet --expect-event spin.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is

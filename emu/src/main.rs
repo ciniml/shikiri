@@ -22,7 +22,9 @@ use t5emu::periph;
 /// self-test has reported; with `--ctl` commands it sends them over the RTT
 /// down-channel when the kernel says `ctl.ready`, waits for each one's
 /// `ctl.done`/`ctl.failed`, then lets the run go on for `linger_ms` to
-/// catch what follows (e.g. a started app's output).
+/// catch what follows (e.g. a started app's output). A `wait-ms N` among
+/// the commands holds the ones after it until everything before it was
+/// answered and N more milliseconds have run (an app ending, a timeout).
 struct Monitor<'a> {
     schemas: &'a t5log::SchemaTable,
     decoder: t5log::StreamDecoder,
@@ -31,6 +33,13 @@ struct Monitor<'a> {
     stop_after_selftest: bool,
     selftest_done: bool,
     commands: Vec<String>,
+    /// Commands sent so far, and the next request id.
+    sent: usize,
+    next_id: u32,
+    /// End of the `wait-ms` in progress (cycles).
+    wait_until: Option<u64>,
+    cycles_per_ms: u64,
+    ready: bool,
     injected: bool,
     pending: std::collections::BTreeSet<u32>,
     linger_cycles: u64,
@@ -53,15 +62,7 @@ impl Monitor<'_> {
             self.seen.insert(name.to_string());
             match name {
                 "selftest.result" => self.selftest_done = true,
-                "ctl.ready" if !self.injected && !self.commands.is_empty() => {
-                    let mut id = 1;
-                    for line in &self.commands {
-                        let f = t5log::ctl::frames(line, &mut id).expect("checked in parse_args");
-                        m.rtt_down_pending.extend(&f.bytes);
-                        self.pending.extend(f.answered);
-                    }
-                    self.injected = true;
-                }
+                "ctl.ready" => self.ready = true,
                 "ctl.done" | "ctl.failed" => {
                     if let Some(t5log::Value::U(id)) = e.field(self.schemas, "request_id") {
                         self.pending.remove(&(*id as u32));
@@ -73,11 +74,38 @@ impl Monitor<'_> {
         if self.commands.is_empty() {
             return !(self.stop_after_selftest && self.selftest_done);
         }
+        while self.ready && !self.injected {
+            let line = &self.commands[self.sent];
+            if let Some(ms) = wait_ms(line) {
+                if !self.pending.is_empty() {
+                    break;
+                }
+                match self.wait_until {
+                    None => self.wait_until = Some(m.bus.cycles + ms * self.cycles_per_ms),
+                    Some(t) if m.bus.cycles >= t => self.wait_until = None,
+                    Some(_) => break,
+                }
+                if self.wait_until.is_some() {
+                    break;
+                }
+            } else {
+                let f = t5log::ctl::frames(line, &mut self.next_id).expect("checked in parse_args");
+                m.rtt_down_pending.extend(&f.bytes);
+                self.pending.extend(f.answered);
+            }
+            self.sent += 1;
+            self.injected = self.sent == self.commands.len();
+        }
         if self.injected && self.pending.is_empty() && self.stop_at.is_none() {
             self.stop_at = Some(m.bus.cycles + self.linger_cycles);
         }
         self.stop_at.is_none_or(|t| m.bus.cycles < t)
     }
+}
+
+/// `wait-ms N`: a pause between commands (see `Monitor`), not sent.
+fn wait_ms(line: &str) -> Option<u64> {
+    line.strip_prefix("wait-ms ")?.trim().parse().ok()
 }
 
 /// Puts the ELF's loaded segments where the bootloader would.
@@ -94,7 +122,7 @@ fn load_image(bus: &mut Bus, elf: &t5emu::elf::Elf) -> Result<(), String> {
 const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [--seed N] \
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
-                     [--flash FILE@HEXOFFSET]... [--ctl COMMAND]... [--expect-event NAME]... \
+                     [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
                      [--linger-ms N] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
@@ -176,7 +204,9 @@ fn parse_args() -> Result<Opts, String> {
             "--expect-reset" => o.expect_reset = true,
             "--ctl" => {
                 let v = val()?;
-                t5log::ctl::frames(&v, &mut 0).map_err(|e| format!("--ctl {v}: {e}"))?;
+                if wait_ms(&v).is_none() {
+                    t5log::ctl::frames(&v, &mut 0).map_err(|e| format!("--ctl {v}: {e}"))?;
+                }
                 o.ctl.push(v);
             }
             "--expect-event" => o.expect_events.push(val()?),
@@ -266,6 +296,11 @@ fn main() -> ExitCode {
         stop_after_selftest: o.expect_prev_event.is_none(),
         selftest_done: false,
         commands: o.ctl.clone(),
+        sent: 0,
+        next_id: 1,
+        wait_until: None,
+        cycles_per_ms: o.mhz * 1000,
+        ready: false,
         injected: false,
         pending: Default::default(),
         linger_cycles: o.linger_ms * o.mhz * 1000,

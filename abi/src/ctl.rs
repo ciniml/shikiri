@@ -44,6 +44,8 @@ pub mod cmd {
     pub const PVT: u8 = 15;
     /// Logs the core voltage settings.
     pub const POWER: u8 = 16;
+    /// `u8 name_len | name`: go back to the previous version (doc/16 §4.2).
+    pub const ROLLBACK: u8 = 17;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -62,6 +64,7 @@ pub enum Command<'a> {
     InstallData { offset: u32, data: &'a [u8] },
     InstallEnd,
     Remove { name: &'a str },
+    Rollback { name: &'a str },
     FlashTest,
     Psram,
     KupdateBegin { length: u32 },
@@ -83,6 +86,7 @@ impl Command<'_> {
             Command::InstallData { .. } => "install_data",
             Command::InstallEnd => "install_end",
             Command::Remove { .. } => "remove",
+            Command::Rollback { .. } => "rollback",
             Command::FlashTest => "flashtest",
             Command::Psram => "psram",
             Command::KupdateBegin { .. } => "kupdate_begin",
@@ -120,12 +124,13 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::CLOCK if args.len() == 4 => Command::Clock { mhz: u32_at(args, 0)? },
         cmd::PVT if args.len() == 4 => Command::Pvt { on: u32_at(args, 0)? != 0 },
         cmd::POWER if args.is_empty() => Command::Power,
-        cmd::REMOVE => {
+        cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
                 return None;
             }
-            Command::Remove { name: core::str::from_utf8(&args[1..]).ok()? }
+            let name = core::str::from_utf8(&args[1..]).ok()?;
+            if b[0] == cmd::REMOVE { Command::Remove { name } } else { Command::Rollback { name } }
         }
         cmd::RUN => {
             let n = *args.first()? as usize;
@@ -157,6 +162,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::InstallData { .. } => put(&[cmd::INSTALL_DATA])?,
         Command::InstallEnd => put(&[cmd::INSTALL_END])?,
         Command::Remove { .. } => put(&[cmd::REMOVE])?,
+        Command::Rollback { .. } => put(&[cmd::ROLLBACK])?,
         Command::FlashTest => put(&[cmd::FLASH_TEST])?,
         Command::Psram => put(&[cmd::PSRAM])?,
         Command::KupdateBegin { .. } => put(&[cmd::KUPDATE_BEGIN])?,
@@ -188,7 +194,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
             put(&offset.to_le_bytes())?;
             put(data)?;
         }
-        Command::Remove { name } => {
+        Command::Remove { name } | Command::Rollback { name } => {
             if name.len() > 32 {
                 return None;
             }
@@ -201,7 +207,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
 }
 
 /// Parses a command line as typed on the host: `list`, `ps`, `kill PID`,
-/// `run NAME [ARG0 [ARG1]]`, `remove NAME`, `flashtest`, `psram`, `reboot`,
+/// `run NAME [ARG0 [ARG1]]`, `remove NAME`, `rollback NAME`, `flashtest`, `psram`, `reboot`,
 /// `kinfo`. (`install FILE` and `kupdate FILE` read a file, so the host
 /// tools expand them; see `install_commands`.)
 pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
@@ -226,6 +232,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
             Command::Run { name, arg0, arg1 }
         }
         Some("remove") => Command::Remove { name: w.next().ok_or("remove NAME")? },
+        Some("rollback") => Command::Rollback { name: w.next().ok_or("rollback NAME")? },
         Some("flashtest") => Command::FlashTest,
         Some("psram") => Command::Psram,
         Some("reboot") => Command::Reboot,
@@ -238,7 +245,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         },
         Some("power") => Command::Power,
         _ => {
-            return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | \
+            return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
                  flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power");
         }
     };
@@ -268,7 +275,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

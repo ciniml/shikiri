@@ -25,6 +25,10 @@ pub struct Process {
     /// App store extents (first, count) an XIP process runs from; they must
     /// not be overwritten while it lives (doc/15 §4).
     pub xip_extents: Option<(u16, u16)>,
+    /// Set when the process runs an app version that has not been
+    /// confirmed yet: when it started (ticks) and the version's first
+    /// extent. Its end decides that version (doc/16 §4.2).
+    pub pending: Option<(u64, u16)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +84,7 @@ impl Process {
             handles: handle::Table::new(),
             permissions: loaded.permissions,
             xip_extents: None,
+            pending: None,
         }
     }
 

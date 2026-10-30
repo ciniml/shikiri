@@ -190,7 +190,7 @@ const FRAMES_PER_POLL: usize = 4;
 /// are log events.
 fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     let mut s = sched::Scheduler::new();
-    for e in store.entries().filter(|e| e.flags & t5_abi::t5a::tlv::FLAG_AUTOSTART as u8 != 0) {
+    for e in store.entries().filter(|e| e.is_current() && e.flags & t5_abi::t5a::tlv::FLAG_AUTOSTART as u8 != 0) {
         let name = e.name();
         if let Err(why) = start(&mut s, store, name, 0, 0) {
             event!(Error, "ctl.autostart_failed", name = name, error = why);
@@ -201,6 +201,7 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     event!(Info, "ctl.ready", slots = sched::MAX_PROCS as u32, stack_size = stack_size, stack_used = stack_used);
     loop {
         s.run(None, &mut |s| {
+            settle_updates(s, store);
             s.reap();
             // A few frames per poll, so an install (one frame per 256 B,
             // some with a sector erase) does not stop the apps meanwhile.
@@ -210,6 +211,37 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
                 handle(s, store, kup, &frame[..n]);
             }
         });
+    }
+}
+
+/// How long the first run of an updated app must last, unless it ends
+/// normally sooner, to confirm the update (doc/16 §4.2).
+const CONFIRM_AFTER_MS: u64 = 2000;
+
+/// Decides unconfirmed app versions from how their processes did: a normal
+/// end or `CONFIRM_AFTER_MS` of running confirms, a fault rolls back, and a
+/// kill from the host decides nothing.
+fn settle_updates(s: &mut sched::Scheduler, store: &mut store::Store) {
+    let now = Current::now();
+    for i in 0..s.slots.len() {
+        let Some(p) = s.slots[i].as_mut() else { continue };
+        let Some((since, first)) = p.pending else { continue };
+        let name = p.name;
+        let r = match p.exit() {
+            Some(process::Exit::Code(_)) => Some(store.confirm(name, first, "exit")),
+            Some(process::Exit::Fault { .. }) => Some(store.rollback(name, Some(first), "fault")),
+            Some(process::Exit::Killed) => None,
+            None if now - since >= time::ms_to_ticks(CONFIRM_AFTER_MS) => Some(store.confirm(name, first, "running")),
+            None => continue,
+        };
+        if let Some(Err(why)) = r {
+            event!(Warn, "store.settle_skipped", name = name, error = why);
+        }
+        // Decided: other processes of the same version need not decide
+        // again.
+        for q in s.slots.iter_mut().flatten().filter(|q| q.pending.is_some_and(|(_, f)| f == first)) {
+            q.pending = None;
+        }
     }
 }
 
@@ -292,6 +324,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             Current::reset()
         }
         Command::Remove { name } => store.remove(name),
+        Command::Rollback { name } => store.rollback(name, None, "command"),
         Command::FlashTest => store.flash_test(),
         // The full test overwrites the whole PSRAM, processes included.
         Command::Psram if s.slots.iter().any(Option::is_some) => Err("processes running"),
@@ -317,6 +350,9 @@ fn start(s: &mut sched::Scheduler, store: &store::Store, name: &str, arg0: u32, 
     let mut p = Process::new(pid, loaded.name, &loaded, arg0 as usize, arg1 as usize);
     if loaded.xip {
         p.xip_extents = store.entry(name).map(|e| (e.extent_first, e.extent_count));
+    }
+    if let Some(e) = store.entry(name).filter(|e| e.state == t5_abi::store::State::PendingVerify) {
+        p.pending = Some((Current::now(), e.extent_first));
     }
     s.slots[slot_index] = Some(p);
     Ok(pid)

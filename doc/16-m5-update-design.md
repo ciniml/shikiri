@@ -198,3 +198,13 @@
 - 試験: `make test-p4emu` の 6 回目。otadata を「seq 1（ota_0）、pending_verify」にして（`elf2t5a otadata`）、bad-panic のカーネルを動かす。`kupdate.pending`、`kernel.panic`、`kupdate.panic_reset` が出て、ソフトウェアリセットで終わることを確かめる（`t5emu --expect-reset`）。
 - 実機（2026-10-30）: ota_0 の開発版（0.1.0）から `make kupdate … T5K=build/kupdate/bad-panic.t5k` を t5log をつないだまま実行した。bad-panic は ota_1 に `seq 2` で入り、パニックして自分でリセットし、ブートローダが `seq 2` を aborted にして ota_0 の開発版に戻った（`kupdate.rolled_back ota_seq=2 state=aborted slot=1`）。**プローブからのリセットなしで戻った**（§6.4 ではプローブからのリセットが要った）。
 - `make kupdate PROBE=<Tab5> T5K=build/kupdate/*` は、利用者が Claude Code の許可設定（`.claude/settings.local.json`、コミットしない）に入れたので、Claude が実行できる。それ以外の書き込みは、これまでどおり確認してから。
+
+## 7. M5b の実装の記録（2026-10-30）
+§4.1〜4.3 のとおりに実装した。
+- `t5_abi::store`: `State::Previous`（4）、`Entry::is_current`、カタログ v2（v1 も読む）。
+- カーネルの `store`: `entry`/`image` は今の版だけを引く。`install_end` が §4.2 の表のとおりに `PendingVerify` と `Previous` を作る。`confirm`、`rollback`。secure_version は今の版と `Previous` の大きいほうと比べる。
+- 決め方（`main.rs` の `settle_updates`、制御チャネルを読むたびに呼ぶ）: `PendingVerify` の版から起動したプロセスは、起動した時刻と**その版の最初のエクステント**を覚える。普通に終われば `store.confirmed by=exit`、2 秒動き続ければ `by=running`、例外で止められれば `store.rolled_back reason=fault`。そのあいだに別の版が入っていたら（エクステントが違う）何もしない（`store.settle_skipped`）。エクステントで比べるのは、同じ名前の新しい版を、古い版のプロセスの結果で確定しないため。
+- 制御コマンド `rollback NAME`（`cmd` 17）。
+- 試験用のイメージ: `greeter-0.2.t5a`（hello を greeter 0.2.0 として署名）、`greeter-bad.t5a`（fault を greeter 0.3.0 として署名。`run greeter 1` で load access fault）、`spin-xip-0.2.t5a`。
+- t5emu の `--ctl 'wait-ms N'`: それより前のコマンドがすべて答えられ、さらに N ミリ秒たつまで、後のコマンドを送らない（アプリが終わるのを待つため）。
+- `make test-p4emu` の 5 回目（M5b）で確かめたこと: greeter 0.1 の上の 0.2 が `PendingVerify` ＋ `Previous` になり（`list` の state 1 と 4）、普通に終わって確定し、`list` に 1 つだけ残る。greeter-bad は例外で止められて 0.2 に戻り、次の `run greeter` は 0.2（`hello.greet`）。spin-xip 0.2（XIP）は 2 秒動いたところで `by=running` で確定。`rollback` コマンドで戻り、`remove` で両方消える。
