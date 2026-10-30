@@ -156,7 +156,7 @@ fn parse_args() -> Result<Opts, String> {
     let mut o = Opts {
         mhz: 40,
         cache: cache::Mode::Strict,
-        max_ms: 10_000,
+        max_ms: 20_000,
         seed: 0x7AB5_0001,
         trace_traps: false,
         warn_unmodelled: false,
