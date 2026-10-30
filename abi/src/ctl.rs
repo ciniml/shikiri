@@ -50,6 +50,8 @@ pub mod cmd {
     pub const TOUCH: u8 = 18;
     /// Log every address on the board I2C bus that answers.
     pub const I2C_SCAN: u8 = 19;
+    /// Log the display's frame count and rate (M6b).
+    pub const DISPLAY: u8 = 20;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -79,6 +81,7 @@ pub enum Command<'a> {
     Power,
     Touch { seconds: u32 },
     I2cScan,
+    Display,
 }
 
 impl Command<'_> {
@@ -103,6 +106,7 @@ impl Command<'_> {
             Command::Power => "power",
             Command::Touch { .. } => "touch",
             Command::I2cScan => "i2cscan",
+            Command::Display => "display",
         }
     }
 }
@@ -134,6 +138,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::POWER if args.is_empty() => Command::Power,
         cmd::TOUCH if args.len() == 4 => Command::Touch { seconds: u32_at(args, 0)? },
         cmd::I2C_SCAN if args.is_empty() => Command::I2cScan,
+        cmd::DISPLAY if args.is_empty() => Command::Display,
         cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -183,6 +188,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Power => put(&[cmd::POWER])?,
         Command::Touch { .. } => put(&[cmd::TOUCH])?,
         Command::I2cScan => put(&[cmd::I2C_SCAN])?,
+        Command::Display => put(&[cmd::DISPLAY])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -259,9 +265,10 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("power") => Command::Power,
         Some("touch") => Command::Touch { seconds: num(Some(w.next().ok_or("touch SECONDS")?))? },
         Some("i2cscan") => Command::I2cScan,
+        Some("display") => Command::Display,
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display");
         }
     };
     if w.next().is_some() {
@@ -290,7 +297,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

@@ -123,6 +123,21 @@ pub trait Platform {
     fn touch_read(_out: &mut [TouchPoint; 5]) -> Result<usize, &'static str> {
         Err("no touch")
     }
+    /// Brings the display up with its framebuffer at `fb` (M6b, doc/17).
+    fn display_init(_panel: Panel, _fb: usize) -> Result<usize, &'static str> {
+        Err("no display")
+    }
+    /// Keeps the display refreshing (restarts the frame DMA when a frame is
+    /// done). Called from the scheduler loop.
+    fn display_service() {}
+    /// Logs the display's frame count and rate.
+    fn display_stats() -> Result<u32, &'static str> {
+        Err("no display")
+    }
+    /// Handles an interrupt other than the timer; false if unknown.
+    fn handle_irq(_code: usize) -> bool {
+        false
+    }
     /// Logs every I2C address on the board bus that acknowledges.
     fn i2c_scan() -> Result<u32, &'static str> {
         Err("no I2C")

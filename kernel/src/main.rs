@@ -77,6 +77,10 @@ impl Apps {
     }
 }
 
+/// The end of the PSRAM kept for the display: room for two 720x1280 RGB565
+/// framebuffers (doc/17 §3).
+const FB_RESERVE: usize = 4 << 20;
+
 /// Kernel data the fault test tries to read and overwrite: one in read-only
 /// data (flash on ESP32-P4) and one in RAM.
 static KERNEL_SECRET: u32 = 0x5EC2_E7;
@@ -140,16 +144,34 @@ pub extern "C" fn kmain() -> ! {
         panic!("test-bad-panic: this kernel must be rolled back");
     }
     // Apps run from PSRAM when there is one (M4a), else from the L2MEM pool.
-    match Current::psram_init() {
-        Ok((window, size)) => set_pool(window..window + size),
-        Err(why) => event!(Warn, "boot.no_psram", error = why),
-    }
+    // Apps get the PSRAM but its last `FB_RESERVE`, the display's (doc/17 §3).
+    let framebuffer = match Current::psram_init() {
+        Ok((window, size)) if size > 2 * FB_RESERVE => {
+            set_pool(window..window + size - FB_RESERVE);
+            Some(window + size - FB_RESERVE)
+        }
+        Ok((window, size)) => {
+            set_pool(window..window + size);
+            None
+        }
+        Err(why) => {
+            event!(Warn, "boot.no_psram", error = why);
+            None
+        }
+    };
     Current::clock_init();
     // The panel and touch (M6a). Not part of the self-test's result: a
     // kernel must be able to confirm itself without them (doc/17 §2).
     let t = Current::now();
     let panel = Current::board_init();
     event!(Info, "board.ready", panel = panel_name(panel), ms = time::ticks_to_ns(Current::now() - t) / 1_000_000);
+    if let Some(fb) = framebuffer {
+        let t = Current::now();
+        match Current::display_init(panel, fb) {
+            Ok(_) => event!(Info, "display.ready", ms = time::ticks_to_ns(Current::now() - t) / 1_000_000),
+            Err(why) => event!(Warn, "display.failed", error = why),
+        }
+    }
     let (pool, slot_size) = (pool(), slot(0).1);
     event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
@@ -394,6 +416,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::Pvt { on } => Current::set_pvt(on),
         Command::Touch { seconds } => touch_log.start(seconds),
         Command::I2cScan => Current::i2c_scan(),
+        Command::Display => Current::display_stats(),
         Command::Power => {
             Current::log_power("cmd");
             Ok(0)

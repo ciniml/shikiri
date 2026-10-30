@@ -1,6 +1,7 @@
 //! I2C1 (0x500C_5000) with the Tab5's internal bus devices that M6a talks
-//! to (doc/17 §7): the two PI4IOE5V6408 IO expanders (0x43, 0x44) and an
-//! ST7123's touch controller (0x55) that reports one fixed touch point.
+//! to (doc/17 §7): the two PI4IOE5V6408 IO expanders (0x43, 0x44) and the
+//! GT911 touch controller (0x14) of the ILI9881C lot, as on the Tab5 at hand,
+//! reporting one fixed touch point.
 //! The command list runs at once when TRANS_START is set; timing is not
 //! modelled. Register layout: doc/research/m6-panel-touch.md §1.3.
 
@@ -48,26 +49,23 @@ impl Expander {
 }
 
 #[derive(Default)]
-struct St7123 {
+struct Gt911 {
     reg: u16,
     written: usize,
 }
 
-impl St7123 {
+impl Gt911 {
     fn read_reg(&self, reg: u16) -> u8 {
+        let [xl, xh] = TOUCH_X.to_le_bytes();
+        let [yl, yh] = TOUCH_Y.to_le_bytes();
         match reg {
-            0x0000 => 3, // FW version: ST7123
-            0x0005 => (719u16 >> 8) as u8,
-            0x0006 => 719u16 as u8,
-            0x0007 => (1279u16 >> 8) as u8,
-            0x0008 => 1279u16 as u8,
-            0x0009 => 10,
-            0x0010 => 1 << 3, // with_coord
-            0x0014 => 0x80 | (TOUCH_X >> 8) as u8,
-            0x0015 => TOUCH_X as u8,
-            0x0016 => (TOUCH_Y >> 8) as u8,
-            0x0017 => TOUCH_Y as u8,
-            0x0018 => 20,
+            0x814E => 0x81, // data ready, one point
+            0x814F => 0,    // track id
+            0x8150 => xl,
+            0x8151 => xh,
+            0x8152 => yl,
+            0x8153 => yh,
+            0x8154 => 20,
             _ => 0,
         }
     }
@@ -78,7 +76,7 @@ pub struct I2c {
     tx: VecDeque<u8>,
     rx: VecDeque<u8>,
     exp: [Expander; 2],
-    touch: St7123,
+    touch: Gt911,
     /// Device addressed since the last start, if it answered.
     target: Option<u8>,
     /// Transfers that ran, for tests.
@@ -94,7 +92,7 @@ impl Default for I2c {
             tx: VecDeque::new(),
             rx: VecDeque::new(),
             exp: [Expander::new(), Expander::new()],
-            touch: St7123::default(),
+            touch: Gt911::default(),
             target: None,
             transfers: 0,
             exp2_writes: 0,
@@ -188,7 +186,7 @@ impl I2c {
                 }
                 true
             }
-            0x55 => {
+            0x14 => {
                 if !read {
                     self.touch.written = 0;
                 }
@@ -214,7 +212,9 @@ impl I2c {
                 }
                 e.written += 1;
             }
-            Some(0x55) => {
+            Some(0x14) => {
+                // Register (big-endian), then data: writing the status
+                // clears it; the fixed touch reports again next time.
                 let t = &mut self.touch;
                 match t.written {
                     0 => t.reg = b as u16,
@@ -235,7 +235,7 @@ impl I2c {
                 e.reg = e.reg.wrapping_add(1);
                 v
             }
-            Some(0x55) => {
+            Some(0x14) => {
                 let v = self.touch.read_reg(self.touch.reg);
                 self.touch.reg = self.touch.reg.wrapping_add(1);
                 v

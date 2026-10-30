@@ -6,6 +6,7 @@
 use super::Platform;
 
 mod clock;
+mod display;
 mod i2c;
 mod psram;
 mod tab5;
@@ -507,6 +508,7 @@ impl Platform for Esp32p4v1 {
     }
 
     fn reset() -> ! {
+        display::stop();
         // esp_rom_software_reset_system (esp32p4.rom.ld:52).
         unsafe {
             let reset: unsafe extern "C" fn() -> ! = core::mem::transmute(ROM_SOFTWARE_RESET);
@@ -657,6 +659,26 @@ impl Platform for Esp32p4v1 {
 
     fn touch_read(out: &mut [super::TouchPoint; 5]) -> Result<usize, &'static str> {
         tab5::touch_read(out)
+    }
+
+    fn display_init(panel: super::Panel, fb: usize) -> Result<usize, &'static str> {
+        display::init(panel, fb).map(|_| display::FB_BYTES)
+    }
+
+    fn display_service() {
+        display::service();
+    }
+
+    fn display_stats() -> Result<u32, &'static str> {
+        display::log_stats()
+    }
+
+    fn handle_irq(code: usize) -> bool {
+        if code == display::IRQ {
+            display::service();
+            return true;
+        }
+        false
     }
 
     fn i2c_scan() -> Result<u32, &'static str> {

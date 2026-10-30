@@ -443,6 +443,10 @@ fn main() -> ExitCode {
             i2c.transfers, i2c.exp2_writes
         );
     }
+    let dsi = &m.bus.periph.dsi;
+    if dsi.frames > 0 {
+        eprintln!("t5emu: display: {} frame(s) sent; list item at {:#010x}", dsi.frames, dsi.last_llp & !0x3F);
+    }
     let all_ok = passed && rtt_ok && board_ok && missing.is_empty() && mon.pending.is_empty();
     match stop {
         // A reset is an end like any other once everything expected was

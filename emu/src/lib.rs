@@ -1,5 +1,6 @@
 pub mod bus;
 pub mod cache;
+pub mod dsi;
 pub mod elf;
 pub mod i2c;
 pub mod machine;

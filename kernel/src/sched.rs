@@ -122,6 +122,7 @@ impl Scheduler {
 
         loop {
             Current::feed_watchdog();
+            Current::display_service();
             let now = Current::now();
             if limit.is_none() && now >= next_poll {
                 poll(self);
@@ -219,6 +220,7 @@ fn run_slice(p: &mut Process, i: usize, fpu: &mut Fpu, stats: &mut Stats) {
                 stats.preemptions += 1;
                 return;
             }
+            Trap::Interrupt { code } if Current::handle_irq(code) => {}
             Trap::Interrupt { code } => panic!("unexpected interrupt {code}"),
             Trap::Syscall => {
                 // ecall is always 4 bytes long.

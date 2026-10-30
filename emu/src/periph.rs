@@ -11,6 +11,7 @@ pub const CLIC_BASE: u32 = 0x2080_0000;
 pub const CLIC_CTRL_BASE: u32 = 0x2080_1000;
 /// CLIC interrupt lines (`CLIC_INT_INFO_NUM_INT` default 48).
 pub const CLIC_LINES: usize = 48;
+use crate::dsi::{GDMA_BASE, GDMA_SIZE, HOST_BASE, HOST_SIZE, SRC_GDMA};
 use crate::i2c::{I2C1_BASE, I2C1_SIZE};
 /// The SYSTIMER counts at 16 MHz (esp_hw_support/port/esp32p4/systimer.c:20).
 pub const SYSTIMER_HZ: u64 = 16_000_000;
@@ -394,6 +395,10 @@ fn initial_value(addr: u32) -> u32 {
         ROOT_CLK_CTRL0 => 3 << 5,
         0x5011_1040 => 0x1FFF_FFFD, // LP_CLKRST_HP_CLK_CTRL
         0x5012_D04C => 3 << 8 | 1 << 4, // EFUSE_RD_MAC_SYS_2: BLK_VERSION_MINOR, WAFER_VERSION_MAJOR_LO
+        // REF_CLK_CTRL1/2 reset values: PLL_F240M and PLL_F20M gates on
+        // (hp_sys_clkrst_reg.h:900-1039).
+        0x500E_6028 => 23 << 16 | 1 << 30,
+        0x500E_602C => 1 << 8,
         _ => 0,
     }
 }
@@ -403,6 +408,7 @@ fn initial_value(addr: u32) -> u32 {
 #[derive(Default)]
 pub struct Peripherals {
     pub i2c: crate::i2c::I2c,
+    pub dsi: crate::dsi::Dsi,
     pub usj: Usj,
     pub systimer: Systimer,
     pub intmtx: Intmtx,
@@ -424,6 +430,8 @@ impl Peripherals {
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.read(a - LP_WDT_BASE),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.read(a),
             a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.read(a - I2C1_BASE),
+            a if (HOST_BASE..HOST_BASE + HOST_SIZE).contains(&a) => self.dsi.host_read(a - HOST_BASE),
+            a if (GDMA_BASE..GDMA_BASE + GDMA_SIZE).contains(&a) => self.dsi.gdma_read(a - GDMA_BASE, ticks),
             LP_CLKRST_RESET_CAUSE => self.reset_cause << 7,
             a => {
                 self.warn(a, "read");
@@ -443,6 +451,8 @@ impl Peripherals {
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.write(a - LP_WDT_BASE, v, now_ms),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.write(a, v),
             a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.write(a - I2C1_BASE, v),
+            a if (HOST_BASE..HOST_BASE + HOST_SIZE).contains(&a) => self.dsi.host_write(a - HOST_BASE, v),
+            a if (GDMA_BASE..GDMA_BASE + GDMA_SIZE).contains(&a) => self.dsi.gdma_write(a - GDMA_BASE, v, ticks),
             // The divider update completes at once (clk_ll_bus_update).
             ROOT_CLK_CTRL0 => {
                 self.other.insert(ROOT_CLK_CTRL0, v & !SOC_CLK_DIV_UPDATE);
@@ -473,6 +483,12 @@ impl Peripherals {
                 }
             }
         }
+        if self.dsi.irq(ticks) {
+            let idx = self.intmtx.map[SRC_GDMA] as usize;
+            if idx < CLIC_LINES {
+                lines[idx] = true;
+            }
+        }
         self.clic.set_lines(lines);
     }
 
@@ -485,6 +501,10 @@ impl Peripherals {
                 idx < CLIC_LINES && self.clic.ie[idx]
             })
             .filter_map(|t| self.systimer.next_event(t, ticks))
+            .chain(self.dsi.next_event().filter(|_| {
+                let idx = self.intmtx.map[SRC_GDMA] as usize;
+                idx < CLIC_LINES && self.clic.ie[idx]
+            }))
             .min()
     }
 }
