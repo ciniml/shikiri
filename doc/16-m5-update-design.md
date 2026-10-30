@@ -234,3 +234,13 @@
 - t5emu の `--ctl 'wait-ms N'`: それより前のコマンドがすべて答えられ、さらに N ミリ秒たつまで、後のコマンドを送らない（アプリが終わるのを待つため）。
 - `make test-p4emu` の 5 回目（M5b）で確かめたこと: greeter 0.1 の上の 0.2 が `PendingVerify` ＋ `Previous` になり（`list` の state 1 と 4）、普通に終わって確定し、`list` に 1 つだけ残る。greeter-bad は例外で止められて 0.2 に戻り、次の `run greeter` は 0.2（`hello.greet`）。spin-xip 0.2（XIP）は 2 秒動いたところで `by=running` で確定。`rollback` コマンドで戻り、`remove` で両方消える。
 - 実機（2026-10-30、[logs/m5b-apps-tab5-20261030.txt](logs/m5b-apps-tab5-20261030.txt)）: 同じ流れを、1 手順ずつ t5log をつなぎ直して実行した（利用者が実行。アプリのインストールはフラッシュへの書き込みなので）。すべて t5emu と同じ結果になった: 0.2 が `by=exit` で確定、greeter-bad（0.3）は load access fault で 0.2 に戻り、次の起動は 0.2（hello）、spin-xip 0.2 は起動から約 2.0 秒で `by=running` で確定、`rollback` コマンドで戻り、`remove` で消えた。もとからあった v1 のカタログ（`catalog_seq` 13 まで）は読めて、その上に v2 で書いた。ログのアプリのイベントが `<unknown …>` なのは、t5log にカーネルの ELF しか渡していないため（内容: pid101/103 は hello の文、pid104 は spin.done）。
+
+## 8. M5c の実装の記録（2026-10-31）
+§5.1〜5.4 のとおりに実装した（ABI 0.6）。
+- `t5_abi::chan`（`PREFIX`、`MSG_MAX` 256、`QUEUE` 4、`READABLE`、`PEER_CLOSED`）。`read`/`write` の説明を更新。
+- カーネル: `channel.rs`（チャネル 8 本の固定の表。端は `End` で、ハンドルが閉じられると `Drop` で端を放す）。`handle.rs` に `Object::Channel`、`read`/`write`。`process.rs` の `io` は、ユーザの範囲を確かめてからカーネルのバッファを通してコピーする。プロセスが終わったとき（`sched::log_exit`）にハンドルをすべて閉じる。
+- チャネルのハンドルは READ/WRITE/WAIT の権利だけを持つので、`ctl` は `NoSupport` ではなく `Denied` になる（権利の確かめが先）。
+- `open` は、ハンドルの表に空きがあることを先に確かめる（チャネルの端は開いた時点で取られるので、取ったあとで NoMem で失敗しないように）。
+- `t5-rt`: `Handle::read`/`write`、`Channel`（`open`、`send` は Busy なら yield してやり直す、`recv` は空なら wait、相手が閉じたら `Error::Off`）。
+- アプリ `echo`（`--permit chan:echo`）と自己試験 M5c（echo のサーバ・クライアントと spin を同時に）。`echo` は省略できる（ストアになければ M5c を飛ばす。実機のストアには、インストールするまで入っていない）。
+- 結果（QEMU）: クライアントは、`chan:secret` が `Denied`、3 つ目の `open` が `Busy`、257 バイトが `Size`、`ctl` が `Denied`、キューを埋めると 4 つ目のあとで `Busy`、長さ 0 のバッファでの `read` が `Size`（メッセージは残る）、を確かめたうえで 44 個のメッセージ（0〜256 バイト、計 4711 バイト）の往復を確かめた。サーバはクライアントの終了で `PEER_CLOSED` を受けて終わった。t5emu でも同じ。

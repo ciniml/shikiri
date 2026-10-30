@@ -3,20 +3,27 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, rights, timer};
+use t5_abi::{Error, MAX_HANDLES, chan, rights, timer};
 
+use crate::channel;
 use crate::platform::{Current, Platform};
 use crate::time;
 
 pub enum Object {
     Timer(Timer),
+    Channel(channel::End),
 }
 
 impl Object {
-    /// Opens the object named `name` (the caller has checked permissions).
-    fn open(name: &[u8]) -> Result<(Object, usize), Error> {
+    /// Opens the object named `name` for process `pid` (the caller has
+    /// checked permissions).
+    fn open(name: &[u8], pid: u32) -> Result<(Object, usize), Error> {
         match name {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
+            n if n.starts_with(chan::PREFIX.as_bytes()) => {
+                let end = channel::open(&n[chan::PREFIX.len()..], pid)?;
+                Ok((Object::Channel(end), rights::READ | rights::WRITE | rights::WAIT))
+            }
             _ => Err(Error::NoDevice),
         }
     }
@@ -84,16 +91,18 @@ impl Table {
         Table { slots: [const { None }; MAX_HANDLES] }
     }
 
-    /// Opens `name` with `want` rights if `permitted`; returns the handle.
-    pub fn open(&mut self, name: &[u8], want: usize, permitted: bool) -> Result<usize, Error> {
+    /// Opens `name` with `want` rights for process `pid` if `permitted`;
+    /// returns the handle.
+    pub fn open(&mut self, name: &[u8], want: usize, permitted: bool, pid: u32) -> Result<usize, Error> {
         if !permitted {
             return Err(Error::Denied);
         }
-        let (object, supported) = Object::open(name)?;
+        // Checked before the object exists: a channel end is taken on open.
+        let i = self.slots.iter().position(Option::is_none).ok_or(Error::NoMem)?;
+        let (object, supported) = Object::open(name, pid)?;
         if want == 0 || want & !supported != 0 {
             return Err(Error::Invalid);
         }
-        let i = self.slots.iter().position(Option::is_none).ok_or(Error::NoMem)?;
         self.slots[i] = Some(Handle { object, rights: want });
         Ok(i + 1)
     }
@@ -118,15 +127,29 @@ impl Table {
     pub fn ctl(&mut self, h: usize, op: usize, arg: u64) -> Result<usize, Error> {
         match &mut self.get(h, rights::CTL)?.object {
             Object::Timer(t) => t.ctl(op, arg),
+            Object::Channel(_) => Err(Error::NoSupport),
         }
     }
 
-    /// `read`/`write`: no object supports them yet, but the handle and its
-    /// rights are checked as for any use.
-    pub fn io(&mut self, h: usize, write: bool) -> Result<usize, Error> {
-        match &self.get(h, if write { rights::WRITE } else { rights::READ })?.object {
+    /// `write`: `buf` is the caller's data, already copied in.
+    pub fn write(&mut self, h: usize, buf: &[u8]) -> Result<usize, Error> {
+        match &self.get(h, rights::WRITE)?.object {
+            Object::Channel(e) => e.write(buf),
             Object::Timer(_) => Err(Error::NoSupport),
         }
+    }
+
+    /// `read` into `buf` (kernel memory, copied out by the caller).
+    pub fn read(&mut self, h: usize, buf: &mut [u8]) -> Result<usize, Error> {
+        match &self.get(h, rights::READ)?.object {
+            Object::Channel(e) => e.read(buf),
+            Object::Timer(_) => Err(Error::NoSupport),
+        }
+    }
+
+    /// Closes every handle (the process ended).
+    pub fn close_all(&mut self) {
+        self.slots = [const { None }; MAX_HANDLES];
     }
 
     /// Checks that every handle in `hs` can be waited on.
@@ -142,6 +165,7 @@ impl Table {
                 t.update(now);
                 (t.pending > 0).then(|| (i, timer::EXPIRED, core::mem::take(&mut t.pending) as usize))
             }
+            Object::Channel(e) => e.poll().map(|(ev, v)| (i, ev, v)),
         })
     }
 
@@ -150,6 +174,8 @@ impl Table {
         hs.iter()
             .filter_map(|&h| match &self.get(h as usize, rights::WAIT).ok()?.object {
                 Object::Timer(t) => t.next,
+                // Woken by the writer's process, not by time.
+                Object::Channel(_) => None,
             })
             .min()
     }

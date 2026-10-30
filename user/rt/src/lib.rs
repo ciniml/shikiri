@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, event, rights, sys, timer};
+pub use t5_abi::{Error, FOREVER, chan, event, rights, sys, timer};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -103,6 +103,19 @@ impl Handle {
         self.0
     }
 
+    /// Reads into `buf`; returns how many bytes came (a channel: one whole
+    /// message).
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        let (ret, v) = unsafe { syscall4(sys::READ, [self.0 as usize, buf.as_mut_ptr() as usize, buf.len(), 0]) };
+        result(ret, v).map(|v| v[0])
+    }
+
+    /// Writes `buf` (a channel: as one message).
+    pub fn write(&self, buf: &[u8]) -> Result<usize, Error> {
+        let (ret, v) = unsafe { syscall4(sys::WRITE, [self.0 as usize, buf.as_ptr() as usize, buf.len(), 0]) };
+        result(ret, v).map(|v| v[0])
+    }
+
     /// Object-specific operation `op` with a 64-bit argument.
     pub fn ctl(&self, op: usize, arg: u64) -> Result<usize, Error> {
         let (ret, v) = unsafe { syscall4(sys::CTL, [self.0 as usize, op, arg as usize, (arg >> 32) as usize]) };
@@ -169,6 +182,51 @@ impl Timer {
 
     pub fn stop(&self) -> Result<(), Error> {
         self.0.ctl(timer::STOP, 0).map(|_| ())
+    }
+}
+
+/// One end of the channel `chan:NAME` (doc/16 §5).
+pub struct Channel(pub Handle);
+
+impl Channel {
+    /// Joins the channel `name` (without the `chan:` prefix). The image
+    /// must be built with `--permit chan:NAME`.
+    pub fn open(name: &str) -> Result<Channel, Error> {
+        let mut full = [0u8; t5_abi::t5a::MAX_NAME];
+        let n = chan::PREFIX.len() + name.len();
+        if n > full.len() {
+            return Err(Error::Size);
+        }
+        full[..chan::PREFIX.len()].copy_from_slice(chan::PREFIX.as_bytes());
+        full[chan::PREFIX.len()..n].copy_from_slice(name.as_bytes());
+        let full = core::str::from_utf8(&full[..n]).map_err(|_| Error::Invalid)?;
+        Handle::open(full, rights::READ | rights::WRITE | rights::WAIT).map(Channel)
+    }
+
+    /// Sends `msg`, yielding while the other end's queue is full.
+    pub fn send(&self, msg: &[u8]) -> Result<(), Error> {
+        loop {
+            match self.0.write(msg) {
+                Ok(_) => return Ok(()),
+                Err(Error::Busy) => yield_now(),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Waits for the next message and reads it into `buf`.
+    /// `Err(Error::Off)` once nothing is queued and the other end closed.
+    pub fn recv(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        loop {
+            match self.0.read(buf) {
+                Err(Error::Busy) => {}
+                r => return r,
+            }
+            let ev = wait(&[&self.0], FOREVER)?;
+            if ev.kind == chan::PEER_CLOSED {
+                return Err(Error::Off);
+            }
+        }
     }
 }
 

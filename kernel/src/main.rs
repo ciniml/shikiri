@@ -13,6 +13,7 @@
 #![no_main]
 
 mod arch;
+mod channel;
 mod flash;
 mod handle;
 mod kupdate;
@@ -48,6 +49,8 @@ struct Apps {
     /// like `timers`.
     hello_xip: Option<&'static [u8]>,
     xipcheck: Option<&'static [u8]>,
+    /// M5c (channels, doc/16 §5). Optional like `timers`.
+    echo: Option<&'static [u8]>,
 }
 
 impl Apps {
@@ -69,6 +72,7 @@ impl Apps {
             timers: s.image("timers"),
             hello_xip: s.image("hello-xip"),
             xipcheck: s.image("xipcheck"),
+            echo: s.image("echo"),
         })
     }
 }
@@ -144,7 +148,7 @@ pub extern "C" fn kmain() -> ! {
     let (pool, slot_size) = (pool(), slot(0).1);
     event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
-        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps) + selftest_m4b(&apps),
+        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps) + selftest_m4b(&apps) + selftest_m5c(&apps),
         Some(None) => 1,
         None => {
             event!(Error, "selftest.no_flash");
@@ -599,6 +603,40 @@ fn selftest_m3d(apps: &Apps) -> u32 {
         let exit = p.exit().unwrap();
         // spin exits 2 when nothing preempted it for long; the timer
         // processes only run for microseconds, so that is expected here.
+        let ok = exit == Exit::Code(0) || (p.name == "spin" && exit == Exit::Code(2));
+        log_case(p, &exit, ok);
+        if !ok {
+            failures += 1;
+        }
+    }
+    failures
+}
+
+/// Channels (doc/16 §5.4): the echo server and client run together with a
+/// spin process; the client checks the channel rules and its replies, and
+/// the server ends when the client's end closes.
+fn selftest_m5c(apps: &Apps) -> u32 {
+    let Some(echo) = apps.echo else {
+        event!(Warn, "selftest.skipped", part = "m5c", reason = "no echo app in the store");
+        return 0;
+    };
+    let specs: [(&'static str, &'static [u8], usize, usize); 3] =
+        [("echo-server", echo, 0, 0), ("echo-client", echo, 1, 40), ("spin", apps.spin, 4, 100)];
+    let mut slot_index = 0;
+    let loaded = specs.map(|(name, image, arg0, arg1)| {
+        let p = load(name, image, slot_index, arg0, arg1);
+        slot_index += 1;
+        p
+    });
+    let [Some(a), Some(b), Some(c)] = loaded else {
+        return 1;
+    };
+    let mut s = sched::Scheduler::new();
+    s.slots = [Some(a), Some(b), Some(c), None];
+    s.run(Some(3000), &mut |_| {});
+    let mut failures = 0;
+    for p in s.slots.iter().flatten() {
+        let exit = p.exit().unwrap();
         let ok = exit == Exit::Code(0) || (p.name == "spin" && exit == Exit::Code(2));
         log_case(p, &exit, ok);
         if !ok {

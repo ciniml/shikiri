@@ -17,8 +17,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// Minor 2 (M2): yield, sleep, time. Minor 3 (L1, doc/12): log_emit and
 /// log_level replace dbg_write. Minor 4 (M3a, doc/14): signed T5A v1 images
 /// (pre-1.0, so no compatibility is kept). Minor 5 (M3d, doc/14 §4): handles,
-/// open/ctl/wait/close and the timer object.
-pub const ABI_MINOR: u16 = 5;
+/// open/ctl/wait/close and the timer object. Minor 6 (M5c, doc/16 §5):
+/// read/write and the channel object.
+pub const ABI_MINOR: u16 = 6;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -49,9 +50,11 @@ pub mod sys {
     /// handle in a1. Only names in the image's Permissions TLV can be
     /// opened (`Error::Denied` otherwise).
     pub const OPEN: usize = 0x100;
-    /// a0 = handle, a1/a2 = buffer. Reserved: no object supports it yet.
+    /// a0 = handle, a1/a2 = buffer. Returns the bytes read in a1
+    /// (channels: one whole message).
     pub const READ: usize = 0x101;
-    /// a0 = handle, a1/a2 = buffer. Reserved: no object supports it yet.
+    /// a0 = handle, a1/a2 = buffer. Returns the bytes written in a1
+    /// (channels: one whole message).
     pub const WRITE: usize = 0x102;
     /// a0 = handle, a1 = operation (per object), a2/a3 = arguments.
     /// Returns a value in a1.
@@ -89,6 +92,20 @@ pub mod timer {
     pub const MIN_NS: u64 = 100_000;
     /// `wait` event: the timer expired (value = how many times).
     pub const EXPIRED: usize = 1;
+}
+/// Channels (doc/16 §5): `open("chan:NAME")` joins one of the two ends of
+/// the channel NAME; a message `write` on one end is `read` whole on the
+/// other. The image's Permissions TLV must name `chan:NAME`.
+pub mod chan {
+    pub const PREFIX: &str = "chan:";
+    /// Longest message (`write` refuses more with `Error::Size`).
+    pub const MSG_MAX: usize = 256;
+    /// Messages each end holds before `write` gets `Error::Busy`.
+    pub const QUEUE: usize = 4;
+    /// `wait` event: messages are queued (value = how many).
+    pub const READABLE: usize = 1;
+    /// `wait` event: nothing is queued and the other end was closed.
+    pub const PEER_CLOSED: usize = 2;
 }
 
 /// Error codes. A syscall returns `-(code as isize)` in a0 on failure.

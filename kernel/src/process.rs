@@ -156,7 +156,7 @@ impl Process {
                 Ok(None) => return Next::Switch,
                 Err(e) => Err(e),
             },
-            sys::READ | sys::WRITE => self.handles.io(a0, nr == sys::WRITE).map(|n| [n, 0, 0]),
+            sys::READ | sys::WRITE => self.io(a0, a1, a2, nr == sys::WRITE).map(|n| [n, 0, 0]),
             _ => Err(Error::NoSupport),
         };
         self.set_result(result);
@@ -202,11 +202,30 @@ impl Process {
         unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, name.as_mut_ptr(), len) };
         let name = &name[..len];
         let permitted = t5_abi::t5a::permits(self.permissions, name);
-        let r = self.handles.open(name, rights, permitted);
+        let r = self.handles.open(name, rights, permitted, self.pid);
         if r == Err(Error::Denied) {
             event!(Warn, "proc.denied", pid = self.pid, name = core::str::from_utf8(name).unwrap_or("?"));
         }
         r
+    }
+
+    /// `read`/`write` through a kernel buffer: the user range is checked,
+    /// then copied in (write) or out (read).
+    fn io(&mut self, h: usize, ptr: usize, len: usize, write: bool) -> Result<usize, Error> {
+        let mut buf = [0u8; t5_abi::chan::MSG_MAX];
+        if write && len > buf.len() {
+            return Err(Error::Size);
+        }
+        let n = len.min(buf.len());
+        self.check_user_range(ptr, n, !write)?;
+        if write {
+            unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, buf.as_mut_ptr(), n) };
+            self.handles.write(h, &buf[..n])
+        } else {
+            let got = self.handles.read(h, &mut buf[..n])?;
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, got) };
+            Ok(got)
+        }
     }
 
     /// Starts a `wait`: `Ok(Some(..))` if an event is there already,

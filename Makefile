@@ -8,9 +8,10 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers
+APPS       := hello fault ticker spin timers echo
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
+PERMIT_echo   := --permit chan:echo
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin

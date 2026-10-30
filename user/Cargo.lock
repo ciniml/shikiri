@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "echo"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
+]
+
+[[package]]
 name = "fault"
 version = "0.1.0"
 dependencies = [

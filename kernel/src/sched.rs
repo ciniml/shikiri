@@ -185,7 +185,10 @@ impl Scheduler {
     }
 }
 
-fn log_exit(p: &Process, exit: Exit) {
+/// Logs how `p` ended and closes its handles, so a channel's other end
+/// learns of it now rather than when the slot is reused.
+fn log_exit(p: &mut Process, exit: Exit) {
+    p.handles.close_all();
     match exit {
         Exit::Code(code) => event!(Info, "proc.exit", pid = p.pid, code = code),
         Exit::Fault { code, pc, tval } => event!(
