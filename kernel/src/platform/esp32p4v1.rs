@@ -145,6 +145,53 @@ unsafe fn map_flash_linear() {
     }
 }
 
+// ROM SPI flash functions (esp32p4.rom.ld:123-125 for rev v1.x; the eco5 file
+// is for v3), and the pointer to the chip parameters the bootloader set with
+// esp_rom_spiflash_config_param (esp32p4.rom.ld:169, esp_rom_spiflash.h:361).
+// They drive SPI1 and wait until the chip is done. There is no auto-suspend
+// on the P4, so SPI0 (the cache) must not touch flash meanwhile (doc/14 §5.2).
+const ROM_SPIFLASH_ERASE_SECTOR: usize = 0x4FC0_014C;
+const ROM_SPIFLASH_WRITE: usize = 0x4FC0_0154;
+const ROM_SPIFLASH_LEGACY_DATA: usize = 0x4FF3_FFE8;
+const SECTOR: u32 = 4096;
+const PAGE: usize = 256;
+
+/// One erase (`src` null) or one page write, with the flash window out of
+/// use: branch prediction off, L2 suspended, the ROM call, the written range
+/// invalidated in L1 I/D and L2, L2 resumed. Runs from RAM like
+/// `map_flash_linear`; `src` must be in RAM too. Returns the ROM's result
+/// (0 = OK, 1 = error, 2 = timeout).
+#[unsafe(link_section = ".ram_text")]
+#[inline(never)]
+unsafe fn flash_op(offset: u32, src: *const u32, len: u32) -> i32 {
+    unsafe {
+        let suspend: unsafe extern "C" fn() -> u32 = core::mem::transmute(ROM_CACHE_SUSPEND_L2);
+        let resume: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_CACHE_RESUME_L2);
+        let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
+        let erase: unsafe extern "C" fn(u32) -> i32 = core::mem::transmute(ROM_SPIFLASH_ERASE_SECTOR);
+        let write: unsafe extern "C" fn(u32, *const u32, u32) -> i32 = core::mem::transmute(ROM_SPIFLASH_WRITE);
+        let mhcr: usize;
+        core::arch::asm!("csrrc {0}, 0x7c1, {1}", out(reg) mhcr, in(reg) MHCR_BRANCH_PREDICTION);
+        let autoload = suspend();
+        let r = if src.is_null() { erase(offset / SECTOR) } else { write(offset, src, len) };
+        let a = FLASH_WINDOW as u32 + offset;
+        invalidate(CACHE_MAP_L1_ICACHE_MASK, a, len);
+        invalidate(CACHE_MAP_L1_DCACHE, a, len);
+        invalidate(CACHE_MAP_L2_CACHE, a, len);
+        resume(autoload);
+        core::arch::asm!("csrw 0x7c1, {0}", in(reg) mhcr);
+        r
+    }
+}
+
+fn rom_result(r: i32) -> Result<(), &'static str> {
+    match r {
+        0 => Ok(()),
+        2 => Err("flash timeout"),
+        _ => Err("flash error"),
+    }
+}
+
 // ROM cache functions (esp_rom/esp32p4/ld/esp32p4.rom.ld,
 // esp_rom/esp32p4/include/esp32p4/rom/cache.h). ESP-IDF uses these rather than
 // fence.i to make written code fetchable (doc/02 §2.2).
@@ -337,6 +384,34 @@ impl Platform for Esp32p4v1 {
     fn map_flash() -> Option<usize> {
         unsafe { map_flash_linear() };
         Some(FLASH_WINDOW)
+    }
+
+    fn flash_erase_sector(offset: u32) -> Result<(), &'static str> {
+        if offset % SECTOR != 0 || offset as usize >= FLASH_SIZE {
+            return Err("bad sector");
+        }
+        rom_result(unsafe { flash_op(offset, core::ptr::null(), SECTOR) })
+    }
+
+    fn flash_write(offset: u32, data: &[u8]) -> Result<(), &'static str> {
+        let o = offset as usize;
+        if o % 4 != 0 || data.is_empty() || o % PAGE + data.len() > PAGE || o + data.len() > FLASH_SIZE {
+            return Err("bad write");
+        }
+        // A copy on the stack (RAM), padded to whole words with the erased
+        // value, whatever `data` points at.
+        let mut words = [u32::MAX; PAGE / 4];
+        for (i, &b) in data.iter().enumerate() {
+            words[i / 4] &= !(0xFF << (8 * (i % 4))) | ((b as u32) << (8 * (i % 4)));
+        }
+        let len = data.len().next_multiple_of(4) as u32;
+        rom_result(unsafe { flash_op(offset, words.as_ptr(), len) })
+    }
+
+    fn flash_chip() -> Option<(u32, u32)> {
+        // esp_rom_spiflash_chip_t starts with device_id, chip_size.
+        let p = unsafe { rd(ROM_SPIFLASH_LEGACY_DATA) } as usize;
+        (0x4FF0_0000..0x4FFC_0000).contains(&p).then(|| unsafe { (rd(p), rd(p + 4)) })
     }
 
     fn log_info() {

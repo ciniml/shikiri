@@ -1,0 +1,60 @@
+# M3d (install) on the Tab5, 2026-10-30. Kernel written to ota_0 only; the
+# kernel itself erased/wrote appmeta/apps. Decoded by `t5log rtt`.
+
+## 1. t5log rtt --reset --cmd flashtest --until-done
+   0.119809 I kernel boot.start platform=esp32p4-v1.x boot_id=2 reset_cause=24 abi_major=0 abi_minor=4
+   0.123247 I kernel flash.mapped window=0x41000000 ota0_crc32=3270387296
+t5log: -> #1 flashtest
+   1.851203 I kernel selftest.result failures=0 pass=true
+   1.851807 I kernel ctl.ready slots=4 stack_size=49152 stack_used=9536
+   1.874683 I kernel flash.test ok=true offset=0x00c1f000 erased=true written=true cleaned=true erase_us=7024 write_us=6336 max_write_us=416 device_id=4603928 chip_size=16777216
+   1.874828 I kernel ctl.done request_id=1 cmd=flashtest ok=true value=12709888
+
+## 2. --cmd "install build/apps/greeter.t5a" --cmd "run greeter"
+##    --cmd "install build/apps/hello-untrusted.t5a" --cmd list --cmd ps --until-done
+t5log: -> #1..#30 install build/apps/greeter.t5a (7314 bytes)
+t5log: -> #31 run greeter
+t5log: -> #32..#61 install build/apps/hello-untrusted.t5a (7322 bytes)
+t5log: -> #62 list
+t5log: -> #63 ps
+  20.474058 I kernel store.install_begin length=6988 extent_first=6 extents=1
+  20.474143 I kernel ctl.done request_id=1 cmd=install_begin ok=true value=6
+  20.693358 I kernel store.installed name=greeter major=0 minor=1 patch=0 extent_first=6 length=6988 catalog_seq=2 replaced=false erases=3 writes=44 erase_us=5431 write_us=19606 max_op_us=2220 total_ms=219
+  20.693537 I kernel ctl.done request_id=30 cmd=install_end ok=true value=6988
+  20.785505 I kernel loader.verified name=greeter major=0 minor=1 patch=0 build_id=d985a271008e862e61771ffcb236476c verify_us=91733
+  20.785821 I kernel proc.start pid=101 name=greeter base=0x4ff40000 build_id=d985a271008e862e61771ffcb236476c
+  20.785940 I kernel ctl.done request_id=31 cmd=run ok=true value=101
+  20.786245 I kernel store.install_begin length=6996 extent_first=7 extents=1
+  20.786320 I kernel ctl.done request_id=32 cmd=install_begin ok=true value=7
+  20.795621 I pid101 hello.greet text=hello from U-mode
+  20.795705 I kernel proc.exit pid=101 code=0
+  20.867723 W kernel store.rejected error=UnknownKey
+  20.867813 W kernel ctl.failed request_id=61 cmd=install_end ok=false error=image rejected
+  20.867943 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+  20.868064 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00430000 length=7504 state=2 flags=0
+  20.868183 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+  20.868302 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+  20.868421 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+  20.868554 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+  20.868682 I kernel store.app name=greeter major=0 minor=1 patch=0 offset=0x00480000 length=6988 state=2 flags=0
+  20.868818 I kernel ctl.done request_id=62 cmd=list ok=true value=7
+  20.869627 I kernel kernel.stack size=49152 used=13424
+  20.869696 I kernel ctl.done request_id=63 cmd=ps ok=true value=0
+
+## 3. --reset --cmd "run greeter" --cmd "remove greeter" --until-done
+##    (the installed app survives the reset: catalog seq 2, 7 apps)
+   0.133680 I kernel store.open window=0x41000000 catalog_seq=2 apps=7
+   0.134636 I kernel store.app name=greeter major=0 minor=1 patch=0 offset=0x00480000 length=6988 state=2 flags=0
+t5log: -> #1 run greeter
+t5log: -> #2 remove greeter
+   1.856297 I kernel ctl.ready slots=4 stack_size=49152 stack_used=9536
+   1.946483 I kernel loader.verified name=greeter major=0 minor=1 patch=0 build_id=d985a271008e862e61771ffcb236476c verify_us=89881
+   1.946799 I kernel proc.start pid=101 name=greeter base=0x4ff40000 build_id=d985a271008e862e61771ffcb236476c
+   1.946934 I kernel ctl.done request_id=1 cmd=run ok=true value=101
+   1.977451 I kernel store.removed name=greeter catalog_seq=3
+   1.977530 I kernel ctl.done request_id=2 cmd=remove ok=true value=3
+   1.977644 I pid101 hello.greet text=hello from U-mode
+
+## 4. --reset --cmd "run greeter" --until-done (removed: catalog seq 3, 6 apps)
+   0.132852 I kernel store.open window=0x41000000 catalog_seq=3 apps=6
+   1.856004 W kernel ctl.failed request_id=1 cmd=run ok=false error=no such app

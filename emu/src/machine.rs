@@ -3,7 +3,8 @@
 //! (doc/11 §2):
 //! - An exception taken while already handling a trap (before `mret`) locks
 //!   the core up (TRM §2.13.5; doc/01 §0). ecall/ebreak are exempt.
-//! - Only the ROM cache functions are modelled; any other ROM call stops.
+//! - Only the ROM cache functions and the SPI flash erase/write functions
+//!   are modelled; any other ROM call stops.
 //! - `fence.i` does not make data-side writes fetchable (see `cache`).
 
 use crate::bus::Bus;
@@ -34,6 +35,16 @@ pub enum Stop {
     /// suspended (a flash-map or flash-write routine not running from RAM).
     /// The real core would hang.
     FlashWhileL2Suspended { addr: u32, pc: u32 },
+    /// The ROM erase/write functions were called with the L2 cache running:
+    /// the cache would read flash while SPI1 changes it (doc/14 §5.2).
+    FlashOpWithL2Active { pc: u32 },
+    /// A page changed by erase/write was read through the window before it
+    /// was invalidated in the L1 D-cache and L2: stale data on the chip.
+    StaleFlashRead { addr: u32, pc: u32 },
+    /// An erase/write below the app store (bootloader, partition table,
+    /// the kernel's ota_0/ota_1). Not a chip rule: the kernel promises it
+    /// never does this (doc/14 §5.2), and the emulator holds it to that.
+    FlashWriteProtected { offset: u32 },
 }
 
 /// An exception (cause, tval) or a reason to stop emulation.
@@ -80,6 +91,17 @@ const ROM_CACHE_WRITEBACK_ADDR: u32 = 0x4FC0_03F4;
 /// esp32p4.rom.ld:259-260.
 const ROM_CACHE_SUSPEND_L2: u32 = 0x4FC0_0508;
 const ROM_CACHE_RESUME_L2: u32 = 0x4FC0_050C;
+/// esp32p4.rom.ld:123,125 (rev v1.x).
+const ROM_SPIFLASH_ERASE_SECTOR: u32 = 0x4FC0_014C;
+const ROM_SPIFLASH_WRITE: u32 = 0x4FC0_0154;
+/// Flash offsets below this are refused (`Stop::FlashWriteProtected`): the
+/// start of `appmeta` (boot/partitions.csv).
+const FLASH_STORE_START: u32 = 0x41_0000;
+/// Typical times of a 4 KiB erase and a page program on a 128 Mbit NOR
+/// flash (W25Q128JV datasheet: tSE 45 ms, tPP 0.4 ms). The Tab5's chip is
+/// not known yet; the kernel measures it (flashtest).
+const FLASH_ERASE_US: u64 = 45_000;
+const FLASH_PAGE_US: u64 = 400;
 const CACHE_MAP_L1_ICACHE_MASK: u32 = 0b11;
 const CACHE_MAP_L1_DCACHE: u32 = 1 << 4;
 
@@ -318,6 +340,9 @@ impl Machine {
         if let Some(addr) = self.bus.flash_violation.take() {
             return Err(Stop::FlashWhileL2Suspended { addr, pc });
         }
+        if let Some(addr) = self.bus.stale_read.take() {
+            return Err(Stop::StaleFlashRead { addr, pc });
+        }
         match r {
             Ok(()) => {
                 self.cpu.instret += 1;
@@ -452,6 +477,26 @@ impl Machine {
                 if a0 & CACHE_MAP_L1_ICACHE_MASK != 0 {
                     self.bus.cache.invalidate_i(a1, a2);
                 }
+                self.bus.invalidate_window(a0, a1, a2);
+            }
+            ROM_SPIFLASH_ERASE_SECTOR | ROM_SPIFLASH_WRITE => {
+                if !self.bus.l2_suspended {
+                    return Err(Ex::Stop(Stop::FlashOpWithL2Active { pc: self.cpu.x[1] }));
+                }
+                let erase = pc == ROM_SPIFLASH_ERASE_SECTOR;
+                let offset = if erase { a0.wrapping_mul(crate::bus::FLASH_SECTOR) } else { a0 };
+                if offset < FLASH_STORE_START {
+                    return Err(Ex::Stop(Stop::FlashWriteProtected { offset }));
+                }
+                let (r, us) = if erase {
+                    (self.bus.flash_erase_sector(a0), FLASH_ERASE_US)
+                } else {
+                    (self.bus.flash_write(a0, a1, a2), FLASH_PAGE_US * a2.div_ceil(crate::bus::FLASH_PAGE) as u64)
+                };
+                self.bus.cycles += self.bus.cpu_hz * us / 1_000_000;
+                self.cpu.x[10] = r;
+                self.cpu.pc = self.cpu.x[1] & !1;
+                return Ok(());
             }
             ROM_CACHE_WRITEBACK_ADDR => {
                 if a0 & CACHE_MAP_L1_DCACHE != 0 {

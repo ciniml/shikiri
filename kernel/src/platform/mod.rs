@@ -49,6 +49,22 @@ pub trait Platform {
     fn map_flash() -> Option<usize> {
         None
     }
+    /// Erases the 4 KiB flash sector at `offset` and drops it from the
+    /// caches, so the window shows the new contents. Callers go through
+    /// `crate::flash`, which checks the range (doc/14 §5.2).
+    fn flash_erase_sector(_offset: u32) -> Result<(), &'static str> {
+        Err("no flash")
+    }
+    /// Writes `data` (at most one 256-byte page, not crossing a page
+    /// boundary, `offset` 4-byte aligned) to erased flash at `offset`.
+    fn flash_write(_offset: u32, _data: &[u8]) -> Result<(), &'static str> {
+        Err("no flash")
+    }
+    /// Flash chip details the boot code left behind, for the log:
+    /// (JEDEC device id, size in bytes).
+    fn flash_chip() -> Option<(u32, u32)> {
+        None
+    }
     /// Logs platform details worth keeping (called once the log is up).
     fn log_info() {}
     /// Restarts the system watchdog (no-op where there is none).

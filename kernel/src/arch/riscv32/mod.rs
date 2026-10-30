@@ -19,12 +19,39 @@ _start:
     sw zero, 0(t0)
     addi t0, t0, 4
     j 1b
-2:  call {kmain}
+    # Paint the stack so its deepest use can be measured (stack_usage).
+2:  la t0, __stack_bottom
+    li t2, {paint}
+4:  bgeu t0, sp, 5f
+    sw t2, 0(t0)
+    addi t0, t0, 4
+    j 4b
+5:  call {kmain}
 3:  wfi
     j 3b
     "#,
     kmain = sym crate::kmain,
+    paint = const STACK_PAINT,
 );
+
+const STACK_PAINT: u32 = 0x5AC4_5AC4;
+
+unsafe extern "C" {
+    static __stack_bottom: u32;
+    static __stack_top: u32;
+}
+
+/// The kernel stack's size and the most of it used so far (bytes): how far
+/// down from the top the boot-time paint has been overwritten.
+pub fn stack_usage() -> (u32, u32) {
+    let bottom = core::ptr::addr_of!(__stack_bottom) as usize;
+    let top = core::ptr::addr_of!(__stack_top) as usize;
+    let mut a = bottom;
+    while a < top && unsafe { core::ptr::read_volatile(a as *const u32) } == STACK_PAINT {
+        a += 4;
+    }
+    ((top - bottom) as u32, (top - a) as u32)
+}
 
 /// Points mtvec at `trap_entry`. `mode_bits` selects the trap mode (0 = direct
 /// on QEMU virt, 3 = CLIC on ESP32-P4).

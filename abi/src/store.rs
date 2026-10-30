@@ -153,7 +153,7 @@ impl<'a> Catalog<'a> {
     }
 
     /// Entries that decode and fit; others are skipped.
-    pub fn entries(self) -> impl Iterator<Item = Entry> + 'a {
+    pub fn entries(self) -> impl Iterator<Item = Entry> + Clone + 'a {
         let sector = self.sector;
         (0..self.count)
             .filter_map(move |i| Entry::from_bytes(&sector[HEADER_SIZE + i * ENTRY_SIZE..][..ENTRY_SIZE]))
@@ -165,26 +165,64 @@ impl<'a> Catalog<'a> {
 /// one, or of two valid ones the newer (serial-number comparison, so `seq`
 /// may wrap).
 pub fn active<'a>(a: &'a [u8], b: &'a [u8]) -> Option<Catalog<'a>> {
+    active_index(a, b).map(|i| Catalog::parse(if i == 0 { a } else { b }).unwrap())
+}
+
+/// Which of the two sectors (0 or 1) `active` picks. An update writes the
+/// other one.
+pub fn active_index(a: &[u8], b: &[u8]) -> Option<usize> {
     match (Catalog::parse(a), Catalog::parse(b)) {
-        (Some(x), Some(y)) => Some(if (y.seq.wrapping_sub(x.seq) as i32) > 0 { y } else { x }),
-        (x, y) => x.or(y),
+        (Some(x), Some(y)) => Some(if (y.seq.wrapping_sub(x.seq) as i32) > 0 { 1 } else { 0 }),
+        (Some(_), None) => Some(0),
+        (None, Some(_)) => Some(1),
+        (None, None) => None,
     }
 }
 
-/// Builds a catalog sector (host tools, and the kernel's installer in M3d).
-pub fn build_sector(seq: u32, entries: &[Entry], out: &mut [u8; SECTOR_SIZE]) -> bool {
-    if entries.len() > MAX_ENTRIES {
-        return false;
+/// The first run of `count` extents that none of `entries` uses.
+pub fn find_free(entries: impl Iterator<Item = Entry> + Clone, count: u16) -> Option<u16> {
+    if count == 0 || count as u32 > EXTENTS {
+        return None;
     }
+    let mut first = 0u32;
+    while first + count as u32 <= EXTENTS {
+        let end = first + count as u32;
+        // The entry that overlaps [first, end) and ends last, if any.
+        let blocking = entries
+            .clone()
+            .filter(|e| (e.extent_first as u32) < end && first < e.extent_first as u32 + e.extent_count as u32)
+            .map(|e| e.extent_first as u32 + e.extent_count as u32)
+            .max();
+        match blocking {
+            None => return Some(first as u16),
+            Some(next) => first = next,
+        }
+    }
+    None
+}
+
+/// Extents needed for `length` bytes.
+pub fn extents_for(length: u32) -> u16 {
+    length.div_ceil(EXTENT_SIZE) as u16
+}
+
+/// Builds a catalog sector (host tools, and the kernel's installer).
+/// Returns false if there are more than `MAX_ENTRIES` entries.
+pub fn build_sector(seq: u32, entries: impl IntoIterator<Item = Entry>, out: &mut [u8; SECTOR_SIZE]) -> bool {
     out.fill(0xFF);
+    let mut count = 0;
+    for e in entries {
+        if count == MAX_ENTRIES {
+            return false;
+        }
+        out[HEADER_SIZE + count * ENTRY_SIZE..][..ENTRY_SIZE].copy_from_slice(&e.to_bytes());
+        count += 1;
+    }
     out[0..4].copy_from_slice(&MAGIC);
     out[4..6].copy_from_slice(&VERSION.to_le_bytes());
-    out[6..8].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+    out[6..8].copy_from_slice(&(count as u16).to_le_bytes());
     out[8..12].copy_from_slice(&seq.to_le_bytes());
     out[12..16].fill(0);
-    for (i, e) in entries.iter().enumerate() {
-        out[HEADER_SIZE + i * ENTRY_SIZE..][..ENTRY_SIZE].copy_from_slice(&e.to_bytes());
-    }
     let crc = crc32(&out[..SECTOR_SIZE - 4]);
     out[SECTOR_SIZE - 4..].copy_from_slice(&crc.to_le_bytes());
     true
@@ -221,8 +259,8 @@ mod tests {
     fn newer_valid_copy_wins() {
         let mut a = [0u8; SECTOR_SIZE];
         let mut b = [0u8; SECTOR_SIZE];
-        assert!(build_sector(7, &[entry("hello", 0)], &mut a));
-        assert!(build_sector(8, &[entry("hello", 0), entry("spin", 1)], &mut b));
+        assert!(build_sector(7, [entry("hello", 0)], &mut a));
+        assert!(build_sector(8, [entry("hello", 0), entry("spin", 1)], &mut b));
         let c = active(&a, &b).unwrap();
         assert_eq!((c.seq, c.entries().count()), (8, 2));
         assert_eq!(c.entries().nth(1).unwrap().name(), "spin");
@@ -232,9 +270,28 @@ mod tests {
         // Erased flash is not a catalog.
         assert!(active(&[0xFF; SECTOR_SIZE], &[0xFF; SECTOR_SIZE]).is_none());
         // Sequence numbers may wrap.
-        assert!(build_sector(u32::MAX, &[], &mut a));
-        assert!(build_sector(0, &[], &mut b));
+        assert!(build_sector(u32::MAX, [], &mut a));
+        assert!(build_sector(0, [], &mut b));
         assert_eq!(active(&a, &b).unwrap().seq, 0);
+    }
+
+    #[test]
+    fn free_extents() {
+        let mut big = entry("big", 2);
+        big.extent_count = 3;
+        let es = [entry("a", 0), big, entry("c", 6)];
+        assert_eq!(find_free(es.iter().copied(), 1), Some(1));
+        assert_eq!(find_free(es.iter().copied(), 2), Some(7));
+        assert_eq!(find_free(es.iter().copied(), 127), None);
+        assert_eq!(find_free([].into_iter(), 128), Some(0));
+        assert_eq!(find_free([].into_iter(), 0), None);
+        assert_eq!((extents_for(1), extents_for(EXTENT_SIZE), extents_for(EXTENT_SIZE + 1)), (1, 1, 2));
+        let mut a = [0u8; SECTOR_SIZE];
+        let mut b = [0xFFu8; SECTOR_SIZE];
+        assert!(build_sector(3, [], &mut a));
+        assert_eq!(active_index(&a, &b), Some(0));
+        assert!(build_sector(4, [], &mut b));
+        assert_eq!(active_index(&a, &b), Some(1));
     }
 
     #[test]
@@ -242,7 +299,7 @@ mod tests {
         let mut s = [0u8; SECTOR_SIZE];
         let mut bad = entry("big", 127);
         bad.extent_count = 2;
-        assert!(build_sector(1, &[bad, entry("ok", 0)], &mut s));
+        assert!(build_sector(1, [bad, entry("ok", 0)], &mut s));
         let names: Vec<_> = Catalog::parse(&s).unwrap().entries().map(|e| e.name().to_string()).collect();
         assert_eq!(names, ["ok"]);
     }

@@ -8,7 +8,8 @@
 //!                                   read the log over RTT through probe-rs (used
 //!                                   as a library) and decode it as it arrives.
 //!                                   Commands (`list`, `ps`, `run NAME [A0 [A1]]`,
-//!                                   `kill PID`) from --cmd and from stdin go to
+//!                                   `kill PID`, `install FILE.t5a`, `remove NAME`,
+//!                                   `flashtest`) from --cmd and from stdin go to
 //!                                   the kernel's control channel (doc/14 §3).
 //!   t5log decode [--schemas F]... [--elf E]... [--pretty] [--tcp HOST:PORT | INPUT]
 //!                                   decode a log stream to JSON Lines (default)
@@ -178,7 +179,7 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
             "--json" => pretty = false,
             "--cmd" => {
                 let v = val()?;
-                t5_abi::ctl::parse_line(&v).map_err(|e| format!("--cmd {v}: {e}"))?;
+                t5log::ctl::check_line(&v).map_err(|e| format!("--cmd {v}: {e}"))?;
                 cmds.push(v);
             }
             "--until-done" => until_done = true,
@@ -223,7 +224,7 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
         queue: std::collections::VecDeque::new(),
         next_id: 1,
         pending: std::collections::BTreeSet::new(),
-        sent_any: false,
+        sent_lines: 0,
         done_at: None,
     });
     let mut d = StreamDecoder::new();
@@ -249,7 +250,7 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
                 c.queue.push_back(line);
             }
             // --until-done: every --cmd answered, then one more second of log.
-            if until_done && c.next_id as usize > wanted && c.pending.is_empty() && c.sent_any {
+            if until_done && c.sent_lines >= wanted && c.pending.is_empty() {
                 let t = *c.done_at.get_or_insert_with(std::time::Instant::now);
                 if t.elapsed() > std::time::Duration::from_secs(1) {
                     return t5log::rtt::Turn::Stop;
@@ -269,7 +270,8 @@ struct Ctl {
     queue: std::collections::VecDeque<String>,
     next_id: u32,
     pending: std::collections::BTreeSet<u32>,
-    sent_any: bool,
+    /// Command lines sent so far (an `install` line is many frames).
+    sent_lines: usize,
     done_at: Option<std::time::Instant>,
 }
 
@@ -293,26 +295,22 @@ impl Ctl {
         }
         let mut bytes = Vec::new();
         while let Some(line) = self.queue.pop_front() {
-            let c = match t5_abi::ctl::parse_line(&line) {
-                Ok(c) => c,
+            self.sent_lines += 1;
+            let first = self.next_id;
+            let f = match t5log::ctl::frames(&line, &mut self.next_id) {
+                Ok(f) => f,
                 Err(e) => {
                     eprintln!("t5log: {line}: {e}");
                     continue;
                 }
             };
-            let id = self.next_id;
-            self.next_id += 1;
-            let mut raw = [0u8; t5_abi::ctl::MAX_COMMAND];
-            let Some(n) = t5_abi::ctl::encode(id, &c, &mut raw) else {
-                eprintln!("t5log: {line}: too long");
-                continue;
-            };
-            let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND + 4];
-            let k = t5_abi::log::cobs_encode(&raw[..n], &mut frame).unwrap();
-            bytes.extend_from_slice(&frame[..k]);
-            eprintln!("t5log: -> #{id} {line}");
-            self.pending.insert(id);
-            self.sent_any = true;
+            bytes.extend_from_slice(&f.bytes);
+            if self.next_id - first == 1 {
+                eprintln!("t5log: -> #{first} {line}");
+            } else {
+                eprintln!("t5log: -> #{first}..#{} {line} ({} bytes)", self.next_id - 1, f.bytes.len());
+            }
+            self.pending.extend(f.answered);
         }
         (!bytes.is_empty()).then_some(bytes)
     }

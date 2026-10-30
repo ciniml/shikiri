@@ -51,7 +51,7 @@ SECTIONS
 
     .stack (NOLOAD) : ALIGN(16) {
         __stack_bottom = .;
-        . += 16K;
+        . += 48K;
         __stack_top = .;
     } > RAM
 

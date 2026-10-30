@@ -78,7 +78,7 @@ fn build(args: &[String]) -> Result<(), String> {
     }
 
     let mut sector = [0u8; store::SECTOR_SIZE];
-    if !store::build_sector(1, &entries, &mut sector) {
+    if !store::build_sector(1, entries.iter().copied(), &mut sector) {
         return Err(format!("too many apps (max {})", store::MAX_ENTRIES));
     }
     let mut appmeta = vec![0xFF; store::APPMETA_SIZE as usize];

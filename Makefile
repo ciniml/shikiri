@@ -70,6 +70,8 @@ apps: tools $(UNTRUSTED_KEY)
 	    --name hello-untrusted
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-badabi.t5a --key $(DEV_KEY) --abi 9.0 \
 	    --name hello-badabi
+	@# Not in the store image: installed over the control channel (doc/14 §3).
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter.t5a --key $(DEV_KEY) --name greeter
 	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi))
 
 kernel-virt: apps
@@ -88,6 +90,7 @@ kernel-p4: apps
 	cd kernel && cargo build --release \
 	    --features platform-esp32p4v1 --target-dir target/esp32p4v1
 	mkdir -p $(BUILD) && cp kernel/target/esp32p4v1/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-esp32p4v1.elf
+	tools/check-ram-text.sh $(BUILD)/t5-kernel-esp32p4v1.elf
 
 # ESP app image for the 2nd stage bootloader (rev v1.x only).
 image-p4: kernel-p4
@@ -120,7 +123,8 @@ flash-p4: image-p4 boot
 # library (doc/12 §8). Does not flash. Attaching halts the core briefly and
 # disables the watchdogs (doc/13); RESET=1 resets the chip first to show a
 # whole boot (RTT data is consumed when read). Commands typed on stdin go to
-# the kernel (list, ps, run NAME [A0 [A1]], kill PID; doc/14 §3); CMD="..."
+# the kernel (list, ps, run NAME [A0 [A1]], kill PID, install FILE.t5a,
+# remove NAME, flashtest; doc/14 §3); CMD="..."
 # sends one and exits when it is answered. Ctrl-C to stop.
 rtt: schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
@@ -175,6 +179,16 @@ test-p4emu: emu kernel-p4
 	    --ctl "list" --ctl "run ticker 7 20" --ctl "run spin 9 3000" --ctl "kill 102" \
 	    --ctl "run nosuchapp" --ctl "ps" \
 	    --expect-event ticker.tick --expect-event proc.killed --expect-event ctl.failed \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Installing (M3d): the flash write path on a spare sector, an install,
+	@# running it, a rejected image, removal. Stops on any flash access the
+	@# chip would not survive (doc/14 §5.3).
+	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "flashtest" --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
+	    --ctl "install $(APPS_DIR)/hello-untrusted.t5a" --ctl "remove greeter" --ctl "run greeter" \
+	    --ctl "list" \
+	    --expect-event flash.test --expect-event store.installed --expect-event hello.greet \
+	    --expect-event store.rejected --expect-event store.removed \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

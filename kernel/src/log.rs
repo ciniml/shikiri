@@ -34,7 +34,7 @@ const FRAME_MAX: usize = wire::MAX_RECORD + wire::MAX_RECORD / 254 + 2;
 const RING_SIZE: usize = 16 * 1024;
 const RTT_UP_SIZE: usize = 8 * 1024;
 /// The down-channel carries control commands from the host (doc/14 §3).
-const RTT_DOWN_SIZE: usize = 512;
+const RTT_DOWN_SIZE: usize = 2048;
 
 /// SEGGER RTT buffer descriptor (SEGGER_RTT_BUFFER_UP/DOWN in SEGGER_RTT.h).
 #[repr(C)]

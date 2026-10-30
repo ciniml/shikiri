@@ -54,15 +54,11 @@ impl Monitor<'_> {
             match name {
                 "selftest.result" => self.selftest_done = true,
                 "ctl.ready" if !self.injected && !self.commands.is_empty() => {
-                    for (i, line) in self.commands.iter().enumerate() {
-                        let id = i as u32 + 1;
-                        let c = t5_abi::ctl::parse_line(line).expect("checked in parse_args");
-                        let mut raw = [0u8; t5_abi::ctl::MAX_COMMAND];
-                        let n = t5_abi::ctl::encode(id, &c, &mut raw).expect("command too long");
-                        let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND + 4];
-                        let k = t5_abi::log::cobs_encode(&raw[..n], &mut frame).unwrap();
-                        m.rtt_down_pending.extend(&frame[..k]);
-                        self.pending.insert(id);
+                    let mut id = 1;
+                    for line in &self.commands {
+                        let f = t5log::ctl::frames(line, &mut id).expect("checked in parse_args");
+                        m.rtt_down_pending.extend(&f.bytes);
+                        self.pending.extend(f.answered);
                     }
                     self.injected = true;
                 }
@@ -175,7 +171,7 @@ fn parse_args() -> Result<Opts, String> {
             "--expect-prev-event" => o.expect_prev_event = Some(val()?),
             "--ctl" => {
                 let v = val()?;
-                t5_abi::ctl::parse_line(&v).map_err(|e| format!("--ctl {v}: {e}"))?;
+                t5log::ctl::frames(&v, &mut 0).map_err(|e| format!("--ctl {v}: {e}"))?;
                 o.ctl.push(v);
             }
             "--expect-event" => o.expect_events.push(val()?),
@@ -416,5 +412,16 @@ fn describe(s: &Stop) -> String {
             "flash window access at {addr:#010x} (pc={pc:#010x}) while the L2 cache was suspended \
              (the real core would hang; the code must run from RAM)"
         ),
+        Stop::FlashOpWithL2Active { pc } => format!(
+            "ROM flash erase/write called from {pc:#010x} with the L2 cache running \
+             (the cache would read flash while it changes)"
+        ),
+        Stop::StaleFlashRead { addr, pc } => format!(
+            "read of {addr:#010x} (pc={pc:#010x}) after the flash there changed, without invalidating \
+             the L1 D-cache and L2 (stale data on real hardware)"
+        ),
+        Stop::FlashWriteProtected { offset } => {
+            format!("flash erase/write at offset {offset:#x}, below the app store (doc/14 §5.2)")
+        }
     }
 }

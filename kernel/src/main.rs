@@ -13,6 +13,7 @@
 #![no_main]
 
 mod arch;
+mod flash;
 mod loader;
 mod log;
 mod platform;
@@ -128,7 +129,7 @@ pub extern "C" fn kmain() -> ! {
     #[cfg(feature = "test-lockup")]
     lockup_test();
     match store {
-        Some(store) if Current::SERVE => serve(&store),
+        Some(mut store) if Current::SERVE => serve(&mut store),
         _ => Current::exit(failures),
     }
 }
@@ -149,7 +150,7 @@ fn next_pid() -> u32 {
 /// Runs apps for good: starts the autostart apps, then starts and stops
 /// apps on commands from the host (RTT down-channel, doc/14 §3). Results
 /// are log events.
-fn serve(store: &store::Store) -> ! {
+fn serve(store: &mut store::Store) -> ! {
     let mut s = sched::Scheduler::new();
     for e in store.entries().filter(|e| e.flags & t5_abi::t5a::tlv::FLAG_AUTOSTART as u8 != 0) {
         let name = e.name();
@@ -157,7 +158,8 @@ fn serve(store: &store::Store) -> ! {
             event!(Error, "ctl.autostart_failed", name = name, error = why);
         }
     }
-    event!(Info, "ctl.ready", slots = sched::MAX_PROCS as u32);
+    let (stack_size, stack_used) = rv::stack_usage();
+    event!(Info, "ctl.ready", slots = sched::MAX_PROCS as u32, stack_size = stack_size, stack_used = stack_used);
     loop {
         s.run(None, &mut |s| {
             s.reap();
@@ -169,7 +171,7 @@ fn serve(store: &store::Store) -> ! {
     }
 }
 
-fn handle(s: &mut sched::Scheduler, store: &store::Store, frame: &[u8]) {
+fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
     use t5_abi::ctl::Command;
     let Some((id, cmd)) = t5_abi::ctl::decode(frame) else {
         event!(Warn, "ctl.bad_command", len = frame.len() as u32);
@@ -191,6 +193,8 @@ fn handle(s: &mut sched::Scheduler, store: &store::Store, frame: &[u8]) {
                 event!(Info, "proc.info", pid = p.pid, name = p.name, state = state);
                 n += 1;
             }
+            let (size, used) = rv::stack_usage();
+            event!(Info, "kernel.stack", size = size, used = used);
             Ok(n)
         }
         Command::Run { name, arg0, arg1 } => start(s, store, name, arg0, arg1),
@@ -201,6 +205,15 @@ fn handle(s: &mut sched::Scheduler, store: &store::Store, frame: &[u8]) {
                 Err("no such process")
             }
         }
+        Command::InstallBegin { length } => store.install_begin(length),
+        // Answered only on failure (doc/14 §3).
+        Command::InstallData { offset, data } => match store.install_data(offset, data) {
+            Ok(()) => return,
+            Err(e) => Err(e),
+        },
+        Command::InstallEnd => store.install_end().map(|e| e.length),
+        Command::Remove { name } => store.remove(name),
+        Command::FlashTest => store.flash_test(),
     };
     match result {
         Ok(value) => event!(Info, "ctl.done", request_id = id, cmd = cmd.name(), ok = true, value = value),

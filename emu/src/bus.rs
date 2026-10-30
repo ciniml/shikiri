@@ -38,6 +38,17 @@ pub const ROM_SIZE: u32 = 0x0002_0000;
 const PERIPH: std::ops::Range<u32> = 0x5000_0000..0x5020_0000;
 const CLIC: std::ops::Range<u32> = 0x2080_0000..0x2080_2000;
 
+/// Flash program page and erase sector.
+pub const FLASH_PAGE: u32 = 256;
+pub const FLASH_SECTOR: u32 = 4096;
+/// Where the ROM keeps its pointer to the flash chip parameters on rev v1.x
+/// (esp32p4.rom.ld:169), and where the emulator puts the parameters the
+/// bootloader would have set (esp_rom_spiflash_config_param): JEDEC id and
+/// size. The id is a made-up placeholder.
+pub const ROM_SPIFLASH_LEGACY_DATA: u32 = 0x4FF3_FFE8;
+const EMU_FLASH_CHIP: u32 = 0x4FF3_FFC0;
+pub const EMU_FLASH_DEVICE_ID: u32 = 0x00E5_E018;
+
 pub struct Bus {
     pub cycles: u64,
     pub cpu_hz: u64,
@@ -50,6 +61,13 @@ pub struct Bus {
     pub l2_suspended: bool,
     /// First flash-window access made while L2 was suspended.
     pub flash_violation: Option<u32>,
+    /// 256-byte pages of `phys_flash` changed by the ROM erase/write
+    /// functions and not yet invalidated in the L1 D-cache / the L2 cache.
+    /// Reading one through the window would return stale data on the chip.
+    stale_l1d: Vec<bool>,
+    stale_l2: Vec<bool>,
+    /// First window read of a stale page.
+    pub stale_read: Option<u32>,
     pub l2mem: Vec<u8>,
     tcm: Vec<u8>,
     pub lp_sram: Vec<u8>,
@@ -98,11 +116,84 @@ impl Bus {
             mmu_index: 0,
             l2_suspended: false,
             flash_violation: None,
+            stale_l1d: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
+            stale_l2: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
+            stale_read: None,
             l2mem,
             tcm: vec![0; TCM_SIZE as usize],
             lp_sram,
             cache: Cache::new(cache_mode, L2MEM_BASE, L2MEM_SIZE),
             periph: Peripherals::default(),
+        }
+        .with_flash_chip()
+    }
+
+    fn with_flash_chip(mut self) -> Bus {
+        for (addr, v) in [
+            (ROM_SPIFLASH_LEGACY_DATA, EMU_FLASH_CHIP),
+            (EMU_FLASH_CHIP, EMU_FLASH_DEVICE_ID),
+            (EMU_FLASH_CHIP + 4, PHYS_FLASH_SIZE as u32),
+            (EMU_FLASH_CHIP + 8, 0x1_0000),
+            (EMU_FLASH_CHIP + 12, FLASH_SECTOR),
+            (EMU_FLASH_CHIP + 16, FLASH_PAGE),
+        ] {
+            wr(&mut self.l2mem, addr - L2MEM_BASE, 4, v);
+        }
+        self
+    }
+
+    /// `esp_rom_spiflash_erase_sector`: the 4 KiB sector becomes 0xFF.
+    pub fn flash_erase_sector(&mut self, sector: u32) -> u32 {
+        let o = sector as usize * FLASH_SECTOR as usize;
+        if o >= PHYS_FLASH_SIZE {
+            return 1;
+        }
+        self.phys_flash[o..o + FLASH_SECTOR as usize].fill(0xFF);
+        self.mark_stale(o as u32, FLASH_SECTOR);
+        0
+    }
+
+    /// `esp_rom_spiflash_write`: NOR programming only clears bits, so data
+    /// written over unerased flash comes out ANDed with what was there.
+    /// `src` is read through the bus, so a source in the flash window while
+    /// L2 is suspended is a violation like any other access.
+    pub fn flash_write(&mut self, dest: u32, src: u32, len: u32) -> u32 {
+        if dest % 4 != 0 || len % 4 != 0 || within(dest, len, 0, PHYS_FLASH_SIZE as u32).is_none() {
+            return 1;
+        }
+        for i in 0..len {
+            let Some(b) = self.read(src + i, 1) else { return 1 };
+            self.phys_flash[(dest + i) as usize] &= b as u8;
+        }
+        self.mark_stale(dest, len);
+        0
+    }
+
+    fn mark_stale(&mut self, paddr: u32, len: u32) {
+        for p in paddr / FLASH_PAGE..(paddr + len).div_ceil(FLASH_PAGE) {
+            self.stale_l1d[p as usize] = true;
+            self.stale_l2[p as usize] = true;
+        }
+    }
+
+    /// Cache_Invalidate_Addr over the flash window: the pages of
+    /// `[addr, addr + len)` that are mapped are fresh again in the caches
+    /// named by `map` (bit 4 = L1 D, bit 5 = L2).
+    pub fn invalidate_window(&mut self, map: u32, addr: u32, len: u32) {
+        let end = addr.saturating_add(len).min(FLASH_BASE + FLASH_WINDOW_SIZE);
+        let mut a = addr.max(FLASH_BASE) & !(FLASH_PAGE - 1);
+        while a < end {
+            let entry = self.mmu[((a - FLASH_BASE) >> 16) as usize];
+            if entry & MMU_VALID != 0 {
+                let p = ((((entry & 0x7FF) << 16) | (a & 0xFFFF)) / FLASH_PAGE) as usize;
+                if map & (1 << 4) != 0 {
+                    self.stale_l1d[p] = false;
+                }
+                if map & (1 << 5) != 0 {
+                    self.stale_l2[p] = false;
+                }
+            }
+            a += FLASH_PAGE;
         }
     }
 
@@ -172,7 +263,12 @@ impl Bus {
             return None;
         }
         let paddr = ((entry & 0x7FF) << 16) | (addr & 0xFFFF);
-        within(paddr, size, 0, PHYS_FLASH_SIZE as u32).map(|o| rd(&self.phys_flash, o, size))
+        let o = within(paddr, size, 0, PHYS_FLASH_SIZE as u32)?;
+        let p = (paddr / FLASH_PAGE) as usize;
+        if self.stale_l1d[p] || self.stale_l2[p] {
+            self.stale_read.get_or_insert(addr);
+        }
+        Some(rd(&self.phys_flash, o, size))
     }
 
     /// Writes an image into the physical flash (`--flash FILE@OFFSET`).
@@ -282,5 +378,57 @@ impl Bus {
 
     pub fn is_rom(addr: u32) -> bool {
         within(addr, 2, ROM_BASE, ROM_SIZE).is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Maps flash 0x42_0000 (one 64 KiB page) at 0x4142_0000, as the kernel
+    /// does, and returns that address.
+    fn mapped(bus: &mut Bus) -> u32 {
+        let vaddr = 0x4142_0000;
+        assert!(bus.write(MMU_ITEM_INDEX, 4, (vaddr - FLASH_BASE) >> 16));
+        assert!(bus.write(MMU_ITEM_CONTENT, 4, 0x42 | MMU_VALID));
+        vaddr
+    }
+
+    #[test]
+    fn erase_and_write_need_invalidation() {
+        let mut bus = Bus::new(40_000_000, cache::Mode::Off, 1);
+        let v = mapped(&mut bus);
+        bus.load_phys_flash(0x42_0000, &[0x12; 8]).unwrap();
+        assert_eq!(bus.read(v, 4), Some(0x1212_1212));
+
+        assert_eq!(bus.flash_erase_sector(0x420), 0);
+        bus.read(v, 4);
+        assert_eq!(bus.stale_read.take(), Some(v));
+        // L1 D alone is not enough: L2 still has the old line.
+        bus.invalidate_window(1 << 4, v, FLASH_SECTOR);
+        bus.read(v, 4);
+        assert_eq!(bus.stale_read.take(), Some(v));
+        bus.invalidate_window(1 << 5, v, FLASH_SECTOR);
+        assert_eq!(bus.read(v, 4), Some(0xFFFF_FFFF));
+        assert_eq!(bus.stale_read, None);
+
+        // Programming only clears bits: a second write ANDs.
+        let src = L2MEM_BASE + 0x1000;
+        bus.write(src, 4, 0x0F0F_F0F0);
+        assert_eq!(bus.flash_write(0x42_0000, src, 4), 0);
+        bus.write(src, 4, 0x00FF_FFFF);
+        assert_eq!(bus.flash_write(0x42_0000, src, 4), 0);
+        bus.invalidate_window((1 << 4) | (1 << 5), v, 4);
+        assert_eq!(bus.read(v, 4), Some(0x000F_F0F0));
+        // Unaligned writes fail like the ROM's.
+        assert_eq!(bus.flash_write(0x42_0002, src, 4), 1);
+    }
+
+    #[test]
+    fn rom_flash_chip_parameters() {
+        let mut bus = Bus::new(40_000_000, cache::Mode::Off, 1);
+        let p = bus.read(ROM_SPIFLASH_LEGACY_DATA, 4).unwrap();
+        assert_eq!(bus.read(p, 4), Some(EMU_FLASH_DEVICE_ID));
+        assert_eq!(bus.read(p + 4, 4), Some(PHYS_FLASH_SIZE as u32));
     }
 }
