@@ -18,6 +18,8 @@ const USJ_EP1: usize = USJ_BASE;
 const USJ_EP1_CONF: usize = USJ_BASE + 0x4;
 const USJ_WR_DONE: u32 = 1 << 0;
 const USJ_SERIAL_IN_EP_DATA_FREE: u32 = 1 << 1;
+/// EP1_CONF.SERIAL_OUT_EP_DATA_AVAIL: the host sent bytes (usb_serial_jtag_reg.h:50).
+const USJ_SERIAL_OUT_EP_DATA_AVAIL: u32 = 1 << 2;
 /// How long to wait for room in the FIFO before deciding that nobody reads
 /// the CDC port. Longer than the host's 1 ms USB polling interval: with a
 /// poll-count limit (50,000) bursts were dropped while a host was reading
@@ -469,6 +471,15 @@ impl Platform for Esp32p4v1 {
         }
         unsafe { wr(USJ_EP1_CONF, USJ_WR_DONE) };
         all
+    }
+
+    fn console_read(buf: &mut [u8]) -> usize {
+        let mut n = 0;
+        while n < buf.len() && unsafe { rd(USJ_EP1_CONF) } & USJ_SERIAL_OUT_EP_DATA_AVAIL != 0 {
+            buf[n] = unsafe { rd(USJ_EP1) } as u8;
+            n += 1;
+        }
+        n
     }
 
     fn sync_code(addr: usize, len: usize) {

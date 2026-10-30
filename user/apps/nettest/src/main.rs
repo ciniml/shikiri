@@ -6,6 +6,10 @@
 //! over one TCP connection (this app drives both ends), compared by a
 //! 64-bit FNV-1a hash of what was sent and what arrived.
 //!
+//! With `mode` 1 it is instead a TCP echo server on port 7777 (for a PC on
+//! the host link, doc/21), serving one connection after another until
+//! killed.
+//!
 //! Built with `--permit svc:net`. Exit 0 if everything held, otherwise the
 //! number of the failed check.
 
@@ -17,8 +21,9 @@ t5_rt::entry!(main);
 const LOCALHOST: u32 = ipv4(127, 0, 0, 1);
 const TCP_BYTES: usize = 1 << 20;
 
-fn main(_: usize, _: usize) -> usize {
-    match run() {
+fn main(mode: usize, _: usize) -> usize {
+    let r = if mode == 1 { echo_server() } else { run() };
+    match r {
         Ok(()) => 0,
         Err(check) => {
             event!(Error, "nettest.failed", check = check);
@@ -44,19 +49,52 @@ fn byte(i: usize) -> u8 {
     (i ^ (i >> 8) ^ (i >> 16)) as u8
 }
 
-fn run() -> Result<(), u32> {
-    // The service may still be starting: try for up to 3 s.
+/// Connects to the service, which may still be starting (up to 3 s).
+fn connect() -> Result<Net, u32> {
     let mut tries = 0;
-    let mut net = loop {
+    loop {
         match Net::connect() {
-            Ok(n) => break n,
+            Ok(n) => return Ok(n),
             Err(_) if tries < 30 => {
                 tries += 1;
                 sleep_ms(100);
             }
             Err(_) => return Err(1),
         }
-    };
+    }
+}
+
+fn echo_server() -> Result<(), u32> {
+    let mut net = connect()?;
+    let mut buf = [0u8; 4096];
+    let mut served = 0u32;
+    loop {
+        let s = net.tcp_listen(7777).map_err(|_| 30u32)?;
+        event!(Info, "nettest.listening", port = 7777u32, served = served);
+        // A listening socket becomes the connection (smoltcp).
+        loop {
+            match net.tcp_state(s).map_err(|_| 31u32)?.0 {
+                t5_rt::net::state::ESTABLISHED => break,
+                _ => sleep_ms(5),
+            }
+        }
+        let mut bytes = 0u32;
+        loop {
+            let n = net.recv(s, &mut buf).map_err(|_| 32u32)?;
+            if n == 0 {
+                break;
+            }
+            net.send_all(s, &buf[..n]).map_err(|_| 33u32)?;
+            bytes += n as u32;
+        }
+        net.close(s).map_err(|_| 34u32)?;
+        served += 1;
+        event!(Info, "nettest.echoed", bytes = bytes);
+    }
+}
+
+fn run() -> Result<(), u32> {
+    let mut net = connect()?;
 
     // UDP: a -> b, b echoes back to a.
     let a = net.udp_bind(5000).map_err(|_| 2u32)?;

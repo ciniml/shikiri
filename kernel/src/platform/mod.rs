@@ -181,6 +181,11 @@ pub trait Platform {
     fn i2c_scan() -> Result<u32, &'static str> {
         Err("no I2C")
     }
+    /// Reads what the console line has received (non-blocking); 0 if
+    /// nothing or no input.
+    fn console_read(_buf: &mut [u8]) -> usize {
+        0
+    }
     /// Restarts the system watchdog (no-op where there is none).
     fn feed_watchdog() {}
     /// Turns the system watchdog on again (a debug probe turns it off when

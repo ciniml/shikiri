@@ -23,8 +23,8 @@ pub const ABI_MAJOR: u16 = 0;
 /// read/write and the channel object. Minor 7 (M6c, doc/17 §6): the
 /// display and touch objects. Minor 8 (N0a, doc/19): service channels
 /// (`listen:`/`svc:`). Minor 9 (N0b, doc/19 §2): shared memory. Minor 10
-/// (M7c, doc/18 §3): the `sd` object.
-pub const ABI_MINOR: u16 = 10;
+/// (M7c, doc/18 §3): the `sd` object. Minor 11 (N2a, doc/21): `netdev`.
+pub const ABI_MINOR: u16 = 11;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -139,6 +139,16 @@ pub mod shm {
     pub const fn grant_arg(chan: u32, offset: usize, len: usize) -> u64 {
         chan as u64 | ((offset / GRAIN) as u64) << 8 | ((len / GRAIN) as u64) << 32
     }
+}
+
+/// A network link for the network service (doc/21): `read` takes one
+/// received IP packet, `write` sends one. Only `netdev:host` so far: IP over
+/// the console line to the PC.
+pub mod netdev {
+    pub const HOST: &str = "netdev:host";
+    pub const MTU: usize = 1500;
+    /// `wait` event: packets are waiting (value = how many).
+    pub const READABLE: usize = 1;
 }
 
 /// The SD card as sectors (doc/18 §3), for the file service: one opener at

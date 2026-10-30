@@ -1,12 +1,15 @@
 #![no_std]
 #![no_main]
 
-//! The network service (N1, doc/research/net-stack.md): smoltcp in U-mode,
-//! with only the loopback link (127.0.0.0/8) so far. Clients on `svc:net`
+//! The network service (N1/N2a, doc/20, doc/21): smoltcp in U-mode. Links:
+//! loopback (127.0.0.0/8) and, if the kernel offers it, the host link to the
+//! PC (`netdev:host`, 10.55.0.2/24). One smoltcp interface runs over a
+//! `Links` device that sends each packet to the link its destination
+//! belongs to (the place for forwarding later, N3). Clients on `svc:net`
 //! get a 64 KiB slice of shared memory for data and use TCP and UDP sockets
 //! through `t5_abi::net` requests. No allocator: socket buffers are static.
 //!
-//! Built with `--permit shm --permit listen:net`.
+//! Built with `--permit shm --permit listen:net --permit netdev:host`.
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -14,7 +17,7 @@ use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 use t5_rt::net::{self as proto, op, state, status};
-use t5_rt::{Channel, Error, Listener, Shm, chan, event, time_ns, wait_raw};
+use t5_rt::{Channel, Error, Handle, Listener, Shm, chan, event, netdev, rights, time_ns, wait_raw};
 
 t5_rt::entry!(main);
 
@@ -101,6 +104,80 @@ impl Device for Loopback {
     }
 }
 
+// ---- the links: loopback and the host link, behind one device ----
+
+/// The host link's address and network (doc/21).
+const HOST_ADDR: [u8; 4] = [10, 55, 0, 2];
+const HOST_PREFIX: u8 = 24;
+
+struct Links {
+    lo: &'static mut Loopback,
+    /// `netdev:host`, if the kernel has it.
+    host: Option<Handle>,
+    to_host: u32,
+    from_host: u32,
+}
+
+/// A frame for the stack: copied out of either link.
+struct LinkRx {
+    frame: [u8; MTU],
+    len: usize,
+}
+
+impl RxToken for LinkRx {
+    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
+        f(&self.frame[..self.len])
+    }
+}
+
+/// A frame from the stack: built here, then sent by its destination.
+struct LinkTx<'a>(&'a mut Links);
+
+impl TxToken for LinkTx<'_> {
+    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
+        let mut buf = [0u8; MTU];
+        let r = f(&mut buf[..len]);
+        let links = self.0;
+        // IPv4 destination: bytes 16-19. 127/8 stays on the Tab5.
+        if len >= 20 && buf[16] != 127
+            && let Some(h) = &links.host
+        {
+            if h.write(&buf[..len]).is_ok() {
+                links.to_host += 1;
+            }
+            return r;
+        }
+        Tx(links.lo).consume(len, |out| out.copy_from_slice(&buf[..len]));
+        r
+    }
+}
+
+impl Device for Links {
+    type RxToken<'a> = LinkRx;
+    type TxToken<'a> = LinkTx<'a>;
+
+    fn receive(&mut self, t: Instant) -> Option<(LinkRx, LinkTx<'_>)> {
+        if let Some((rx, _)) = self.lo.receive(t) {
+            let mut out = LinkRx { frame: [0; MTU], len: rx.len };
+            out.frame[..rx.len].copy_from_slice(&rx.frame[..rx.len]);
+            return Some((out, LinkTx(self)));
+        }
+        let h = self.host.as_ref()?;
+        let mut out = LinkRx { frame: [0; MTU], len: 0 };
+        out.len = h.read(&mut out.frame).ok()?;
+        self.from_host += 1;
+        Some((out, LinkTx(self)))
+    }
+
+    fn transmit(&mut self, _: Instant) -> Option<LinkTx<'_>> {
+        (self.lo.count < RING).then_some(LinkTx(self))
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        self.lo.capabilities()
+    }
+}
+
 // ---- socket storage (static: there is no allocator) ----
 
 static mut TCP_RX: [[u8; TCP_BUF]; SOCKETS] = [[0; TCP_BUF]; SOCKETS];
@@ -150,7 +227,7 @@ struct Slot {
 
 struct Stack {
     iface: Interface,
-    dev: &'static mut Loopback,
+    dev: Links,
     sockets: SocketSet<'static>,
     slots: [Option<Slot>; SOCKETS],
     next_port: u16,
@@ -164,8 +241,8 @@ impl Stack {
     /// Runs the stack until nothing moves.
     fn poll(&mut self) {
         for _ in 0..256 {
-            let r = self.iface.poll(now(), &mut *self.dev, &mut self.sockets);
-            if r == PollResult::None && self.dev.is_empty() {
+            let r = self.iface.poll(now(), &mut self.dev, &mut self.sockets);
+            if r == PollResult::None && self.dev.lo.is_empty() {
                 break;
             }
         }
@@ -356,8 +433,10 @@ fn run() -> Result<(), u32> {
     let pool = pool_shm.map().map_err(|_| 2u32)?;
     let l = Listener::open(proto::SERVICE).map_err(|_| 3u32)?;
 
-    let dev: &'static mut Loopback = unsafe { &mut *core::ptr::addr_of_mut!(DEV) };
-    let iface = Interface::new(Config::new(HardwareAddress::Ip), &mut *dev, now());
+    let lo: &'static mut Loopback = unsafe { &mut *core::ptr::addr_of_mut!(DEV) };
+    let host = Handle::open(netdev::HOST, rights::READ | rights::WRITE | rights::WAIT).ok();
+    let mut dev = Links { lo, host, to_host: 0, from_host: 0 };
+    let iface = Interface::new(Config::new(HardwareAddress::Ip), &mut dev, now());
     let mut stack = Stack {
         iface,
         dev,
@@ -365,19 +444,33 @@ fn run() -> Result<(), u32> {
         slots: [None; SOCKETS],
         next_port: 49152,
     };
+    let has_host = stack.dev.host.is_some();
     stack.iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+        if has_host {
+            let [x, y, z, w] = HOST_ADDR;
+            let _ = a.push(IpCidr::new(IpAddress::v4(x, y, z, w), HOST_PREFIX));
+        }
     });
     event!(Info, "net.ready", link = "lo", addr = "127.0.0.1/8", sockets = SOCKETS as u32);
+    if has_host {
+        event!(Info, "net.link", link = "host", addr = "10.55.0.2/24", mtu = netdev::MTU as u32);
+    }
 
     let mut clients: [Option<Channel>; CLIENTS] = [const { None }; CLIENTS];
     let mut msg = [0u8; chan::MSG_MAX];
     loop {
         stack.poll();
-        let mut hs = [0u32; 1 + CLIENTS];
-        let mut who = [0usize; 1 + CLIENTS];
+        // The listener, the host link (packets arriving), the clients.
+        let mut hs = [0u32; 2 + CLIENTS];
+        let mut who = [0usize; 2 + CLIENTS];
         hs[0] = l.0.raw();
         let mut n = 1;
+        let host_index = stack.dev.host.as_ref().map(|h| {
+            hs[1] = h.raw();
+            n = 2;
+            1
+        });
         for (i, c) in clients.iter().enumerate() {
             if let Some(c) = c {
                 hs[n] = c.0.raw();
@@ -395,6 +488,9 @@ fn run() -> Result<(), u32> {
             Err(Error::TimedOut) => continue,
             Err(_) => return Err(4),
         };
+        if Some(ev.index) == host_index {
+            continue; // the next poll takes the packets
+        }
         if ev.index == 0 {
             let Ok(c) = l.accept() else { continue };
             let Some(i) = clients.iter().position(Option::is_none) else { continue };

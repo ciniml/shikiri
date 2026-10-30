@@ -3,7 +3,7 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, chan, display, rights, sd, shm, svc, timer, touch};
+use t5_abi::{Error, MAX_HANDLES, chan, display, netdev, rights, sd, shm, svc, timer, touch};
 
 use crate::channel;
 use crate::screen::{DisplayHandle, TouchHandle};
@@ -22,6 +22,7 @@ pub enum Object {
     Listener(channel::Listener),
     Shm(ShmHandle),
     Sd(SdHandle),
+    NetDev(crate::hostlink::NetDev),
 }
 
 /// The SD card's sectors (doc/18 §3): one handle at a time.
@@ -86,6 +87,9 @@ impl Object {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
             n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT)),
             n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open()?), rights::READ | rights::WAIT)),
+            n if n == netdev::HOST.as_bytes() => {
+                Ok((Object::NetDev(crate::hostlink::NetDev::open()?), rights::READ | rights::WRITE | rights::WAIT))
+            }
             n if n == sd::NAME.as_bytes() => Ok((Object::Sd(SdHandle::open()?), rights::READ | rights::WRITE | rights::CTL)),
             n if n == shm::NAME.as_bytes() => {
                 if !crate::shm::available() {
@@ -229,7 +233,7 @@ impl Table {
                 shm::MAP => s.window.map(|w| w.addr()).ok_or(Error::Invalid),
                 _ => Err(Error::NoSupport), // GRANT: `grant`
             },
-            Object::Channel(_) | Object::Touch(_) => Err(Error::NoSupport),
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) => Err(Error::NoSupport),
         }
     }
 
@@ -306,6 +310,7 @@ impl Table {
         match &mut self.get(h, rights::WRITE)?.object {
             Object::Channel(e) => e.write(buf),
             Object::Sd(s) => s.write(buf),
+            Object::NetDev(d) => d.write(buf),
             _ => Err(Error::NoSupport),
         }
     }
@@ -316,6 +321,7 @@ impl Table {
             Object::Channel(e) => e.read(buf),
             Object::Touch(t) => t.read(buf),
             Object::Sd(s) => s.read(buf),
+            Object::NetDev(d) => d.read(buf),
             _ => Err(Error::NoSupport),
         }
     }
@@ -342,6 +348,7 @@ impl Table {
             Object::Display(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::Touch(t) => t.poll().map(|(ev, v)| (i, ev, v)),
             Object::Listener(l) => l.poll().map(|(ev, v)| (i, ev, v)),
+            Object::NetDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::Shm(_) | Object::Sd(_) => None,
         })
     }

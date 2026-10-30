@@ -123,6 +123,7 @@ impl Scheduler {
         loop {
             Current::feed_watchdog();
             Current::display_service();
+            crate::hostlink::poll();
             let now = Current::now();
             if limit.is_none() && now >= next_poll {
                 poll(self);

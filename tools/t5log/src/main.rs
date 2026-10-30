@@ -23,6 +23,8 @@
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
+mod hostlink;
+
 use t5log::{BootContext, Item, SchemaTable, StreamDecoder};
 
 const USAGE: &str = "usage:
@@ -32,7 +34,8 @@ const USAGE: &str = "usage:
             [--chip esp32p4] [--chip-description YAML] [--reset] [--json] \
             [--cmd COMMAND]... [--until-done]
   t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]
-  t5log status --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML]";
+  t5log status --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML]
+  t5log hostlink --port SERIAL --tun NAME [--schemas FILE]... [--elf ELF]...";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,6 +43,7 @@ fn main() -> ExitCode {
         Some("schemas") => cmd_schemas(&args[1..]),
         Some("check") => cmd_check(&args[1..]),
         Some("decode") => cmd_decode(&args[1..]),
+        Some("hostlink") => cmd_hostlink(&args[1..]),
         Some("rtt") => cmd_rtt(&args[1..]),
         Some("status") => cmd_status(&args[1..]),
         _ => Err(USAGE.to_string()),
@@ -148,6 +152,57 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         print_item(&mut out, &t, &mut ctx, &item, pretty)?;
     }
     Ok(())
+}
+
+/// `t5log hostlink` (doc/21): IP between the Tab5's console line and a TUN
+/// device; the log on the same line is printed.
+fn cmd_hostlink(args: &[String]) -> Result<(), String> {
+    let mut t = SchemaTable::new();
+    let (mut port, mut tun_name) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--port" => port = Some(val()?),
+            "--tun" => tun_name = Some(val()?),
+            "--schemas" => {
+                t.add_file(&val()?)?;
+            }
+            "--elf" => {
+                t.add_elf(&val()?)?;
+            }
+            s => return Err(format!("unknown option {s}\n{USAGE}")),
+        }
+    }
+    let (port, tun_name) = port.zip(tun_name).ok_or(USAGE)?;
+    let mut serial = hostlink::open_serial(&port)?;
+    let mut tun = hostlink::open_tun(&tun_name)?;
+    let counters = std::sync::Arc::new(hostlink::Counters { to_tab5: 0.into(), from_tab5: 0.into() });
+    hostlink::spawn_uplink(
+        tun.try_clone().map_err(|e| e.to_string())?,
+        serial.try_clone().map_err(|e| e.to_string())?,
+        counters.clone(),
+    );
+    eprintln!("t5log: host link {port} <-> {tun_name}");
+    let mut demux = hostlink::Demux::new();
+    let mut d = StreamDecoder::new();
+    let mut ctx = BootContext::new();
+    let mut out = std::io::stdout().lock();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match serial.read(&mut buf) {
+            Ok(0) => return Err(format!("{port}: closed")),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("{port}: {e}")),
+        };
+        let mut log = Vec::new();
+        demux.push(&buf[..n], &mut tun, &counters, &mut log);
+        for item in d.push(&log) {
+            print_item(&mut out, &t, &mut ctx, &item, true)?;
+        }
+        out.flush().map_err(|e| e.to_string())?;
+    }
 }
 
 #[cfg(not(feature = "rtt"))]

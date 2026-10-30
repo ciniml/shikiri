@@ -1467,6 +1467,7 @@ version = "0.1.0"
 name = "t5log"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "object 0.37.3",
  "probe-rs",
  "probe-rs-espressif",

@@ -12,6 +12,7 @@ default = ["rtt"]
 rtt = ["dep:probe-rs", "dep:probe-rs-espressif"]
 
 [dependencies]
+libc = "0.2"
 t5-abi = { path = "../../abi" }
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
 # Pinned to the commit reviewed in doc/13 (the same as `make probe-rs`).
