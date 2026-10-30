@@ -245,3 +245,10 @@
 - アプリ `echo`（`--permit chan:echo`）と自己試験 M5c（echo のサーバ・クライアントと spin を同時に）。`echo` は省略できる（ストアになければ M5c を飛ばす。実機のストアには、インストールするまで入っていない）。
 - 結果（QEMU）: クライアントは、`chan:secret` が `Denied`、3 つ目の `open` が `Busy`、257 バイトが `Size`、`ctl` が `Denied`、キューを埋めると 4 つ目のあとで `Busy`、長さ 0 のバッファでの `read` が `Size`（メッセージは残る）、を確かめたうえで 44 個のメッセージ（0〜256 バイト、計 4711 バイト）の往復を確かめた。サーバはクライアントの終了で `PEER_CLOSED` を受けて終わった。t5emu でも同じ。
 - 実機（2026-10-31、[logs/m5c-chan-tab5-20261031.txt](logs/m5c-chan-tab5-20261031.txt)）: 利用者が `install build/apps/echo.t5a` を実行し、リセット後の自己試験で M5c が合格した（`failures=0`）。QEMU と同じく、拒否・Busy・Size の確かめのあと 44 個（計 4711 バイト）の往復。クライアントの `chan.open` から `echo.done` まで約 1.8 ms（360MHz）。サーバは `PEER_CLOSED` で終わり、両端とも `dropped=0`。
+
+### 6.11 改ざん・ダウングレードの拒否（実機、2026-10-31）
+- `make kupdate … T5K=build/kupdate/tampered.t5k`（開発版の上で）: `bad signature` で拒否。otadata は変わらず、再起動後も開発版。
+- `good.t5k`（secure_version 1）に更新して確定したあと、`downgrade.t5k`（開発版、secure_version 0。`kupdate-test-kernels` で作るようにした）: `kupdate.downgrade offered=0 running=1`、`secure_version rollback` で拒否。
+- **見つけた穴**: 拒否したパッケージは、空きスロットに書かれたまま残っていた。ESP のイメージとしては正しいので、のちに動いているカーネルが invalid になると、ブートローダは「もう一方のスロット」としてそれを起動しうる（ダウングレードの抜け道）。そこで、`install_end` で拒否したら、そのスロットの最初のセクタを消すようにした（`kupdate.slot_erased`）。ブートローダはイメージのヘッダが読めないスロットを選ばない。t5emu の kupdate の試験でも `kupdate.slot_erased` を確かめる。
+- 修正後、開発版を `make flash-kernel-p4` で ota_0 に戻し、tampered を送った: `kupdate.slot_erased slot=1 ok=true` のあと、`kinfo` で `kupdate.slot_empty slot=1`。
+- 途中で切れた送信（`install_data` の失敗や中断）は、イメージの末尾の SHA-256 が合わないのでブートローダが起動しない。消してはいない。

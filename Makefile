@@ -136,6 +136,9 @@ kupdate-test-kernels: image-p4
 	$(call test_kernel,bad-selftest,test-bad-selftest)
 	$(call test_kernel,bad-panic,test-bad-panic)
 	$(ELF2T5A) otadata $(KUPDATE_DIR)/otadata-pending.bin 1 1
+	@# The development kernel (secure_version 0): refused once a test kernel
+	@# (secure_version 1) runs.
+	cp $(KERNEL_T5K) $(KUPDATE_DIR)/downgrade.t5k
 	cp $(KERNEL_T5K) $(KUPDATE_DIR)/tampered.t5k
 	printf 'X' | dd of=$(KUPDATE_DIR)/tampered.t5k bs=1 seek=100 conv=notrunc status=none
 
@@ -277,7 +280,7 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	$(T5EMU) --quiet --max-ms 20000 $(EMU_FLASH) --flash $(BUILD)/t5-kernel-esp32p4v1.bin@10000 $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "kinfo" --ctl "kupdate $(KUPDATE_DIR)/tampered.t5k" --ctl "kupdate $(KERNEL_T5K)" --ctl "kinfo" \
 	    --ctl "reboot" \
-	    --expect-event kupdate.slot --expect-event ctl.failed --expect-event kupdate.ready \
+	    --expect-event kupdate.slot --expect-event ctl.failed --expect-event kupdate.slot_erased --expect-event kupdate.ready \
 	    --expect-event kernel.reboot \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# An update that panics before confirming itself (otadata: seq 1 =

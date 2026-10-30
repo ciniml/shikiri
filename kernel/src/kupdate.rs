@@ -164,6 +164,19 @@ impl Kupdate {
         }
         let st = &s.stats;
         event!(Info, "kupdate.written", length = s.length, erases = st.erases, writes = st.writes, max_us = st.max_us as u32, ms = time::ticks_to_ns(Current::now() - s.started) / 1_000_000);
+        let r = self.check_and_select(&s);
+        if r.is_err() {
+            // A refused image must not stay bootable: if the running kernel
+            // were later marked invalid, the bootloader would fall back to
+            // whatever this slot holds (doc/16 §6.11).
+            let erased = flash::erase_sector(SLOTS[s.slot], &mut flash::Stats::default()).is_ok();
+            event!(Warn, "kupdate.slot_erased", slot = s.slot as u32, ok = erased);
+        }
+        r
+    }
+
+    /// The checks of `end`; selects the package for the next boot if they pass.
+    fn check_and_select(&self, s: &Session) -> Result<u32, &'static str> {
         let started = Current::now();
         let bytes = self.slot_bytes(s.slot);
         let p = t5k::split(bytes).map_err(|_| "not a kernel package")?;
