@@ -227,6 +227,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
         Command::InstallEnd => store.install_end().map(|e| e.length),
         Command::Remove { name } => store.remove(name),
         Command::FlashTest => store.flash_test(),
+        Command::Psram => Current::psram_init().map(|(_, size)| size as u32),
     };
     match result {
         Ok(value) => event!(Info, "ctl.done", request_id = id, cmd = cmd.name(), ok = true, value = value),

@@ -1,0 +1,12 @@
+# M4a step 2-3 on the Tab5, 2026-10-30: PSRAM bring-up by the `psram` control
+# command (kernel in ota_0 only). t5log rtt --reset --cmd psram --until-done
+   2.517098 I kernel ctl.ready slots=4 stack_size=49152 stack_used=16240
+t5log: -> #1 psram
+   2.537266 I kernel psram.ldo dref=10 mul=3 efuse=true nominal_mv=1925 ldo=1075838976 ana=2684354560
+   2.537578 I kernel psram.mpll mhz=400 cal_us=9 div_reg=153
+   2.537688 I kernel psram.controller
+   2.537960 I kernel psram.id vendor=13 density=7 kgd=6 size=33554432 echo=1516993677 mr0=48 mr3=160 mr4=32 mr8=75
+   2.704139 I kernel psram.tuned phase=0 phases_ok=15 delayline_id=17 data_delay=2 dqs_delay=0 window=25 delaylines_ok=1073741792 ms=166
+   5.155509 I kernel psram.memtest bytes=33554432 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=30 read_mb_s=24
+   5.155631 I kernel psram.ready window=0x48000000 size=33554432 ms=2618
+   5.155754 I kernel ctl.done request_id=1 cmd=psram ok=true value=33554432

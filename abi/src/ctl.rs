@@ -27,6 +27,8 @@ pub mod cmd {
     pub const REMOVE: u8 = 8;
     /// Erase/write/read-back of a spare sector (doc/14 §5.4).
     pub const FLASH_TEST: u8 = 9;
+    /// Bring up the PSRAM (M4a bring-up; later done at boot).
+    pub const PSRAM: u8 = 10;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -46,6 +48,7 @@ pub enum Command<'a> {
     InstallEnd,
     Remove { name: &'a str },
     FlashTest,
+    Psram,
 }
 
 impl Command<'_> {
@@ -60,6 +63,7 @@ impl Command<'_> {
             Command::InstallEnd => "install_end",
             Command::Remove { .. } => "remove",
             Command::FlashTest => "flashtest",
+            Command::Psram => "psram",
         }
     }
 }
@@ -82,6 +86,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         }
         cmd::INSTALL_END if args.is_empty() => Command::InstallEnd,
         cmd::FLASH_TEST if args.is_empty() => Command::FlashTest,
+        cmd::PSRAM if args.is_empty() => Command::Psram,
         cmd::REMOVE => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -120,6 +125,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::InstallEnd => put(&[cmd::INSTALL_END])?,
         Command::Remove { .. } => put(&[cmd::REMOVE])?,
         Command::FlashTest => put(&[cmd::FLASH_TEST])?,
+        Command::Psram => put(&[cmd::PSRAM])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -179,9 +185,10 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         }
         Some("remove") => Command::Remove { name: w.next().ok_or("remove NAME")? },
         Some("flashtest") => Command::FlashTest,
+        Some("psram") => Command::Psram,
         _ => {
             return Err(
-                "commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | flashtest",
+                "commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | flashtest | psram",
             );
         }
     };

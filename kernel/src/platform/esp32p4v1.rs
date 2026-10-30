@@ -5,6 +5,8 @@
 
 use super::Platform;
 
+mod psram;
+
 // USB Serial/JTAG (doc/06 §3.1): usb_serial_jtag_reg.h
 const USJ_BASE: usize = 0x500D_2000;
 const USJ_EP1: usize = USJ_BASE;
@@ -219,6 +221,31 @@ const CACHE_MAP_L1_DCACHE: u32 = 1 << 4;
 
 type RomCacheFn = unsafe extern "C" fn(map: u32, addr: u32, size: u32) -> i32;
 
+/// Invalidates `[addr, addr + len)` in L1 I and D, and in L2 if `l2`
+/// (external memory: flash and PSRAM sit behind L2).
+fn cache_invalidate(addr: usize, len: usize, l2: bool) {
+    unsafe {
+        let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
+        invalidate(CACHE_MAP_L1_ICACHE_MASK, addr as u32, len as u32);
+        invalidate(CACHE_MAP_L1_DCACHE, addr as u32, len as u32);
+        if l2 {
+            invalidate(CACHE_MAP_L2_CACHE, addr as u32, len as u32);
+        }
+    }
+}
+
+/// Writes `[addr, addr + len)` back from L1 D, then from L2 if `l2`
+/// (cache_ll.h:644-693: the levels are written back in order).
+fn cache_writeback(addr: usize, len: usize, l2: bool) {
+    unsafe {
+        let writeback: RomCacheFn = core::mem::transmute(ROM_CACHE_WRITEBACK_ADDR);
+        writeback(CACHE_MAP_L1_DCACHE, addr as u32, len as u32);
+        if l2 {
+            writeback(CACHE_MAP_L2_CACHE, addr as u32, len as u32);
+        }
+    }
+}
+
 pub struct Esp32p4v1;
 
 /// ESP-IDF `esp_app_desc_t` (esp_app_format/include/esp_app_desc.h). The
@@ -423,6 +450,10 @@ impl Platform for Esp32p4v1 {
         }
         let len = data.len().next_multiple_of(4) as u32;
         rom_result(unsafe { flash_op(offset, words.as_ptr(), len) })
+    }
+
+    fn psram_init() -> Result<(usize, usize), &'static str> {
+        psram::init().map(|size| (psram::WINDOW, size))
     }
 
     fn flash_chip() -> Option<(u32, u32)> {

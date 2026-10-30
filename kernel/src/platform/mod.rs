@@ -60,6 +60,11 @@ pub trait Platform {
     fn flash_write(_offset: u32, _data: &[u8]) -> Result<(), &'static str> {
         Err("no flash")
     }
+    /// Powers up, tunes and maps the external PSRAM (M4a); returns the
+    /// window address and size.
+    fn psram_init() -> Result<(usize, usize), &'static str> {
+        Err("no psram")
+    }
     /// Flash chip details the boot code left behind, for the log:
     /// (JEDEC device id, size in bytes).
     fn flash_chip() -> Option<(u32, u32)> {
