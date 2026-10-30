@@ -40,6 +40,8 @@ struct Channel {
     service: bool,
     /// End A is waiting in a listener (counts as held: the client can write).
     pending_accept: bool,
+    /// Shared memory granted to each end and not yet taken.
+    offer: [Option<crate::shm::Window>; 2],
 }
 
 impl Channel {
@@ -51,6 +53,7 @@ impl Channel {
         inbox: [Queue::EMPTY, Queue::EMPTY],
         service: false,
         pending_accept: false,
+        offer: [None; 2],
     };
 
     /// Whether end `e` is there to write to.
@@ -146,11 +149,33 @@ impl End {
         Ok(n)
     }
 
+    /// Grants `w` to the other end (one pending grant at a time).
+    pub fn offer(&self, w: crate::shm::Window) -> Result<(), Error> {
+        let c = self.channel();
+        if c.holder[1 - self.end].is_none() {
+            w.release();
+            return Err(Error::Off);
+        }
+        if c.offer[1 - self.end].is_some() {
+            w.release();
+            return Err(Error::Busy);
+        }
+        c.offer[1 - self.end] = Some(w);
+        Ok(())
+    }
+
+    /// What the other end granted to this one.
+    pub fn take(&self) -> Option<crate::shm::Window> {
+        self.channel().offer[self.end].take()
+    }
+
     /// The `wait` event this end has now, as (event, value).
     pub fn poll(&self) -> Option<(usize, usize)> {
         let c = self.channel();
         let count = c.inbox[self.end].count;
-        if count > 0 {
+        if c.offer[self.end].is_some() {
+            Some((chan::SHM, 1))
+        } else if count > 0 {
             Some((chan::READABLE, count))
         } else if c.had_peer[self.end] && !c.present(1 - self.end) {
             Some((chan::PEER_CLOSED, 0))
@@ -164,6 +189,9 @@ impl Drop for End {
     fn drop(&mut self) {
         let c = self.channel();
         let pid = c.holder[self.end].take().unwrap_or(0);
+        if let Some(w) = c.offer[self.end].take() {
+            w.release();
+        }
         let q = &mut c.inbox[self.end];
         let dropped = q.count;
         *q = Queue::EMPTY;

@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, rights, svc, sys, timer, touch};
+pub use t5_abi::{Error, FOREVER, chan, display, event, rights, shm, svc, sys, timer, touch};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -188,6 +188,9 @@ impl Timer {
 /// One end of the channel `chan:NAME` (doc/16 §5).
 pub struct Channel(pub Handle);
 
+/// A channel's rights: messages, waiting, and taking granted memory (CTL).
+const CHANNEL_RIGHTS: usize = rights::READ | rights::WRITE | rights::WAIT | rights::CTL;
+
 /// Opens `prefix` + `name` with `rights`.
 fn open_prefixed(prefix: &str, name: &str, rights: usize) -> Result<Handle, Error> {
     let mut full = [0u8; t5_abi::t5a::MAX_NAME];
@@ -205,13 +208,13 @@ impl Channel {
     /// Joins the channel `name` (without the `chan:` prefix). The image
     /// must be built with `--permit chan:NAME`.
     pub fn open(name: &str) -> Result<Channel, Error> {
-        open_prefixed(chan::PREFIX, name, rights::READ | rights::WRITE | rights::WAIT).map(Channel)
+        open_prefixed(chan::PREFIX, name, CHANNEL_RIGHTS).map(Channel)
     }
 
     /// Connects to the service `name` (`--permit svc:NAME`): a channel of
     /// its own to the server.
     pub fn connect(name: &str) -> Result<Channel, Error> {
-        open_prefixed(svc::CONNECT_PREFIX, name, rights::READ | rights::WRITE | rights::WAIT).map(Channel)
+        open_prefixed(svc::CONNECT_PREFIX, name, CHANNEL_RIGHTS).map(Channel)
     }
 
     /// Sends `msg`, yielding while the other end's queue is full.
@@ -353,6 +356,42 @@ impl Touch {
             *o = Point { x: u(0), y: u(1), id: u(2), size: u(3) };
         }
         Ok(n)
+    }
+}
+
+/// Shared memory (doc/19 §2). Needs `--permit shm` to allocate.
+pub struct Shm(pub Handle);
+
+impl Shm {
+    /// A new region of at least `bytes` (64 KiB units, zeroed).
+    pub fn alloc(bytes: usize) -> Result<Shm, Error> {
+        let h = Handle::open(shm::NAME, rights::CTL)?;
+        h.ctl(shm::ALLOC, bytes as u64)?;
+        Ok(Shm(h))
+    }
+
+    pub fn size(&self) -> Result<usize, Error> {
+        self.0.ctl(shm::SIZE, 0)
+    }
+
+    /// Maps the window (one per process at a time).
+    pub fn map(&self) -> Result<&'static mut [u8], Error> {
+        let len = self.size()?;
+        let addr = self.0.ctl(shm::MAP, 0)?;
+        Ok(unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) })
+    }
+
+    /// Grants `[offset, offset + len)` (multiples of `shm::GRAIN`) to the
+    /// other end of `to`.
+    pub fn grant(&self, to: &Channel, offset: usize, len: usize) -> Result<(), Error> {
+        self.0.ctl(shm::GRANT, shm::grant_arg(to.0.raw(), offset, len)).map(|_| ())
+    }
+}
+
+impl Channel {
+    /// The shared memory the other end granted (`Error::Busy` if none).
+    pub fn take_shm(&self) -> Result<Shm, Error> {
+        self.0.ctl(chan::TAKE_SHM, 0).map(|h| Shm(Handle(h as u32)))
     }
 }
 

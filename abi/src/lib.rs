@@ -20,8 +20,8 @@ pub const ABI_MAJOR: u16 = 0;
 /// open/ctl/wait/close and the timer object. Minor 6 (M5c, doc/16 §5):
 /// read/write and the channel object. Minor 7 (M6c, doc/17 §6): the
 /// display and touch objects. Minor 8 (N0a, doc/19): service channels
-/// (`listen:`/`svc:`).
-pub const ABI_MINOR: u16 = 8;
+/// (`listen:`/`svc:`). Minor 9 (N0b, doc/19 §2): shared memory.
+pub const ABI_MINOR: u16 = 9;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -108,6 +108,34 @@ pub mod chan {
     pub const READABLE: usize = 1;
     /// `wait` event: nothing is queued and the other end was closed.
     pub const PEER_CLOSED: usize = 2;
+    /// `wait` event: the other end granted shared memory; take it with
+    /// `ctl(TAKE_SHM)`.
+    pub const SHM: usize = 3;
+    /// ctl: returns a new `shm` handle for the granted memory.
+    pub const TAKE_SHM: usize = 1;
+}
+
+/// Shared memory (doc/19 §2): regions of PSRAM in 64 KiB units. One
+/// `open("shm")` handle holds one window; a process maps at most one at a
+/// time (besides the framebuffer).
+pub mod shm {
+    pub const NAME: &str = "shm";
+    /// ctl: a2 = bytes; gives the (empty) handle a new zeroed region.
+    pub const ALLOC: usize = 1;
+    /// ctl: maps the window read/write into the caller; returns its address.
+    pub const MAP: usize = 2;
+    /// ctl: returns the window's length in bytes.
+    pub const SIZE: usize = 3;
+    /// ctl: a2/a3 = channel handle | (offset / GRAIN) << 8 | (length / GRAIN)
+    /// << 32: grants that part of the window to the channel's other end.
+    pub const GRANT: usize = 4;
+    /// Offsets and lengths of grants are multiples of this (PMP granule).
+    pub const GRAIN: usize = 128;
+
+    /// The `GRANT` argument.
+    pub const fn grant_arg(chan: u32, offset: usize, len: usize) -> u64 {
+        chan as u64 | ((offset / GRAIN) as u64) << 8 | ((len / GRAIN) as u64) << 32
+    }
 }
 
 /// Service channels (doc/19): many clients, one server. The server opens

@@ -23,6 +23,7 @@ mod platform;
 mod process;
 mod sched;
 mod screen;
+mod shm;
 mod store;
 mod time;
 
@@ -84,6 +85,8 @@ impl Apps {
 /// The end of the PSRAM kept for the display: room for two 720x1280 RGB565
 /// framebuffers (doc/17 §3).
 const FB_RESERVE: usize = 4 << 20;
+/// Below the display's: shared memory (doc/19 §2).
+const SHM_RESERVE: usize = 4 << 20;
 
 /// Kernel data the fault test tries to read and overwrite: one in read-only
 /// data (flash on ESP32-P4) and one in RAM.
@@ -148,10 +151,13 @@ pub extern "C" fn kmain() -> ! {
         panic!("test-bad-panic: this kernel must be rolled back");
     }
     // Apps run from PSRAM when there is one (M4a), else from the L2MEM pool.
-    // Apps get the PSRAM but its last `FB_RESERVE`, the display's (doc/17 §3).
+    // Apps get the PSRAM but its last `FB_RESERVE`, the display's (doc/17
+    // §3), and the `SHM_RESERVE` below it, shared memory's (doc/19 §2).
     let framebuffer = match Current::psram_init() {
-        Ok((window, size)) if size > 2 * FB_RESERVE => {
-            set_pool(window..window + size - FB_RESERVE);
+        Ok((window, size)) if size > 2 * (FB_RESERVE + SHM_RESERVE) => {
+            let shm_base = window + size - FB_RESERVE - SHM_RESERVE;
+            set_pool(window..shm_base);
+            shm::init(shm_base, SHM_RESERVE);
             Some(window + size - FB_RESERVE)
         }
         Ok((window, size)) => {
@@ -733,18 +739,29 @@ fn selftest_m5c(apps: &Apps) -> u32 {
     };
     // Named channel (M5c), then a service with three clients at once (N0a,
     // doc/19): every client gets its own channel to the one server.
-    let runs: [[(&'static str, &'static [u8], usize, usize); 4]; 2] = [
+    // Then shared memory (N0b, doc/19 §2): two clients fill their slices,
+    // a third writes past its slice and must be killed.
+    let runs: [[(&'static str, &'static [u8], usize, usize); 4]; 3] = [
         [("echo-server", echo, 0, 0), ("echo-client", echo, 1, 40), ("spin", apps.spin, 4, 100), ("", echo, 0, 0)],
         [("echo-svc", echo, 2, 3), ("echo-c1", echo, 3, 20), ("echo-c2", echo, 3, 30), ("echo-c3", echo, 3, 40)],
+        [("echo-shm", echo, 4, 3), ("shm-c1", echo, 5, 0), ("shm-c2", echo, 5, 0), ("shm-bad", echo, 6, 0)],
     ];
     // An echo installed before N0a has no service modes: skip that run.
-    let has_svc = loader::verify(echo)
-        .and_then(|signed| t5_abi::t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR))
-        .is_ok_and(|img| img.info.permits(b"listen:echo"));
+    let permits = |name: &[u8]| {
+        loader::verify(echo)
+            .and_then(|signed| t5_abi::t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR))
+            .is_ok_and(|img| img.info.permits(name))
+    };
+    let has_svc = permits(b"listen:echo");
+    let has_shm = permits(b"shm") && shm::available();
     let mut failures = 0;
     for (run, specs) in runs.into_iter().enumerate() {
         if run == 1 && !has_svc {
             event!(Warn, "selftest.skipped", part = "n0a", reason = "echo predates service channels");
+            continue;
+        }
+        if run == 2 && !has_shm {
+            event!(Warn, "selftest.skipped", part = "n0b", reason = "no shared memory, or echo predates it");
             continue;
         }
         let mut s = sched::Scheduler::new();
@@ -761,7 +778,11 @@ fn selftest_m5c(apps: &Apps) -> u32 {
         s.run(Some(5000), &mut |_| {});
         for p in s.slots.iter().flatten() {
             let exit = p.exit().unwrap();
-            let ok = exit == Exit::Code(0) || (p.name == "spin" && exit == Exit::Code(2));
+            let ok = match p.name {
+                "spin" => matches!(exit, Exit::Code(0) | Exit::Code(2)),
+                "shm-bad" => matches(&exit, &fault(cause::STORE_ACCESS)),
+                _ => exit == Exit::Code(0),
+            };
             log_case(p, &exit, ok);
             if !ok {
                 failures += 1;

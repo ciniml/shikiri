@@ -12,10 +12,15 @@
 //! - `role` 3, a service client: connects to `svc:echo` and does the same
 //!   round trips as role 1 (from its own `count`).
 //!
-//! Built with `--permit chan:echo --permit listen:echo --permit svc:echo`.
+//! - `role` 4/5/6, shared memory (N0b, doc/19 §2): the server (4) allocates
+//!   1 MiB and grants each of `count` clients a 64 KiB slice; a client (5)
+//!   fills its slice, a bad client (6) writes past it and must be killed.
+//!
+//! Built with `--permit chan:echo --permit listen:echo --permit svc:echo
+//! --permit shm --permit listen:shmt --permit svc:shmt`.
 //! Exit 0 if everything held, otherwise the number of the failed check.
 
-use t5_rt::{Channel, Error, FOREVER, Listener, chan, event, svc, wait_raw};
+use t5_rt::{Channel, Error, FOREVER, Listener, Shm, chan, event, svc, wait, wait_raw};
 
 t5_rt::entry!(main);
 
@@ -26,7 +31,10 @@ fn main(role: usize, count: usize) -> usize {
         SERVER => serve(),
         1 => client(count as u32),
         2 => serve_many(count),
-        _ => svc_client(count as u32),
+        3 => svc_client(count as u32),
+        4 => shm_server(count),
+        5 => shm_client(false),
+        _ => shm_client(true),
     };
     match r {
         Ok(()) => 0,
@@ -123,6 +131,65 @@ fn svc_client(count: u32) -> Result<(), u32> {
     Ok(())
 }
 
+const SLICE: usize = 64 << 10;
+
+fn shm_server(clients: usize) -> Result<(), u32> {
+    let l = Listener::open("shmt").map_err(|_| 50u32)?;
+    let pool = Shm::alloc(16 * SLICE).map_err(|_| 51u32)?;
+    let mem = pool.map().map_err(|_| 52u32)?;
+    check(mem.len() == 16 * SLICE && mem.iter().all(|&b| b == 0), 53)?;
+    // One mapped window per process.
+    let other = Shm::alloc(SLICE).map_err(|_| 54u32)?;
+    check(other.map().err() == Some(Error::Busy), 55)?;
+    let mut conns: [Option<Channel>; 4] = [const { None }; 4];
+    for k in 0..clients {
+        wait(&[&l.0], FOREVER).map_err(|_| 56u32)?;
+        let c = l.accept().map_err(|_| 57u32)?;
+        mem[k * SLICE] = k as u8 + 1; // the client's number, for it to find
+        pool.grant(&c, k * SLICE, SLICE).map_err(|_| 58u32)?;
+        conns[k] = Some(c);
+    }
+    // Wait for every client to finish (or be killed).
+    let mut good = 0u32;
+    let mut buf = [0u8; 8];
+    for c in conns.iter().flatten() {
+        if c.recv(&mut buf).is_ok() {
+            good += 1;
+        }
+    }
+    let mut filled = 0u32;
+    for k in 0..clients {
+        let s = &mem[k * SLICE..(k + 1) * SLICE];
+        if s[1..].iter().all(|&b| b == k as u8 + 0x41) {
+            filled += 1;
+        }
+    }
+    event!(Info, "echo.shm_served", clients = clients as u32, reported = good, filled = filled);
+    check(filled == good, 59)
+}
+
+fn shm_client(overrun: bool) -> Result<(), u32> {
+    let c = Channel::connect("shmt").map_err(|_| 60u32)?;
+    let ev = wait(&[&c.0], FOREVER).map_err(|_| 61u32)?;
+    check(ev.kind == chan::SHM, 62)?;
+    let s = c.take_shm().map_err(|_| 63u32)?;
+    let mem = s.map().map_err(|_| 64u32)?;
+    check(mem.len() == SLICE, 65)?;
+    let k = mem[0];
+    check((1..=4).contains(&k), 66)?;
+    if overrun {
+        // One byte past the granted slice: the PMP must stop it.
+        unsafe { core::ptr::write_volatile(mem.as_mut_ptr().add(mem.len()), 0xEE) };
+        return Err(67);
+    }
+    for b in &mut mem[1..] {
+        *b = k + 0x40;
+    }
+    c.send(b"done").map_err(|_| 68u32)?;
+    event!(Info, "echo.shm_filled", number = k as u32);
+    Ok(())
+}
+
 /// Message `k`: its length and its bytes.
 fn message(k: u32, buf: &mut [u8; chan::MSG_MAX]) -> usize {
     let len = (k as usize * 37) % (chan::MSG_MAX + 1);
@@ -146,8 +213,8 @@ fn client(count: u32) -> Result<(), u32> {
     check(Channel::open("echo").err() == Some(Error::Busy), 12)?;
     let mut buf = [0u8; chan::MSG_MAX + 1];
     check(c.0.write(&buf).err() == Some(Error::Size), 13)?;
-    // Channel handles carry no CTL right.
-    check(c.0.ctl(1, 0).err() == Some(Error::Denied), 14)?;
+    // Nothing was granted to take.
+    check(c.take_shm().err() == Some(Error::Busy), 14)?;
 
     // Fill the queues without reading the replies: the server stops once
     // its replies fill ours, so a write must get Busy within the two queues

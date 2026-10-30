@@ -29,6 +29,8 @@ pub struct Process {
     /// confirmed yet: when it started (ticks) and the version's first
     /// extent. Its end decides that version (doc/16 §4.2).
     pub pending: Option<(u64, u16)>,
+    /// The `shm` handle whose window is mapped, if any.
+    shm_mapped: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +87,7 @@ impl Process {
             permissions: loaded.permissions,
             xip_extents: None,
             pending: None,
+            shm_mapped: None,
         }
     }
 
@@ -150,6 +153,11 @@ impl Process {
             sys::LOG_LEVEL => Ok([log::KEEP as usize, 0, 0]),
             sys::OPEN => self.open(a0, a1, a2).map(|h| [h, 0, 0]),
             sys::CLOSE => {
+                if self.shm_mapped == Some(a0) {
+                    self.shm_mapped = None;
+                    self.region.shm = None;
+                    pmp::set_process(&self.region);
+                }
                 let r = self.handles.close(a0);
                 if self.region.shared.is_some() && !self.handles.has_display() {
                     self.region.shared = None;
@@ -160,6 +168,13 @@ impl Process {
             sys::CTL if a1 == t5_abi::svc::ACCEPT && self.handles.is_listener(a0) => {
                 self.handles.accept(a0, self.pid).map(|h| [h, 0, 0])
             }
+            sys::CTL if a1 == t5_abi::shm::GRANT && self.handles.is_shm(a0) => {
+                self.handles.grant(a0, ((a3 as u64) << 32) | a2 as u64).map(|v| [v, 0, 0])
+            }
+            sys::CTL if a1 == t5_abi::chan::TAKE_SHM && self.handles.is_channel(a0) => {
+                self.handles.take_shm(a0).map(|h| [h, 0, 0])
+            }
+            sys::CTL if a1 == t5_abi::shm::MAP && self.handles.is_shm(a0) => self.map_shm(a0).map(|v| [v, 0, 0]),
             sys::CTL => {
                 let r = self.handles.ctl(a0, a1, ((a3 as u64) << 32) | a2 as u64);
                 if let Ok(fb) = r
@@ -230,6 +245,19 @@ impl Process {
             event!(Warn, "proc.denied", pid = self.pid, name = core::str::from_utf8(name).unwrap_or("?"));
         }
         r
+    }
+
+    /// `ctl(shm, MAP)`: one mapped window per process (doc/19 §2).
+    fn map_shm(&mut self, h: usize) -> Result<usize, Error> {
+        if self.shm_mapped.is_some_and(|m| m != h) {
+            return Err(Error::Busy);
+        }
+        let addr = self.handles.ctl(h, t5_abi::shm::MAP, 0)?;
+        let len = self.handles.ctl(h, t5_abi::shm::SIZE, 0)?;
+        self.region.shm = Some(addr..addr + len);
+        self.shm_mapped = Some(h);
+        pmp::set_process(&self.region);
+        Ok(addr)
     }
 
     /// `read`/`write` through a kernel buffer: the user range is checked,

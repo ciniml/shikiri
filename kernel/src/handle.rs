@@ -3,12 +3,16 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, chan, display, rights, svc, timer, touch};
+use t5_abi::{Error, MAX_HANDLES, chan, display, rights, shm, svc, timer, touch};
 
 use crate::channel;
 use crate::screen::{DisplayHandle, TouchHandle};
+use crate::shm::ShmHandle;
 use crate::platform::{Current, Platform};
 use crate::time;
+
+/// Channels: messages, waiting, and taking granted shared memory (CTL).
+const CHANNEL_RIGHTS: usize = rights::READ | rights::WRITE | rights::WAIT | rights::CTL;
 
 pub enum Object {
     Timer(Timer),
@@ -16,6 +20,7 @@ pub enum Object {
     Display(DisplayHandle),
     Touch(TouchHandle),
     Listener(channel::Listener),
+    Shm(ShmHandle),
 }
 
 impl Object {
@@ -26,17 +31,23 @@ impl Object {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
             n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT)),
             n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open()?), rights::READ | rights::WAIT)),
+            n if n == shm::NAME.as_bytes() => {
+                if !crate::shm::available() {
+                    return Err(Error::NoDevice);
+                }
+                Ok((Object::Shm(ShmHandle { window: None }), rights::CTL))
+            }
             n if n.starts_with(svc::LISTEN_PREFIX.as_bytes()) => {
                 let l = channel::listen(&n[svc::LISTEN_PREFIX.len()..], pid)?;
                 Ok((Object::Listener(l), rights::CTL | rights::WAIT))
             }
             n if n.starts_with(svc::CONNECT_PREFIX.as_bytes()) => {
                 let end = channel::connect(&n[svc::CONNECT_PREFIX.len()..], pid)?;
-                Ok((Object::Channel(end), rights::READ | rights::WRITE | rights::WAIT))
+                Ok((Object::Channel(end), CHANNEL_RIGHTS))
             }
             n if n.starts_with(chan::PREFIX.as_bytes()) => {
                 let end = channel::open(&n[chan::PREFIX.len()..], pid)?;
-                Ok((Object::Channel(end), rights::READ | rights::WRITE | rights::WAIT))
+                Ok((Object::Channel(end), CHANNEL_RIGHTS))
             }
             _ => Err(Error::NoDevice),
         }
@@ -143,6 +154,16 @@ impl Table {
             Object::Timer(t) => t.ctl(op, arg),
             Object::Display(d) => d.ctl(op, arg),
             Object::Listener(_) => Err(Error::NoSupport), // ACCEPT: `accept`
+            Object::Shm(s) => match op {
+                shm::ALLOC if s.window.is_none() => {
+                    s.window = Some(crate::shm::alloc(arg as usize)?);
+                    Ok(s.window.unwrap().len)
+                }
+                shm::ALLOC => Err(Error::Already),
+                shm::SIZE => s.window.map(|w| w.len).ok_or(Error::Invalid),
+                shm::MAP => s.window.map(|w| w.addr()).ok_or(Error::Invalid),
+                _ => Err(Error::NoSupport), // GRANT: `grant`
+            },
             Object::Channel(_) | Object::Touch(_) => Err(Error::NoSupport),
         }
     }
@@ -156,8 +177,44 @@ impl Table {
             return Err(Error::NoSupport);
         };
         let end = l.accept(pid)?;
-        self.slots[free] = Some(Handle { object: Object::Channel(end), rights: rights::READ | rights::WRITE | rights::WAIT });
+        self.slots[free] = Some(Handle { object: Object::Channel(end), rights: CHANNEL_RIGHTS });
         Ok(free + 1)
+    }
+
+    /// `ctl(shm, GRANT, arg)`: a part of `h`'s window to the other end of
+    /// the channel named in `arg`.
+    pub fn grant(&mut self, h: usize, arg: u64) -> Result<usize, Error> {
+        let chan_h = (arg & 0xFF) as usize;
+        let (offset, len) = (((arg >> 8) & 0xFF_FFFF) as usize * shm::GRAIN, ((arg >> 32) & 0xFF_FFFF) as usize * shm::GRAIN);
+        let Object::Shm(s) = &self.get(h, rights::CTL)?.object else { return Err(Error::NoSupport) };
+        let w = s.window.ok_or(Error::Invalid)?.part(offset, len)?;
+        match self.get(chan_h, rights::WRITE) {
+            Ok(Handle { object: Object::Channel(end), .. }) => end.offer(w).map(|_| 0),
+            _ => {
+                w.release();
+                Err(Error::Invalid)
+            }
+        }
+    }
+
+    /// `ctl(channel, TAKE_SHM)`: the granted memory as a new `shm` handle.
+    pub fn take_shm(&mut self, h: usize) -> Result<usize, Error> {
+        let free = self.slots.iter().position(Option::is_none).ok_or(Error::NoMem)?;
+        let Object::Channel(end) = &self.get(h, rights::CTL)?.object else { return Err(Error::NoSupport) };
+        let w = end.take().ok_or(Error::Busy)?;
+        self.slots[free] = Some(Handle { object: Object::Shm(ShmHandle { window: Some(w) }), rights: rights::CTL });
+        Ok(free + 1)
+    }
+
+    /// Whether `h` is a channel / a shared-memory handle.
+    pub fn is_channel(&self, h: usize) -> bool {
+        h.checked_sub(1)
+            .and_then(|i| self.slots.get(i))
+            .is_some_and(|s| matches!(s, Some(Handle { object: Object::Channel(_), .. })))
+    }
+
+    pub fn is_shm(&self, h: usize) -> bool {
+        h.checked_sub(1).and_then(|i| self.slots.get(i)).is_some_and(|s| matches!(s, Some(Handle { object: Object::Shm(_), .. })))
     }
 
     /// Whether `h` is a listener.
@@ -218,6 +275,7 @@ impl Table {
             Object::Display(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::Touch(t) => t.poll().map(|(ev, v)| (i, ev, v)),
             Object::Listener(l) => l.poll().map(|(ev, v)| (i, ev, v)),
+            Object::Shm(_) => None,
         })
     }
 
@@ -228,7 +286,7 @@ impl Table {
                 Object::Timer(t) => t.next,
                 // Woken by the writer's process, a frame or the touch
                 // poll, not by time.
-                Object::Channel(_) | Object::Display(_) | Object::Touch(_) | Object::Listener(_) => None,
+                _ => None,
             })
             .min()
     }
