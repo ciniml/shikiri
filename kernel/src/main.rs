@@ -153,6 +153,9 @@ fn next_pid() -> u32 {
     }
 }
 
+/// Control frames handled per scheduler poll (every `sched::POLL_MS`).
+const FRAMES_PER_POLL: usize = 4;
+
 /// Runs apps for good: starts the autostart apps, then starts and stops
 /// apps on commands from the host (RTT down-channel, doc/14 §3). Results
 /// are log events.
@@ -169,8 +172,11 @@ fn serve(store: &mut store::Store) -> ! {
     loop {
         s.run(None, &mut |s| {
             s.reap();
+            // A few frames per poll, so an install (one frame per 256 B,
+            // some with a sector erase) does not stop the apps meanwhile.
             let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND];
-            while let Some(n) = log::read_command(&mut frame) {
+            for _ in 0..FRAMES_PER_POLL {
+                let Some(n) = log::read_command(&mut frame) else { break };
                 handle(s, store, &frame[..n]);
             }
         });
