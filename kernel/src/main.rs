@@ -731,27 +731,41 @@ fn selftest_m5c(apps: &Apps) -> u32 {
         event!(Warn, "selftest.skipped", part = "m5c", reason = "no echo app in the store");
         return 0;
     };
-    let specs: [(&'static str, &'static [u8], usize, usize); 3] =
-        [("echo-server", echo, 0, 0), ("echo-client", echo, 1, 40), ("spin", apps.spin, 4, 100)];
-    let mut slot_index = 0;
-    let loaded = specs.map(|(name, image, arg0, arg1)| {
-        let p = load(name, image, slot_index, arg0, arg1);
-        slot_index += 1;
-        p
-    });
-    let [Some(a), Some(b), Some(c)] = loaded else {
-        return 1;
-    };
-    let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), None];
-    s.run(Some(3000), &mut |_| {});
+    // Named channel (M5c), then a service with three clients at once (N0a,
+    // doc/19): every client gets its own channel to the one server.
+    let runs: [[(&'static str, &'static [u8], usize, usize); 4]; 2] = [
+        [("echo-server", echo, 0, 0), ("echo-client", echo, 1, 40), ("spin", apps.spin, 4, 100), ("", echo, 0, 0)],
+        [("echo-svc", echo, 2, 3), ("echo-c1", echo, 3, 20), ("echo-c2", echo, 3, 30), ("echo-c3", echo, 3, 40)],
+    ];
+    // An echo installed before N0a has no service modes: skip that run.
+    let has_svc = loader::verify(echo)
+        .and_then(|signed| t5_abi::t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR))
+        .is_ok_and(|img| img.info.permits(b"listen:echo"));
     let mut failures = 0;
-    for p in s.slots.iter().flatten() {
-        let exit = p.exit().unwrap();
-        let ok = exit == Exit::Code(0) || (p.name == "spin" && exit == Exit::Code(2));
-        log_case(p, &exit, ok);
-        if !ok {
-            failures += 1;
+    for (run, specs) in runs.into_iter().enumerate() {
+        if run == 1 && !has_svc {
+            event!(Warn, "selftest.skipped", part = "n0a", reason = "echo predates service channels");
+            continue;
+        }
+        let mut s = sched::Scheduler::new();
+        for (i, &(name, image, arg0, arg1)) in specs.iter().enumerate() {
+            if name.is_empty() {
+                continue;
+            }
+            match load(name, image, i, arg0, arg1) {
+                Some(p) => s.slots[i] = Some(p),
+                None => failures += 1,
+            }
+        }
+        // QEMU's clock is the host's: leave room for a busy host.
+        s.run(Some(5000), &mut |_| {});
+        for p in s.slots.iter().flatten() {
+            let exit = p.exit().unwrap();
+            let ok = exit == Exit::Code(0) || (p.name == "spin" && exit == Exit::Code(2));
+            log_case(p, &exit, ok);
+            if !ok {
+                failures += 1;
+            }
         }
     }
     failures

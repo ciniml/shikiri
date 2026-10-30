@@ -11,7 +11,7 @@ STORE_DIR  := $(BUILD)/store
 APPS       := hello fault ticker spin timers echo paint
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
-PERMIT_echo   := --permit chan:echo
+PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo
 PERMIT_paint  := --permit display --permit touch
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.

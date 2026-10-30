@@ -157,6 +157,9 @@ impl Process {
                 }
                 r.map(|_| [0, 0, 0])
             }
+            sys::CTL if a1 == t5_abi::svc::ACCEPT && self.handles.is_listener(a0) => {
+                self.handles.accept(a0, self.pid).map(|h| [h, 0, 0])
+            }
             sys::CTL => {
                 let r = self.handles.ctl(a0, a1, ((a3 as u64) << 32) | a2 as u64);
                 if let Ok(fb) = r

@@ -19,8 +19,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// (pre-1.0, so no compatibility is kept). Minor 5 (M3d, doc/14 §4): handles,
 /// open/ctl/wait/close and the timer object. Minor 6 (M5c, doc/16 §5):
 /// read/write and the channel object. Minor 7 (M6c, doc/17 §6): the
-/// display and touch objects.
-pub const ABI_MINOR: u16 = 7;
+/// display and touch objects. Minor 8 (N0a, doc/19): service channels
+/// (`listen:`/`svc:`).
+pub const ABI_MINOR: u16 = 8;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -107,6 +108,22 @@ pub mod chan {
     pub const READABLE: usize = 1;
     /// `wait` event: nothing is queued and the other end was closed.
     pub const PEER_CLOSED: usize = 2;
+}
+
+/// Service channels (doc/19): many clients, one server. The server opens
+/// `listen:NAME` (a listener); each client that opens `svc:NAME` gets a new
+/// channel of its own (as `chan:`), whose other end the server takes with
+/// `ctl(ACCEPT)`. Both names must be in the image's Permissions TLV.
+pub mod svc {
+    pub const LISTEN_PREFIX: &str = "listen:";
+    pub const CONNECT_PREFIX: &str = "svc:";
+    /// ctl on a listener: returns the handle of the oldest waiting
+    /// connection (`Error::Busy` if none).
+    pub const ACCEPT: usize = 1;
+    /// `wait` event on a listener: connections are waiting (value = how many).
+    pub const PENDING: usize = 1;
+    /// Connections a listener holds before `open("svc:…")` gets `Busy`.
+    pub const BACKLOG: usize = 4;
 }
 
 /// The display (doc/17 §6): one process at a time gets the framebuffer

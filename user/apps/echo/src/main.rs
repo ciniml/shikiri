@@ -7,17 +7,27 @@
 //! - `role` 1, the client: checks the channel rules, then sends `count`
 //!   messages of varying length and checks each reply.
 //!
-//! Built with `--permit chan:echo`. Exit 0 if everything held, otherwise the
-//! number of the failed check.
+//! - `role` 2, a service server (N0a, doc/19): listens on `svc:echo`, serves
+//!   `count` clients at once (each its own channel), ends when all left.
+//! - `role` 3, a service client: connects to `svc:echo` and does the same
+//!   round trips as role 1 (from its own `count`).
+//!
+//! Built with `--permit chan:echo --permit listen:echo --permit svc:echo`.
+//! Exit 0 if everything held, otherwise the number of the failed check.
 
-use t5_rt::{Channel, Error, chan, event};
+use t5_rt::{Channel, Error, FOREVER, Listener, chan, event, svc, wait_raw};
 
 t5_rt::entry!(main);
 
 const SERVER: usize = 0;
 
 fn main(role: usize, count: usize) -> usize {
-    let r = if role == SERVER { serve() } else { client(count as u32) };
+    let r = match role {
+        SERVER => serve(),
+        1 => client(count as u32),
+        2 => serve_many(count),
+        _ => svc_client(count as u32),
+    };
     match r {
         Ok(()) => 0,
         Err(check) => {
@@ -48,6 +58,68 @@ fn serve() -> Result<(), u32> {
         served += 1;
     }
     event!(Info, "echo.served", messages = served);
+    Ok(())
+}
+
+/// Serves `clients` connections on `svc:echo` together.
+fn serve_many(clients: usize) -> Result<(), u32> {
+    let l = Listener::open("echo").map_err(|_| 30u32)?;
+    // A second listener on the same name is refused.
+    check(Listener::open("echo").err() == Some(Error::Busy), 31)?;
+    let mut conns: [Option<Channel>; 8] = [const { None }; 8];
+    let (mut accepted, mut done, mut served) = (0usize, 0usize, 0u32);
+    let mut buf = [0u8; chan::MSG_MAX];
+    while done < clients {
+        let mut hs = [0u32; 9];
+        hs[0] = l.0.raw();
+        let mut map = [0usize; 9];
+        let mut n = 1;
+        for (i, c) in conns.iter().enumerate() {
+            if let Some(c) = c {
+                hs[n] = c.0.raw();
+                map[n] = i;
+                n += 1;
+            }
+        }
+        let ev = wait_raw(&hs[..n], FOREVER).map_err(|_| 32u32)?;
+        if ev.index == 0 {
+            check(ev.kind == svc::PENDING, 33)?;
+            let c = l.accept().map_err(|_| 34u32)?;
+            let slot = conns.iter().position(Option::is_none).ok_or(35u32)?;
+            conns[slot] = Some(c);
+            accepted += 1;
+            continue;
+        }
+        let i = map[ev.index];
+        let c = conns[i].as_ref().unwrap();
+        if ev.kind == chan::PEER_CLOSED {
+            conns[i] = None;
+            done += 1;
+            continue;
+        }
+        while let Ok(len) = c.0.read(&mut buf) {
+            for b in &mut buf[..len] {
+                *b = b.wrapping_add(1);
+            }
+            c.send(&buf[..len]).map_err(|_| 36u32)?;
+            served += 1;
+        }
+    }
+    event!(Info, "echo.served_many", clients = accepted as u32, messages = served);
+    Ok(())
+}
+
+fn svc_client(count: u32) -> Result<(), u32> {
+    let c = Channel::connect("echo").map_err(|_| 40u32)?;
+    let mut msg = [0u8; chan::MSG_MAX];
+    let mut buf = [0u8; chan::MSG_MAX + 1];
+    for k in 0..count {
+        let len = message(k, &mut msg);
+        c.send(&msg[..len]).map_err(|_| 41u32)?;
+        let n = c.recv(&mut buf).map_err(|_| 42u32)?;
+        check(reply_ok(k, &buf[..n]), 43)?;
+    }
+    event!(Info, "echo.svc_done", messages = count);
     Ok(())
 }
 

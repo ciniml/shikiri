@@ -3,7 +3,7 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, chan, display, rights, timer, touch};
+use t5_abi::{Error, MAX_HANDLES, chan, display, rights, svc, timer, touch};
 
 use crate::channel;
 use crate::screen::{DisplayHandle, TouchHandle};
@@ -15,6 +15,7 @@ pub enum Object {
     Channel(channel::End),
     Display(DisplayHandle),
     Touch(TouchHandle),
+    Listener(channel::Listener),
 }
 
 impl Object {
@@ -25,6 +26,14 @@ impl Object {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
             n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT)),
             n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open()?), rights::READ | rights::WAIT)),
+            n if n.starts_with(svc::LISTEN_PREFIX.as_bytes()) => {
+                let l = channel::listen(&n[svc::LISTEN_PREFIX.len()..], pid)?;
+                Ok((Object::Listener(l), rights::CTL | rights::WAIT))
+            }
+            n if n.starts_with(svc::CONNECT_PREFIX.as_bytes()) => {
+                let end = channel::connect(&n[svc::CONNECT_PREFIX.len()..], pid)?;
+                Ok((Object::Channel(end), rights::READ | rights::WRITE | rights::WAIT))
+            }
             n if n.starts_with(chan::PREFIX.as_bytes()) => {
                 let end = channel::open(&n[chan::PREFIX.len()..], pid)?;
                 Ok((Object::Channel(end), rights::READ | rights::WRITE | rights::WAIT))
@@ -133,8 +142,29 @@ impl Table {
         match &mut self.get(h, rights::CTL)?.object {
             Object::Timer(t) => t.ctl(op, arg),
             Object::Display(d) => d.ctl(op, arg),
+            Object::Listener(_) => Err(Error::NoSupport), // ACCEPT: `accept`
             Object::Channel(_) | Object::Touch(_) => Err(Error::NoSupport),
         }
+    }
+
+    /// `ctl(listener, ACCEPT)`: the next connection as a new handle in this
+    /// table, for process `pid`.
+    pub fn accept(&mut self, h: usize, pid: u32) -> Result<usize, Error> {
+        // A free slot first: an accepted connection must not be lost.
+        let free = self.slots.iter().position(Option::is_none).ok_or(Error::NoMem)?;
+        let Object::Listener(l) = &mut self.get(h, rights::CTL)?.object else {
+            return Err(Error::NoSupport);
+        };
+        let end = l.accept(pid)?;
+        self.slots[free] = Some(Handle { object: Object::Channel(end), rights: rights::READ | rights::WRITE | rights::WAIT });
+        Ok(free + 1)
+    }
+
+    /// Whether `h` is a listener.
+    pub fn is_listener(&self, h: usize) -> bool {
+        h.checked_sub(1)
+            .and_then(|i| self.slots.get(i))
+            .is_some_and(|s| matches!(s, Some(Handle { object: Object::Listener(_), .. })))
     }
 
     /// Whether `h` is the display handle.
@@ -187,6 +217,7 @@ impl Table {
             Object::Channel(e) => e.poll().map(|(ev, v)| (i, ev, v)),
             Object::Display(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::Touch(t) => t.poll().map(|(ev, v)| (i, ev, v)),
+            Object::Listener(l) => l.poll().map(|(ev, v)| (i, ev, v)),
         })
     }
 
@@ -197,7 +228,7 @@ impl Table {
                 Object::Timer(t) => t.next,
                 // Woken by the writer's process, a frame or the touch
                 // poll, not by time.
-                Object::Channel(_) | Object::Display(_) | Object::Touch(_) => None,
+                Object::Channel(_) | Object::Display(_) | Object::Touch(_) | Object::Listener(_) => None,
             })
             .min()
     }

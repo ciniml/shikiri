@@ -2,10 +2,16 @@
 //! first `open("chan:NAME")` takes end A, the next end B; a message written
 //! on one end is queued whole for the other. The table is fixed: there is no
 //! allocator in the kernel.
+//!
+//! Service channels (N0a, doc/19): a server's listener (`listen:NAME`)
+//! collects connections; each `open("svc:NAME")` makes a new, unnamed
+//! channel whose end B is the client's and whose end A waits in the
+//! listener until the server accepts it.
 
-use t5_abi::{Error, chan, event};
+use t5_abi::{Error, chan, event, svc};
 
-const MAX_CHANNELS: usize = 8;
+const MAX_CHANNELS: usize = 32;
+const MAX_LISTENERS: usize = 8;
 const MAX_NAME: usize = t5_abi::t5a::MAX_NAME;
 
 /// The messages queued for one end.
@@ -30,11 +36,27 @@ struct Channel {
     /// opened: only then does its closing count as `PEER_CLOSED`.
     had_peer: [bool; 2],
     inbox: [Queue; 2],
+    /// A service connection: not joinable by name.
+    service: bool,
+    /// End A is waiting in a listener (counts as held: the client can write).
+    pending_accept: bool,
 }
 
 impl Channel {
-    const UNUSED: Channel =
-        Channel { name: [0; MAX_NAME], name_len: 0, holder: [None; 2], had_peer: [false; 2], inbox: [Queue::EMPTY, Queue::EMPTY] };
+    const UNUSED: Channel = Channel {
+        name: [0; MAX_NAME],
+        name_len: 0,
+        holder: [None; 2],
+        had_peer: [false; 2],
+        inbox: [Queue::EMPTY, Queue::EMPTY],
+        service: false,
+        pending_accept: false,
+    };
+
+    /// Whether end `e` is there to write to.
+    fn present(&self, e: usize) -> bool {
+        self.holder[e].is_some() || (e == 0 && self.pending_accept)
+    }
 
     fn name(&self) -> &str {
         core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("?")
@@ -62,7 +84,7 @@ pub fn open(name: &[u8], pid: u32) -> Result<End, Error> {
         return Err(Error::Invalid);
     }
     let cs = channels();
-    let ch = match cs.iter().position(|c| c.name_len > 0 && &c.name[..c.name_len] == name) {
+    let ch = match cs.iter().position(|c| c.name_len > 0 && !c.service && &c.name[..c.name_len] == name) {
         Some(i) => i,
         None => {
             let i = cs.iter().position(|c| c.name_len == 0).ok_or(Error::NoMem)?;
@@ -93,7 +115,7 @@ impl End {
             return Err(Error::Size);
         }
         let c = self.channel();
-        if c.holder[1 - self.end].is_none() {
+        if !c.present(1 - self.end) {
             return Err(Error::Off);
         }
         let q = &mut c.inbox[1 - self.end];
@@ -130,7 +152,7 @@ impl End {
         let count = c.inbox[self.end].count;
         if count > 0 {
             Some((chan::READABLE, count))
-        } else if c.had_peer[self.end] && c.holder[1 - self.end].is_none() {
+        } else if c.had_peer[self.end] && !c.present(1 - self.end) {
             Some((chan::PEER_CLOSED, 0))
         } else {
             None
@@ -146,8 +168,108 @@ impl Drop for End {
         let dropped = q.count;
         *q = Queue::EMPTY;
         event!(Info, "chan.closed", pid = pid, name = c.name(), end = self.end as u32, dropped = dropped as u32);
-        if c.holder.iter().all(Option::is_none) {
-            *c = Channel::UNUSED;
+        free_if_unused(c);
+    }
+}
+
+fn free_if_unused(c: &mut Channel) {
+    if c.holder.iter().all(Option::is_none) && !c.pending_accept {
+        *c = Channel::UNUSED;
+    }
+}
+
+// ---- service channels ----
+
+struct ListenerEntry {
+    name: [u8; MAX_NAME],
+    name_len: usize,
+    owner: u32,
+    /// Channels whose end A waits for `accept`, oldest first.
+    pending: [Option<usize>; svc::BACKLOG],
+}
+
+static mut LISTENERS: [Option<ListenerEntry>; MAX_LISTENERS] = [const { None }; MAX_LISTENERS];
+
+fn listeners() -> &'static mut [Option<ListenerEntry>; MAX_LISTENERS] {
+    unsafe { &mut *core::ptr::addr_of_mut!(LISTENERS) }
+}
+
+/// A server's listener on `svc:NAME`, held in a handle.
+pub struct Listener {
+    index: usize,
+}
+
+/// `open("listen:NAME")`: one listener per name.
+pub fn listen(name: &[u8], pid: u32) -> Result<Listener, Error> {
+    if name.is_empty() || name.len() > MAX_NAME {
+        return Err(Error::Invalid);
+    }
+    let ls = listeners();
+    if ls.iter().flatten().any(|l| &l.name[..l.name_len] == name) {
+        return Err(Error::Busy);
+    }
+    let index = ls.iter().position(Option::is_none).ok_or(Error::NoMem)?;
+    let mut e = ListenerEntry { name: [0; MAX_NAME], name_len: name.len(), owner: pid, pending: [None; svc::BACKLOG] };
+    e.name[..name.len()].copy_from_slice(name);
+    ls[index] = Some(e);
+    event!(Info, "svc.listen", pid = pid, name = core::str::from_utf8(name).unwrap_or("?"));
+    Ok(Listener { index })
+}
+
+/// `open("svc:NAME")`: a new channel to the listener; the caller gets end B.
+pub fn connect(name: &[u8], pid: u32) -> Result<End, Error> {
+    let ls = listeners();
+    let l = ls.iter_mut().flatten().find(|l| &l.name[..l.name_len] == name).ok_or(Error::Off)?;
+    let slot = l.pending.iter().position(Option::is_none).ok_or(Error::Busy)?;
+    let cs = channels();
+    let ch = cs.iter().position(|c| c.name_len == 0).ok_or(Error::NoMem)?;
+    let c = &mut cs[ch];
+    c.name[..name.len()].copy_from_slice(name);
+    c.name_len = name.len();
+    c.service = true;
+    c.pending_accept = true;
+    c.holder[1] = Some(pid);
+    c.had_peer[1] = true;
+    l.pending[slot] = Some(ch);
+    event!(Info, "svc.connect", pid = pid, name = c.name(), server = l.owner);
+    Ok(End { ch, end: 1 })
+}
+
+impl Listener {
+    fn entry(&self) -> &'static mut ListenerEntry {
+        listeners()[self.index].as_mut().unwrap()
+    }
+
+    /// End A of the oldest waiting connection, now held by `pid`.
+    pub fn accept(&mut self, pid: u32) -> Result<End, Error> {
+        let l = self.entry();
+        let ch = l.pending[0].ok_or(Error::Busy)?;
+        l.pending.rotate_left(1);
+        l.pending[svc::BACKLOG - 1] = None;
+        let c = &mut channels()[ch];
+        c.pending_accept = false;
+        c.holder[0] = Some(pid);
+        // A client that already left reads as PEER_CLOSED right away.
+        c.had_peer[0] = true;
+        Ok(End { ch, end: 0 })
+    }
+
+    /// The `wait` event: PENDING with the number of waiting connections.
+    pub fn poll(&self) -> Option<(usize, usize)> {
+        let n = self.entry().pending.iter().flatten().count();
+        (n > 0).then_some((svc::PENDING, n))
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        let l = listeners()[self.index].take().unwrap();
+        // Connections never accepted: their clients see PEER_CLOSED.
+        for ch in l.pending.into_iter().flatten() {
+            let c = &mut channels()[ch];
+            c.pending_accept = false;
+            free_if_unused(c);
         }
+        event!(Info, "svc.closed", pid = l.owner, name = core::str::from_utf8(&l.name[..l.name_len]).unwrap_or("?"));
     }
 }

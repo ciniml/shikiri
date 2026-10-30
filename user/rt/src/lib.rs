@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, rights, sys, timer, touch};
+pub use t5_abi::{Error, FOREVER, chan, display, event, rights, svc, sys, timer, touch};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -188,19 +188,30 @@ impl Timer {
 /// One end of the channel `chan:NAME` (doc/16 §5).
 pub struct Channel(pub Handle);
 
+/// Opens `prefix` + `name` with `rights`.
+fn open_prefixed(prefix: &str, name: &str, rights: usize) -> Result<Handle, Error> {
+    let mut full = [0u8; t5_abi::t5a::MAX_NAME];
+    let n = prefix.len() + name.len();
+    if n > full.len() {
+        return Err(Error::Size);
+    }
+    full[..prefix.len()].copy_from_slice(prefix.as_bytes());
+    full[prefix.len()..n].copy_from_slice(name.as_bytes());
+    let full = core::str::from_utf8(&full[..n]).map_err(|_| Error::Invalid)?;
+    Handle::open(full, rights)
+}
+
 impl Channel {
     /// Joins the channel `name` (without the `chan:` prefix). The image
     /// must be built with `--permit chan:NAME`.
     pub fn open(name: &str) -> Result<Channel, Error> {
-        let mut full = [0u8; t5_abi::t5a::MAX_NAME];
-        let n = chan::PREFIX.len() + name.len();
-        if n > full.len() {
-            return Err(Error::Size);
-        }
-        full[..chan::PREFIX.len()].copy_from_slice(chan::PREFIX.as_bytes());
-        full[chan::PREFIX.len()..n].copy_from_slice(name.as_bytes());
-        let full = core::str::from_utf8(&full[..n]).map_err(|_| Error::Invalid)?;
-        Handle::open(full, rights::READ | rights::WRITE | rights::WAIT).map(Channel)
+        open_prefixed(chan::PREFIX, name, rights::READ | rights::WRITE | rights::WAIT).map(Channel)
+    }
+
+    /// Connects to the service `name` (`--permit svc:NAME`): a channel of
+    /// its own to the server.
+    pub fn connect(name: &str) -> Result<Channel, Error> {
+        open_prefixed(svc::CONNECT_PREFIX, name, rights::READ | rights::WRITE | rights::WAIT).map(Channel)
     }
 
     /// Sends `msg`, yielding while the other end's queue is full.
@@ -342,6 +353,20 @@ impl Touch {
             *o = Point { x: u(0), y: u(1), id: u(2), size: u(3) };
         }
         Ok(n)
+    }
+}
+
+/// A server's listener on the service `name` (`--permit listen:NAME`).
+pub struct Listener(pub Handle);
+
+impl Listener {
+    pub fn open(name: &str) -> Result<Listener, Error> {
+        open_prefixed(svc::LISTEN_PREFIX, name, rights::CTL | rights::WAIT).map(Listener)
+    }
+
+    /// The oldest waiting connection (`Error::Busy` if none).
+    pub fn accept(&self) -> Result<Channel, Error> {
+        self.0.ctl(svc::ACCEPT, 0).map(|h| Channel(Handle(h as u32)))
     }
 }
 
