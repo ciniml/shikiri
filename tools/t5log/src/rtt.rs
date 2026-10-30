@@ -120,6 +120,10 @@ pub fn stream(
     let mut to_send: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 4096];
     let mut last_try = Instant::now() - Duration::from_secs(1);
+    // Commands wait until the up-channel has been read empty once: a kernel
+    // that ran with nobody reading has a full buffer (it drops new frames
+    // then), and the answers to the commands would be lost (doc/17 §9).
+    let mut drained = false;
     loop {
         // The kernel sets the control block up at boot; until then (or after
         // a reset wiped it) keep trying.
@@ -129,6 +133,7 @@ pub fn stream(
                 Ok(r) => {
                     eprintln!("t5log: RTT control block at {:#x}", opts.control_block);
                     rtt = Some(r);
+                    drained = false;
                 }
                 Err(_) => {
                     std::thread::sleep(opts.poll);
@@ -140,10 +145,12 @@ pub fn stream(
             std::thread::sleep(opts.poll);
             continue;
         };
-        match turn() {
-            Turn::Continue => {}
-            Turn::Send(more) => to_send.extend(more),
-            Turn::Stop => return Ok(()),
+        if drained {
+            match turn() {
+                Turn::Continue => {}
+                Turn::Send(more) => to_send.extend(more),
+                Turn::Stop => return Ok(()),
+            }
         }
         if !to_send.is_empty()
             && let Some(down) = r.down_channel(0)
@@ -170,6 +177,7 @@ pub fn stream(
                 return Ok(());
             }
         } else {
+            drained = true;
             std::thread::sleep(opts.poll);
         }
     }
