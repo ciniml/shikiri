@@ -1,7 +1,15 @@
 //! The Tab5's MIPI-DSI display (M6b, doc/17): LDO VO3 for the D-PHY, the
 //! DesignWare DSI host and its D-PHY, the DSI bridge, and DW-GDMA streaming
-//! a 720x1280 RGB565 framebuffer from PSRAM, one frame per DMA block; the
-//! channel stops after every frame and `service` starts it again.
+//! a 720x1280 RGB565 framebuffer from PSRAM, one frame per DMA block.
+//!
+//! The blocks come from a ring of `RING` list items, each pointing to the
+//! next. The DMA clears an item's VALID bit when it has used it, and stops
+//! at an invalid one; after each frame `service` marks the finished items
+//! valid again. So the CPU has `RING - 1` frames to react, not the 0.5 ms
+//! vertical blanking that ESP-IDF's one-item list (restarted from the
+//! interrupt) leaves: with that, every kernel stretch of more than a few
+//! ms (a signature check is ~23 ms) cost a frame, and the screen
+//! flickered (doc/17 §10).
 //!
 //! Register addresses, values and the order are from
 //! doc/research/m6-dsi.md §7 (ESP-IDF 6.0 esp_lcd/dsi, esp_hal_lcd and
@@ -149,12 +157,19 @@ const CH_INTSTATUS_ENABLE0: usize = CH + 0x80;
 const CH_INTSTATUS0: usize = CH + 0x88;
 const CH_INTCLEAR0: usize = CH + 0x98;
 const CH1_ENABLE: u32 = 0x101;
+const BLOCK_TFR_DONE: u32 = 1 << 0;
 const DMA_TFR_DONE: u32 = 1 << 1;
+const LLI_INVALID_ERR: u32 = 1 << 13;
 /// CTL of the frame's block: from memory (master 1, incrementing, 64-bit,
 /// bursts of 512) to the bridge FIFO (master 0, fixed, 64-bit, bursts of
-/// 256); AXI bursts of 16; the last valid item of the list.
+/// 256); AXI bursts of 16.
 const LLI_CTL_LO: u32 = 0x001E_1B41;
-const LLI_CTL_HI: u32 = 0xC010_8840;
+const LLI_CTL_HI: u32 = 0x0010_8840;
+const LLI_VALID: u32 = 1 << 31;
+/// Interrupt (block done) at the end of each frame.
+const IOC_BLKTFR: u32 = 1 << 26;
+/// Word index of CTL[63:32] in a list item.
+const LLI_CTL_HI_WORD: usize = 9;
 /// The non-cacheable alias of L2MEM: the DMA reads the list item from
 /// memory, not through the cache (dw_gdma.c:45; ext_mem_defs.h:68).
 const L2MEM_NON_CACHE: usize = 0x4000_0000;
@@ -198,15 +213,20 @@ const PLL_N: u32 = 1;
 const PLL_M: u32 = 52;
 const HSFREQRANGE: u32 = 0x2A;
 
-/// The DMA's list item: 64 bytes, 64-byte aligned, in internal SRAM.
+/// The DMA's list items: 64 bytes each, 64-byte aligned, in internal SRAM.
 #[repr(C, align(64))]
 struct Lli([u32; 16]);
-static mut LLI: Lli = Lli([0; 16]);
+/// 16 frames, about 250 ms: longer than the longest kernel stretch without
+/// the scheduler loop (verifying a 138 KiB image takes ~127 ms).
+const RING: usize = 16;
+static mut LLI: [Lli; RING] = [const { Lli([0; 16]) }; RING];
 
 struct State {
     fb: usize,
     frames: u32,
     underruns: u32,
+    /// Times the DMA ran into an invalid item and was restarted.
+    restarts: u32,
     started: u64,
 }
 static mut STATE: Option<State> = None;
@@ -504,8 +524,8 @@ fn gdma_init() -> Result<(), &'static str> {
         wr(CH_CFG0, 0xF); // source and destination: linked list
         wr(CH_CFG1, 0x0A02_0001); // M->P, DMA flow control, DSI, priority 1
         wr(CH_INTSTATUS_ENABLE0, 0xFFFF_FFFF);
-        // Raise the channel's interrupt only for "transfer done".
-        wr(CH + 0x90, DMA_TFR_DONE); // CH_INTSIGNAL_ENABLE0
+        // The channel's interrupt: a frame done, or the DMA stopped.
+        wr(CH + 0x90, BLOCK_TFR_DONE | DMA_TFR_DONE | LLI_INVALID_ERR); // CH_INTSIGNAL_ENABLE0
     }
     Ok(())
 }
@@ -593,23 +613,44 @@ fn test_pattern(fb: usize) {
     writeback(fb, FB_BYTES);
 }
 
-fn lli_addr() -> usize {
-    core::ptr::addr_of!(LLI) as usize
+fn lli_addr(i: usize) -> usize {
+    core::ptr::addr_of!(LLI) as usize + i * core::mem::size_of::<Lli>()
 }
 
-/// Writes the frame's list item through the non-cacheable alias and starts
-/// the channel.
-fn start_frame(fb: usize) {
-    let lli = (lli_addr() + L2MEM_NON_CACHE) as *mut u32;
+/// Item `i` through the non-cacheable alias: the DMA reads and writes the
+/// items in memory, not through the cache.
+fn lli_uncached(i: usize) -> *mut u32 {
+    (lli_addr(i) + L2MEM_NON_CACHE) as *mut u32
+}
+
+/// Writes the ring (every item a whole frame, pointing to the next) and
+/// starts the channel at item 0.
+fn start(fb: usize) {
     let words = (FB_BYTES / 8) as u32;
-    let item = [fb as u32, 0, BRG_FIFO, 0, words - 1, 0, 0, 0, LLI_CTL_LO, LLI_CTL_HI];
-    unsafe {
-        for (i, &w) in item.iter().enumerate() {
-            core::ptr::write_volatile(lli.add(i), w);
+    for i in 0..RING {
+        let next = lli_addr((i + 1) % RING) as u32 | 1; // LMS = 1: in memory (master 1)
+        let item = [fb as u32, 0, BRG_FIFO, 0, words - 1, 0, next, 0, LLI_CTL_LO, LLI_CTL_HI | IOC_BLKTFR | LLI_VALID];
+        for (k, &w) in item.iter().enumerate() {
+            unsafe { core::ptr::write_volatile(lli_uncached(i).add(k), w) };
         }
-        wr(CH_LLP0, lli_addr() as u32 | 1); // LMS = 1: the item is in memory (master 1)
+    }
+    unsafe {
+        wr(CH_LLP0, lli_addr(0) as u32 | 1);
         wr(CH_LLP1, 0);
         wr(GDMA_CHEN0, CH1_ENABLE);
+    }
+}
+
+/// Marks every used (invalidated) item valid again.
+fn revalidate() {
+    for i in 0..RING {
+        let w = unsafe { lli_uncached(i).add(LLI_CTL_HI_WORD) };
+        unsafe {
+            let v = core::ptr::read_volatile(w);
+            if v & LLI_VALID == 0 {
+                core::ptr::write_volatile(w, v | LLI_VALID);
+            }
+        }
     }
 }
 
@@ -640,11 +681,11 @@ pub fn init(panel: Panel, fb: usize) -> Result<(), &'static str> {
     event!(Info, "display.panel_ready");
     test_pattern(fb);
     unsafe {
-        *core::ptr::addr_of_mut!(STATE) = Some(State { fb, frames: 0, underruns: 0, started: Esp32p4v1::now() });
+        *core::ptr::addr_of_mut!(STATE) = Some(State { fb, frames: 0, underruns: 0, restarts: 0, started: Esp32p4v1::now() });
         wr(INTMTX_CORE0_BASE + 4 * GDMA_SOURCE, IRQ as u32);
         wr(CLIC_CTRL_BASE + 4 * IRQ, CLIC_CTRL);
     }
-    start_frame(fb);
+    start(fb);
     unsafe {
         wr(MODE_CFG, 0); // video mode
         wr(LPCLK_CTRL, 0x3); // clock lane: automatic HS
@@ -667,15 +708,26 @@ pub fn init(panel: Panel, fb: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Starts the next frame if the last one is done; counts underruns. Called
-/// from the scheduler loop and on the DMA interrupt.
+/// After frames: marks the used list items valid again; restarts the DMA
+/// if it stopped at an invalid item anyway. Counts frames and underruns.
+/// Called from the scheduler loop and on the DMA interrupt.
 pub fn service() {
     let Some(s) = state() else { return };
     let st = unsafe { rd(CH_INTSTATUS0) };
-    if st & DMA_TFR_DONE != 0 {
-        unsafe { wr(CH_INTCLEAR0, 0xFFFF_FFFF) };
+    if st == 0 {
+        return;
+    }
+    unsafe { wr(CH_INTCLEAR0, st) };
+    if st & BLOCK_TFR_DONE != 0 {
         s.frames = s.frames.wrapping_add(1);
-        start_frame(s.fb);
+    }
+    if st & (LLI_INVALID_ERR | DMA_TFR_DONE) != 0 {
+        // Too late after all: the channel waits at an invalid item.
+        s.restarts = s.restarts.wrapping_add(1);
+        stop();
+        start(s.fb);
+    } else {
+        revalidate();
     }
     if unsafe { rd(BRG_INT_RAW) } & BRG_UNDERRUN != 0 {
         unsafe { wr(BRG_INT_CLR, BRG_UNDERRUN) };
@@ -692,6 +744,7 @@ pub fn log_stats() -> Result<u32, &'static str> {
         "display.stats",
         frames = s.frames,
         underruns = s.underruns,
+        restarts = s.restarts,
         ms = ms as u32,
         fps_x10 = (s.frames as u64 * 10_000 / ms) as u32,
         int_st1 = unsafe { rd(INT_ST1) }
@@ -701,10 +754,15 @@ pub fn log_stats() -> Result<u32, &'static str> {
 
 /// Stops the DMA before a software reset: it would keep writing across the
 /// reset (system_internal.c:66-70).
-pub fn stop() {
+/// Returns whether the channel was running.
+pub fn stop() -> bool {
     if unsafe { rd(SOC_CLK_CTRL1) } & GDMA_SYS_CLK_EN == 0 {
-        return;
+        return false;
     }
-    unsafe { wr(GDMA_CHEN1, CH1_ENABLE) }; // abort channel 1
-    let _ = wait(1000, || unsafe { rd(GDMA_CHEN0) } & 1 == 0);
+    let running = unsafe { rd(GDMA_CHEN0) } & 1 != 0;
+    if running {
+        unsafe { wr(GDMA_CHEN1, CH1_ENABLE) }; // abort channel 1
+        let _ = wait(1000, || unsafe { rd(GDMA_CHEN0) } & 1 == 0);
+    }
+    running
 }

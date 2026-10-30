@@ -567,6 +567,12 @@ impl Platform for Esp32p4v1 {
     }
 
     fn psram_init() -> Result<(usize, usize), &'static str> {
+        // A reset that did not go through `reset` (a debug probe's, the
+        // watchdog's) leaves the frame DMA reading PSRAM; stop it before the
+        // PSRAM is set up again (doc/17 §10).
+        if display::stop() {
+            t5_abi::event!(Warn, "display.dma_was_running");
+        }
         let size = psram::init()?;
         unsafe { PSRAM_SIZE = size };
         Ok((psram::WINDOW, size))

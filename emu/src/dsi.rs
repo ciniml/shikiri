@@ -1,9 +1,10 @@
 //! The display path of M6b (doc/17 §7), as far as the kernel's bring-up
 //! sees it: the DSI host reports a locked PHY and empty command FIFOs (DCS
 //! reads get no answer), the bridge and the rest are plain registers, and
-//! DW-GDMA channel 1 "sends" a frame in a frame's time once enabled, then
-//! raises DMA_TFR_DONE (interrupt source 24) and stops, as the hardware
-//! does with a one-item list. Pixels are not modelled.
+//! DW-GDMA channel 1, once enabled, "sends" a frame per frame time and
+//! raises BLOCK_TFR_DONE (interrupt source 24) after each, as with the
+//! kernel's ring of list items, until aborted. The list items themselves and
+//! the pixels are not modelled.
 
 pub const HOST_BASE: u32 = 0x500A_0000;
 pub const HOST_SIZE: u32 = 0x1000;
@@ -22,7 +23,7 @@ const CH1_LLP0: u32 = 0x128;
 const CH1_INTSTATUS0: u32 = 0x188;
 const CH1_INTSIGNAL_ENABLE0: u32 = 0x190;
 const CH1_INTCLEAR0: u32 = 0x198;
-const DMA_TFR_DONE: u32 = 1 << 1;
+const BLOCK_TFR_DONE: u32 = 1 << 0;
 
 /// One 940 x 1324 frame at 80 MHz, in 16 MHz SYSTIMER ticks.
 const FRAME_TICKS: u64 = 940 * 1324 / 5;
@@ -31,7 +32,7 @@ const FRAME_TICKS: u64 = 940 * 1324 / 5;
 pub struct Dsi {
     host: std::collections::HashMap<u32, u32>,
     gdma: std::collections::HashMap<u32, u32>,
-    /// When the frame in flight ends (ticks).
+    /// When the frame in flight ends (ticks); None while stopped.
     busy_until: Option<u64>,
     pub frames: u64,
     /// LLP0 of the last start (the list item's address | LMS).
@@ -83,12 +84,12 @@ impl Dsi {
     }
 
     fn update(&mut self, ticks: u64) {
-        if let Some(t) = self.busy_until
+        while let Some(t) = self.busy_until
             && ticks >= t
         {
-            self.busy_until = None;
+            self.busy_until = Some(t + FRAME_TICKS);
             self.frames += 1;
-            *self.gdma.entry(CH1_INTSTATUS0).or_default() |= DMA_TFR_DONE;
+            *self.gdma.entry(CH1_INTSTATUS0).or_default() |= BLOCK_TFR_DONE;
         }
     }
 
