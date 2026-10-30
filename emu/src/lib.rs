@@ -4,4 +4,5 @@ pub mod elf;
 pub mod machine;
 pub mod periph;
 pub mod pmp;
+pub mod psram;
 pub mod rvc;

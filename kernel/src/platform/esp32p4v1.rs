@@ -127,6 +127,10 @@ const FLASH_SIZE: usize = 16 << 20;
 const MMU_PAGE: usize = 64 << 10;
 // esp32p4.rom.ld:259-260
 const ROM_CACHE_SUSPEND_L2: usize = 0x4FC0_0508;
+/// esp32p4.rom.ld:198. With PSRAM in use, dirty L1 D lines must be written
+/// back before L2 is suspended: an automatic writeback into the suspended
+/// L2 would hang the core (esp_mm/esp_cache_utils.c:27-37).
+const ROM_CACHE_WRITEBACK_ALL: usize = 0x4FC0_0414;
 const ROM_CACHE_RESUME_L2: usize = 0x4FC0_050C;
 const CACHE_MAP_L2_CACHE: u32 = 1 << 5;
 /// MHCR (0x7C1): return stack, predictive jumps, branch target prediction
@@ -147,6 +151,8 @@ unsafe fn map_flash_linear() {
         let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
         let mhcr: usize;
         core::arch::asm!("csrrc {0}, 0x7c1, {1}", out(reg) mhcr, in(reg) MHCR_BRANCH_PREDICTION);
+        let writeback_all: unsafe extern "C" fn(u32) -> i32 = core::mem::transmute(ROM_CACHE_WRITEBACK_ALL);
+        writeback_all(CACHE_MAP_L1_DCACHE);
         let autoload = suspend();
         let first = (FLASH_WINDOW & 0x03FF_FFFF) / MMU_PAGE;
         let mut page = 0;
@@ -191,6 +197,8 @@ unsafe fn flash_op(offset: u32, src: *const u32, len: u32) -> i32 {
         let write: unsafe extern "C" fn(u32, *const u32, u32) -> i32 = core::mem::transmute(ROM_SPIFLASH_WRITE);
         let mhcr: usize;
         core::arch::asm!("csrrc {0}, 0x7c1, {1}", out(reg) mhcr, in(reg) MHCR_BRANCH_PREDICTION);
+        let writeback_all: unsafe extern "C" fn(u32) -> i32 = core::mem::transmute(ROM_CACHE_WRITEBACK_ALL);
+        writeback_all(CACHE_MAP_L1_DCACHE);
         let autoload = suspend();
         let r = if src.is_null() { erase(offset / SECTOR) } else { write(offset, src, len) };
         let a = FLASH_WINDOW as u32 + offset;
@@ -247,6 +255,9 @@ fn cache_writeback(addr: usize, len: usize, l2: bool) {
 }
 
 pub struct Esp32p4v1;
+
+/// Set once at boot by `psram_init` (single core, kernel only).
+static mut PSRAM_SIZE: usize = 0;
 
 /// ESP-IDF `esp_app_desc_t` (esp_app_format/include/esp_app_desc.h). The
 /// 2nd stage bootloader checks the eFuse block revision range; espflash reads
@@ -414,12 +425,13 @@ impl Platform for Esp32p4v1 {
     }
 
     fn sync_code(addr: usize, len: usize) {
-        // L2MEM is only behind the L1 caches. PSRAM/flash would also need the
-        // L2 cache (CACHE_MAP_L2_CACHE) once apps are loaded there (M4).
+        // L2MEM is only behind the L1 caches. PSRAM is behind L2 as well:
+        // write both levels back, as ESP-IDF does for code it copies into
+        // PSRAM (mmu_psram_flash_v2.c:82-96). The I-cache refills through L2.
+        let external = (psram::WINDOW..psram::WINDOW + (64 << 20)).contains(&addr);
+        cache_writeback(addr, len, external);
         unsafe {
-            let writeback: RomCacheFn = core::mem::transmute(ROM_CACHE_WRITEBACK_ADDR);
             let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
-            writeback(CACHE_MAP_L1_DCACHE, addr as u32, len as u32);
             invalidate(CACHE_MAP_L1_ICACHE_MASK, addr as u32, len as u32);
             core::arch::asm!("fence.i");
         }
@@ -453,7 +465,20 @@ impl Platform for Esp32p4v1 {
     }
 
     fn psram_init() -> Result<(usize, usize), &'static str> {
-        psram::init().map(|size| (psram::WINDOW, size))
+        let size = psram::init()?;
+        unsafe { PSRAM_SIZE = size };
+        Ok((psram::WINDOW, size))
+    }
+
+    fn psram_test() -> Result<u32, &'static str> {
+        let size = unsafe { PSRAM_SIZE };
+        if size == 0 {
+            return Err("no psram");
+        }
+        match psram::memtest(size, 1) {
+            0 => Ok(size as u32),
+            _ => Err("memory test failed"),
+        }
     }
 
     fn flash_chip() -> Option<(u32, u32)> {

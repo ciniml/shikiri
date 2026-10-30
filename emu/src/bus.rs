@@ -5,6 +5,7 @@
 
 use crate::cache::{self, Cache};
 use crate::periph::{Peripherals, SYSTIMER_HZ};
+use crate::psram::Psram;
 
 /// The flash window. The first `FLASH_SIZE` bytes hold the kernel as the
 /// bootloader maps it (loaded from the ELF); pages the kernel maps through
@@ -72,8 +73,14 @@ pub struct Bus {
     tcm: Vec<u8>,
     pub lp_sram: Vec<u8>,
     pub cache: Cache,
+    pub psram: Psram,
     pub periph: Peripherals,
 }
+
+/// HP_SYS_CLKRST_ANA_PLL_CTRL0: MSPI_CAL_END (bit 8) reads as done, so the
+/// kernel's MPLL calibration finishes (hp_sys_clkrst_reg.h:3050).
+const ANA_PLL_CTRL0: u32 = 0x500E_60BC;
+const MSPI_CAL_END: u32 = 1 << 8;
 
 fn rd(mem: &[u8], off: u32, size: u32) -> u32 {
     let o = off as usize;
@@ -123,6 +130,7 @@ impl Bus {
             tcm: vec![0; TCM_SIZE as usize],
             lp_sram,
             cache: Cache::new(cache_mode, L2MEM_BASE, L2MEM_SIZE),
+            psram: Psram::new(cache_mode),
             periph: Peripherals::default(),
         }
         .with_flash_chip()
@@ -208,8 +216,11 @@ impl Bus {
         self.periph.reset_cause = cause;
         self.cycles = 0;
         self.cache = Cache::new(self.cache.mode, L2MEM_BASE, L2MEM_SIZE);
-        // The bootloader clears the MMU and maps only the kernel again.
+        // The bootloader clears the MMU and maps only the kernel again; the
+        // PSRAM keeps its contents but its MMU is cleared too.
         self.mmu.fill(0);
+        self.psram.mmu.fill(0);
+        self.psram.cache = Cache::new(self.cache.mode, crate::psram::WINDOW, crate::psram::WINDOW_SIZE);
         self.l2_suspended = false;
         if !keep_lp_sram {
             let mut x = seed | 1;
@@ -290,6 +301,12 @@ impl Bus {
         if within(addr, size, FLASH_BASE, FLASH_WINDOW_SIZE).is_some() {
             return self.window_read(addr, size);
         }
+        if Psram::in_window(addr) || Psram::in_uncached(addr) {
+            if self.l2_suspended && Psram::in_window(addr) {
+                self.flash_violation.get_or_insert(addr);
+            }
+            return self.psram.translate(addr, size).map(|o| rd(&self.psram.mem, o as u32, size));
+        }
         if let Some(o) = within(addr, size, TCM_BASE, TCM_SIZE) {
             return Some(rd(&self.tcm, o, size));
         }
@@ -299,6 +316,9 @@ impl Bus {
         match (addr, size) {
             (MMU_ITEM_INDEX, 4) => return Some(self.mmu_index),
             (MMU_ITEM_CONTENT, 4) => return Some(self.mmu[(self.mmu_index & 0x3FF) as usize]),
+            (crate::psram::MMU_ITEM_INDEX, 4) => return Some(self.psram.mmu_index),
+            (crate::psram::MMU_ITEM_CONTENT, 4) => return Some(self.psram.mmu[(self.psram.mmu_index & 0x3FF) as usize]),
+            (ANA_PLL_CTRL0, 4) => return Some(self.periph.read32(addr, self.ticks()) | MSPI_CAL_END),
             _ => {}
         }
         if (PERIPH.contains(&addr) || CLIC.contains(&addr)) && addr % size == 0 {
@@ -325,6 +345,20 @@ impl Bus {
             self.cache.writeback_d(L2MEM_BASE + o, size);
             return true;
         }
+        if Psram::in_window(addr) || Psram::in_uncached(addr) {
+            if self.l2_suspended && Psram::in_window(addr) {
+                self.flash_violation.get_or_insert(addr);
+            }
+            let Some(o) = self.psram.translate(addr, size) else { return false };
+            wr(&mut self.psram.mem, o as u32, size, v);
+            // As for L2MEM: the I-cache may hold the line either way.
+            let cached = crate::psram::WINDOW + (addr & (crate::psram::WINDOW_SIZE - 1));
+            self.psram.cache.on_store(cached, size);
+            if Psram::in_uncached(addr) {
+                self.psram.cache.writeback_d(cached, size);
+            }
+            return true;
+        }
         if let Some(o) = within(addr, size, TCM_BASE, TCM_SIZE) {
             wr(&mut self.tcm, o, size, v);
             return true;
@@ -334,6 +368,14 @@ impl Bus {
             return true;
         }
         match (addr, size) {
+            (crate::psram::MMU_ITEM_INDEX, 4) => {
+                self.psram.mmu_index = v & 0x3FF;
+                return true;
+            }
+            (crate::psram::MMU_ITEM_CONTENT, 4) => {
+                self.psram.mmu[self.psram.mmu_index as usize] = v;
+                return true;
+            }
             (MMU_ITEM_INDEX, 4) => {
                 self.mmu_index = v & 0x3FF;
                 return true;
@@ -372,6 +414,12 @@ impl Bus {
         }
         if let Some(o) = within(addr, 2, TCM_BASE, TCM_SIZE) {
             return Some(rd(&self.tcm, o, 2) as u16);
+        }
+        if Psram::in_window(addr) {
+            if self.l2_suspended {
+                self.flash_violation.get_or_insert(addr);
+            }
+            return self.psram.translate(addr, 2).map(|o| rd(&self.psram.mem, o as u32, 2) as u16);
         }
         None
     }

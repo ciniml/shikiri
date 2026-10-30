@@ -65,6 +65,10 @@ pub trait Platform {
     fn psram_init() -> Result<(usize, usize), &'static str> {
         Err("no psram")
     }
+    /// Tests the whole PSRAM (destroys its contents); returns its size.
+    fn psram_test() -> Result<u32, &'static str> {
+        Err("no psram")
+    }
     /// Flash chip details the boot code left behind, for the log:
     /// (JEDEC device id, size in bytes).
     fn flash_chip() -> Option<(u32, u32)> {

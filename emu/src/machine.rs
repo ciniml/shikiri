@@ -91,6 +91,13 @@ const ROM_CACHE_WRITEBACK_ADDR: u32 = 0x4FC0_03F4;
 /// esp32p4.rom.ld:259-260.
 const ROM_CACHE_SUSPEND_L2: u32 = 0x4FC0_0508;
 const ROM_CACHE_RESUME_L2: u32 = 0x4FC0_050C;
+/// esp32p4.rom.ld:198.
+const ROM_CACHE_WRITEBACK_ALL: u32 = 0x4FC0_0414;
+/// esp32p4.rom.ld:99-101: direct SPI commands (the kernel drives the
+/// PSRAM's MSPI3 with them).
+const ROM_SPI_CMD_CONFIG: u32 = 0x4FC0_0108;
+const ROM_SPI_CMD_START: u32 = 0x4FC0_010C;
+const ROM_SPI_SET_OP_MODE: u32 = 0x4FC0_0110;
 /// esp32p4.rom.ld:123,125 (rev v1.x).
 const ROM_SPIFLASH_ERASE_SECTOR: u32 = 0x4FC0_014C;
 const ROM_SPIFLASH_WRITE: u32 = 0x4FC0_0154;
@@ -476,6 +483,7 @@ impl Machine {
             ROM_CACHE_INVALIDATE_ADDR => {
                 if a0 & CACHE_MAP_L1_ICACHE_MASK != 0 {
                     self.bus.cache.invalidate_i(a1, a2);
+                    self.bus.psram.cache.invalidate_i(a1, a2);
                 }
                 self.bus.invalidate_window(a0, a1, a2);
             }
@@ -501,6 +509,32 @@ impl Machine {
             ROM_CACHE_WRITEBACK_ADDR => {
                 if a0 & CACHE_MAP_L1_DCACHE != 0 {
                     self.bus.cache.writeback_d(a1, a2);
+                    self.bus.psram.cache.writeback_d(a1, a2);
+                }
+            }
+            ROM_CACHE_WRITEBACK_ALL => {
+                if a0 & CACHE_MAP_L1_DCACHE != 0 {
+                    self.bus.cache.writeback_d(0, u32::MAX);
+                    self.bus.psram.cache.writeback_d(0, u32::MAX);
+                }
+            }
+            ROM_SPI_SET_OP_MODE => {}
+            ROM_SPI_CMD_CONFIG => {
+                // esp_rom_spi_cmd_t: u16 cmd, u16 cmd_bits, u32 *addr,
+                // u32 addr_bits, u32 *tx, u32 tx_bits, u32 *rx, u32 rx_bits,
+                // u32 dummy_bits (opi_flash.h).
+                let word = |bus: &mut crate::bus::Bus, a: u32| bus.read(a, 4).unwrap_or(0);
+                let cmd = word(&mut self.bus, a1) as u16;
+                let addr_ptr = word(&mut self.bus, a1 + 4);
+                let addr = if addr_ptr == 0 { 0 } else { word(&mut self.bus, addr_ptr) };
+                let (tx_ptr, tx_bits) = (word(&mut self.bus, a1 + 12), word(&mut self.bus, a1 + 16));
+                let rx_bits = word(&mut self.bus, a1 + 24);
+                let tx = (0..tx_bits / 8).map(|i| self.bus.read(tx_ptr + i, 1).unwrap_or(0) as u8).collect();
+                self.bus.psram.cmd = Some(crate::psram::SpiCmd { cmd, addr, tx, rx_bits });
+            }
+            ROM_SPI_CMD_START => {
+                for (i, b) in self.bus.psram.start(a2 as usize).into_iter().enumerate() {
+                    self.bus.write(a1 + i as u32, 1, b as u32);
                 }
             }
             ROM_CACHE_SUSPEND_L2 => {
@@ -511,8 +545,10 @@ impl Machine {
             }
             _ => return Err(Ex::Stop(Stop::UnknownRom { pc })),
         }
-        // Roughly one cycle per cache line, plus call overhead.
-        self.bus.cycles += 50 + (a2 / crate::cache::LINE) as u64;
+        // Call overhead, plus roughly one cycle per cache line for the
+        // functions that take a range (a2 is not a length for the others).
+        let lines = if matches!(pc, ROM_CACHE_INVALIDATE_ADDR | ROM_CACHE_WRITEBACK_ADDR) { a2 / crate::cache::LINE } else { 0 };
+        self.bus.cycles += 50 + lines as u64;
         self.cpu.x[10] = 0;
         self.cpu.pc = self.cpu.x[1] & !1;
         Ok(())
@@ -530,7 +566,7 @@ impl Machine {
             return Err(Ex::E(cause::INSN_ACCESS, self.cpu.pc));
         }
         let h = self.bus.fetch16(addr).ok_or(Ex::E(cause::INSN_ACCESS, self.cpu.pc))?;
-        if !self.bus.cache.fetch_ok(addr) {
+        if !self.bus.cache.fetch_ok(addr) || !self.bus.psram.cache.fetch_ok(addr) {
             return Err(Ex::Stop(Stop::IncoherentFetch { pc: addr }));
         }
         Ok(h as u32)

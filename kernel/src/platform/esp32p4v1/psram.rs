@@ -541,12 +541,13 @@ fn pattern(i: usize) -> u32 {
     x ^ (x >> 15) ^ 0xA5A5_0F0F
 }
 
-/// Writes a pattern through the cache, writes it back, and reads it through
-/// both the cache and the uncached alias. Returns the bad words.
-fn memtest(size: usize) -> u32 {
+/// Writes a pattern through the cache to every `step`-th word, writes it
+/// back, and reads it through the cache and (every 4 KiB) the uncached
+/// alias. Returns the bad words.
+pub fn memtest(size: usize, step: usize) -> u32 {
     let words = size / 4;
     let started = Esp32p4v1::now();
-    for i in 0..words {
+    for i in (0..words).step_by(step) {
         unsafe { core::ptr::write_volatile((WINDOW + i * 4) as *mut u32, pattern(i)) };
         if i % 0x4_0000 == 0 {
             Esp32p4v1::feed_watchdog();
@@ -557,7 +558,7 @@ fn memtest(size: usize) -> u32 {
     let mut bad = 0u32;
     let mut first_bad = None;
     let started = Esp32p4v1::now();
-    for i in 0..words {
+    for i in (0..words).step_by(step) {
         let v = unsafe { core::ptr::read_volatile((WINDOW + i * 4) as *const u32) };
         if v != pattern(i) {
             bad += 1;
@@ -570,16 +571,18 @@ fn memtest(size: usize) -> u32 {
     let read_us = (Esp32p4v1::now() - started) / 16;
     // Every 4 KiB through the uncached alias: the data reached the chip.
     let mut bad_uncached = 0u32;
-    for i in (0..words).step_by(1024) {
+    for i in (0..words).step_by(step.max(1024)) {
         if unsafe { core::ptr::read_volatile((UNCACHED + i * 4) as *const u32) } != pattern(i) {
             bad_uncached += 1;
         }
     }
-    let mb_s = |us: u64| if us == 0 { 0 } else { size as u64 / us };
+    let tested = (words.div_ceil(step) * 4) as u64;
+    let mb_s = |us: u64| if us == 0 { 0 } else { tested / us };
     event!(
         Info,
         "psram.memtest",
         bytes = size as u32,
+        step_words = step as u32,
         bad_words = bad,
         first_bad = Addr(first_bad.map_or(0, |i| (WINDOW + i * 4) as u32)),
         bad_uncached = bad_uncached,
@@ -589,7 +592,11 @@ fn memtest(size: usize) -> u32 {
     bad + bad_uncached
 }
 
-/// Brings the PSRAM up and maps it at `WINDOW`; returns its size.
+/// Words between tested words in the boot-time test: one per 16 KiB.
+const QUICK_STEP: usize = 4096;
+
+/// Brings the PSRAM up, maps it at `WINDOW` and checks it with a short
+/// test; returns its size.
 pub fn init() -> Result<usize, &'static str> {
     let started = Esp32p4v1::now();
     ldo_vo2_on()?;
@@ -636,7 +643,7 @@ pub fn init() -> Result<usize, &'static str> {
     axi_init();
     tune()?;
     map(size);
-    let bad = memtest(size);
+    let bad = memtest(size, QUICK_STEP);
     event!(Info, "psram.ready", window = Addr(WINDOW as u32), size = size as u32, ms = (Esp32p4v1::now() - started) / 16_000);
     if bad != 0 {
         return Err("memory test failed");

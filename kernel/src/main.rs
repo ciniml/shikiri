@@ -119,6 +119,13 @@ pub extern "C" fn kmain() -> ! {
         store.log_contents();
         store
     });
+    // Apps run from PSRAM when there is one (M4a), else from the L2MEM pool.
+    match Current::psram_init() {
+        Ok((window, size)) => set_pool(window..window + size),
+        Err(why) => event!(Warn, "boot.no_psram", error = why),
+    }
+    let (pool, slot_size) = (pool(), slot(0).1);
+    event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
         Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps),
         Some(None) => 1,
@@ -227,7 +234,9 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, frame: &[u8]) {
         Command::InstallEnd => store.install_end().map(|e| e.length),
         Command::Remove { name } => store.remove(name),
         Command::FlashTest => store.flash_test(),
-        Command::Psram => Current::psram_init().map(|(_, size)| size as u32),
+        // The full test overwrites the whole PSRAM, processes included.
+        Command::Psram if s.slots.iter().any(Option::is_some) => Err("processes running"),
+        Command::Psram => Current::psram_test(),
     };
     match result {
         Ok(value) => event!(Info, "ctl.done", request_id = id, cmd = cmd.name(), ok = true, value = value),
@@ -270,9 +279,22 @@ fn dump_pmp() {
     }
 }
 
+/// Memory processes are loaded into: `Current::APP_POOL` unless the
+/// platform brought up PSRAM at boot.
+static mut POOL: Option<core::ops::Range<usize>> = None;
+
+fn set_pool(r: core::ops::Range<usize>) {
+    // Single core, set once at boot before any process exists.
+    unsafe { *core::ptr::addr_of_mut!(POOL) = Some(r) };
+}
+
+fn pool() -> core::ops::Range<usize> {
+    unsafe { (*core::ptr::addr_of!(POOL)).clone() }.unwrap_or(Current::APP_POOL)
+}
+
 /// Slot `i` of the app pool; each process gets one.
 fn slot(i: usize) -> (usize, usize) {
-    let pool = Current::APP_POOL;
+    let pool = pool();
     let size = (pool.end - pool.start) / sched::MAX_PROCS / pmp::GRANULE * pmp::GRANULE;
     (pool.start + i * size, size)
 }
