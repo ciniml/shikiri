@@ -1,0 +1,492 @@
+### --reset --cmd ps
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+   0.114837 I kernel log.prev_begin boot_id=424 bytes=7270
+prev#424    0.063756 I kernel boot.start platform=esp32p4-v1.x boot_id=424 reset_cause=23 abi_major=0 abi_minor=5
+prev#424    0.063864 I kernel boot.cpu misa=1083183397 mstatus=0 mtvec=0x40002903
+prev#424    0.063936 I kernel boot.rwdt config0=2953309696 stg0_hold=272000
+prev#424    0.064026 D kernel boot.clock_reg name=root_clk_ctrl0 addr=0x500e6004 value=96
+prev#424    0.064112 D kernel boot.clock_reg name=root_clk_ctrl1 addr=0x500e6008 value=0
+prev#424    0.064198 D kernel boot.clock_reg name=root_clk_ctrl2 addr=0x500e600c value=0
+prev#424    0.064284 D kernel boot.clock_reg name=soc_clk_ctrl0 addr=0x500e6014 value=3873413103
+prev#424    0.064371 D kernel boot.clock_reg name=peri_clk_ctrl00 addr=0x500e6030 value=53341
+prev#424    0.064459 D kernel boot.clock_reg name=ana_pll_ctrl0 addr=0x500e60bc value=844
+prev#424    0.114547 D kernel boot.clock_reg name=lp_hp_clk_ctrl addr=0x50111040 value=536870909
+prev#424    0.114635 D kernel boot.clock_reg name=pmu_rf_pwc addr=0x5011515c value=218103808
+prev#424    0.114716 D kernel boot.clock_reg name=pmu_ext_ldo_p1_0p1a addr=0x501151d0 value=1075839360
+prev#424    0.114825 D kernel boot.clock_reg name=pmu_ext_ldo_p1_0p1a_ana addr=0x501151d4 value=2776629248
+prev#424    0.115934 I kernel boot.clock cpu_khz=89803
+prev#424    0.119214 I kernel flash.mapped window=0x41000000 ota0_crc32=3838053574
+prev#424    0.128231 I kernel store.open window=0x41000000 catalog_seq=13 apps=9
+prev#424    0.128438 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+prev#424    0.128562 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+prev#424    0.128680 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+prev#424    0.128798 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+prev#424    0.128929 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+prev#424    0.129056 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+prev#424    0.129173 I kernel store.app name=timers major=0 minor=1 patch=0 offset=0x00430000 length=9304 state=2 flags=0
+prev#424    0.129292 I kernel store.app name=hello-xip major=0 minor=1 patch=0 offset=0x00490000 length=7012 state=2 flags=0
+prev#424    0.129414 I kernel store.app name=xipcheck major=0 minor=1 patch=0 offset=0x004a0000 length=138344 state=2 flags=0
+prev#424    0.129655 I kernel kupdate.otadata sector=0 ota_seq=1 state=valid crc_ok=true valid=true
+prev#424    0.129744 I kernel kupdate.otadata sector=1 ota_seq=4294967295 state=undefined crc_ok=false valid=false
+prev#424    0.129918 I kernel kupdate.slot slot=0 running=true version=0.1.0 secure_version=0 len=104160
+prev#424    0.130031 I kernel kupdate.slot slot=1 running=false version=0.1.1-bad-panic secure_version=1 len=20016
+prev#424    0.130164 I kernel psram.ldo dref=10 mul=3 efuse=true nominal_mv=1925 ldo=1075839360 ana=2776629248
+prev#424    0.130496 I kernel psram.mpll mhz=400 cal_us=13 div_reg=153
+prev#424    0.130600 I kernel psram.controller
+prev#424    0.130869 I kernel psram.id vendor=13 density=7 kgd=6 size=33554432 echo=1516993677 mr0=48 mr3=160 mr4=32 mr8=75
+prev#424    0.297116 I kernel psram.tuned phase=0 phases_ok=15 delayline_id=17 data_delay=2 dqs_delay=0 window=25 delaylines_ok=1073741792 ms=166
+prev#424    0.303735 I kernel psram.memtest bytes=33554432 step_words=4096 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=2 read_mb_s=5
+prev#424    0.303853 I kernel psram.ready window=0x48000000 size=33554432 ms=173
+prev#424    0.303951 I kernel clock.pvt blk_version=3 gap_efuse=7 supported=true
+prev#424    0.304039 I kernel clock.voltage stage=bootloader dcm_vset=27 regulator_dbias=22 hp_dbias=26 lp_dbias=27 pvt_control=false
+prev#424    0.306381 I kernel clock.pvt_on gap=17
+prev#424    0.306447 I kernel clock.voltage stage=pvt dcm_vset=27 regulator_dbias=22 hp_dbias=25 lp_dbias=26 pvt_control=true
+prev#424    0.306562 I kernel clock.dividers root_src=1 cpu=3 mem=0 sys=0 apb=0 known=true
+prev#424    0.307660 I kernel clock.cpu mhz=360 measured_khz=359982
+prev#424    0.307698 I kernel clock.voltage stage=cpu360 dcm_vset=27 regulator_dbias=22 hp_dbias=25 lp_dbias=26 pvt_control=true
+prev#424    0.307747 I kernel boot.pool base=0x48000000 size=33554432 slot_size=8388608
+prev#424    0.332775 I kernel selftest.case name=verify/tampered ok=true result=Image(BadSignature)
+prev#424    0.332844 I kernel selftest.case name=verify/untrusted-key ok=true result=Image(UnknownKey)
+prev#424    0.355784 I kernel selftest.case name=verify/abi-mismatch ok=true result=Image(AbiMismatch { major: 9, minor: 0 })
+prev#424    0.378544 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 xip=false verify_us=22608
+prev#424    0.378821 I kernel proc.start pid=1 name=hello base=0x48000000 data=0x48001880 build_id=a6b2b9658434ae960f4736e9d51704c5
+prev#424    0.379038 I pid1   <unknown 0xc8b93008> hello from U-mode
+prev#424    0.379111 I kernel proc.exit pid=1 code=0
+prev#424    0.379191 I kernel selftest.case name=hello ok=true result=exit code=0
+prev#424    0.402505 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=23243
+prev#424    0.402663 I kernel proc.start pid=1 name=fault/ok base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.402739 I pid1   <unknown 0x0d63886c> 0 0x00000000
+prev#424    0.402768 I kernel proc.exit pid=1 code=0
+prev#424    0.402803 I kernel selftest.case name=fault/ok ok=true result=exit code=0
+prev#424    0.425710 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22857
+prev#424    0.425861 I kernel proc.start pid=1 name=fault/load-mmio base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.425940 I pid1   <unknown 0x0d63886c> 1 0x500d2000
+prev#424    0.425984 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+prev#424    0.426045 I kernel selftest.case name=fault/load-mmio ok=true result=load access fault code=5 pc=0x48000084 tval=0x500d2000
+prev#424    0.448969 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22852
+prev#424    0.449118 I kernel proc.start pid=1 name=fault/load-kernel base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.449199 I pid1   <unknown 0x0d63886c> 1 0x40000b7c
+prev#424    0.449233 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+prev#424    0.449291 I kernel selftest.case name=fault/load-kernel ok=true result=load access fault code=5 pc=0x48000084 tval=0x40000b7c
+prev#424    0.472217 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22852
+prev#424    0.472365 I kernel proc.start pid=1 name=fault/store-kernel base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.472447 I pid1   <unknown 0x0d63886c> 2 0x40000b7c
+prev#424    0.472478 W kernel proc.fault: 1 killed by store access fault at 0x480000da
+prev#424    0.472536 I kernel selftest.case name=fault/store-kernel ok=true result=store access fault code=7 pc=0x480000da tval=0x40000b7c
+prev#424    0.495464 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22852
+prev#424    0.495612 I kernel proc.start pid=1 name=fault/load-kernel-ram base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.495696 I pid1   <unknown 0x0d63886c> 1 0x4ff01254
+prev#424    0.495727 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+prev#424    0.495784 I kernel selftest.case name=fault/load-kernel-ram ok=true result=load access fault code=5 pc=0x48000084 tval=0x4ff01254
+prev#424    0.518713 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22852
+prev#424    0.518864 I kernel proc.start pid=1 name=fault/store-kernel-ram base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.518949 I pid1   <unknown 0x0d63886c> 2 0x4ff01254
+prev#424    0.518980 W kernel proc.fault: 1 killed by store access fault at 0x480000da
+prev#424    0.519039 I kernel selftest.case name=fault/store-kernel-ram ok=true result=store access fault code=7 pc=0x480000da tval=0x4ff01254
+prev#424    0.541970 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+prev#424    0.542118 I kernel proc.start pid=1 name=fault/exec-data base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.542198 I pid1   <unknown 0x0d63886c> 3 0x00000000
+prev#424    0.542233 W kernel proc.fault: 1 killed by instruction access fault at 0x48001be8
+prev#424    0.542296 I kernel selftest.case name=fault/exec-data ok=true result=instruction access fault code=1 pc=0x48001be8 tval=0x48001be8
+prev#424    0.565226 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+prev#424    0.565376 I kernel proc.start pid=1 name=fault/store-text base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.565457 I pid1   <unknown 0x0d63886c> 4 0x00000000
+prev#424    0.565488 W kernel proc.fault: 1 killed by store access fault at 0x480000ce
+prev#424    0.565546 I kernel selftest.case name=fault/store-text ok=true result=store access fault code=7 pc=0x480000ce tval=0x4800000a
+prev#424    0.588473 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+prev#424    0.588625 I kernel proc.start pid=1 name=fault/bad-log base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.588703 I pid1   <unknown 0x0d63886c> 5 0x40000b7c
+prev#424    0.588736 W kernel log.rejected pid=1 len=5
+prev#424    0.588764 W kernel log.rejected pid=1 len=7
+prev#424    0.588794 I kernel proc.exit pid=1 code=0
+prev#424    0.588829 I kernel selftest.case name=fault/bad-log ok=true result=exit code=0
+prev#424    0.611737 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22854
+prev#424    0.611885 I kernel proc.start pid=1 name=fault/open-denied base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+prev#424    0.611966 I pid1   <unknown 0x0d63886c> 6 0x40000b7c
+prev#424    0.612011 W kernel proc.denied pid=1 name=timer
+prev#424    0.612047 I pid1   <unknown 0xb9c63d8f> true true
+prev#424    0.612074 I kernel proc.exit pid=1 code=0
+prev#424    0.612109 I kernel selftest.case name=fault/open-denied ok=true result=exit code=0
+prev#424    0.612161 I kernel selftest.m2_start processes=4 slice_ms=10
+prev#424    0.635812 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e xip=false verify_us=23600
+prev#424    0.635965 I kernel proc.start pid=1 name=ticker1 base=0x48000000 data=0x48001c00 build_id=23dcbe01818507daf03ef6718e8b605e
+prev#424    0.659170 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e xip=false verify_us=23127
+prev#424    0.659401 I kernel proc.start pid=2 name=ticker2 base=0x48800000 data=0x48801c00 build_id=23dcbe01818507daf03ef6718e8b605e
+prev#424    0.682763 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=23286
+prev#424    0.682996 I kernel proc.start pid=3 name=spin1 base=0x49000000 data=0x49001b80 build_id=a24822e2c6097d31431cf08bce1421e2
+prev#424    0.705964 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=22893
+prev#424    0.706166 I kernel proc.start pid=4 name=spin2 base=0x49800000 data=0x49801b80 build_id=a24822e2c6097d31431cf08bce1421e2
+prev#424    0.756334 I pid1   <unknown 0xefc297ce> 1 0 30008
+prev#424    0.771359 I pid2   <unknown 0xefc297ce> 2 0 45008
+prev#424    0.786375 I pid1   <unknown 0xefc297ce> 1 1 30008
+prev#424    0.806426 I pid3   <unknown 0x41d7c04d> 1 22201 5 0
+prev#424    0.806461 I kernel proc.exit pid=3 code=0
+prev#424    0.816329 I pid4   <unknown 0x41d7c04d> 2 18484 4 0
+prev#424    0.816356 I kernel proc.exit pid=4 code=0
+prev#424    0.816399 I pid2   <unknown 0xefc297ce> 2 1 45007
+prev#424    0.816435 I pid1   <unknown 0xefc297ce> 1 2 30027
+prev#424    0.846474 I pid1   <unknown 0xefc297ce> 1 3 30006
+prev#424    0.861483 I pid2   <unknown 0xefc297ce> 2 2 45006
+prev#424    0.876513 I pid1   <unknown 0xefc297ce> 1 4 30006
+prev#424    0.876541 I kernel proc.exit pid=1 code=0
+prev#424    0.906522 I pid2   <unknown 0xefc297ce> 2 3 45006
+prev#424    0.951561 I pid2   <unknown 0xefc297ce> 2 4 45006
+prev#424    0.951588 I kernel proc.exit pid=2 code=0
+prev#424    0.951656 I kernel selftest.case name=ticker1 ok=true result=exit code=0
+prev#424    0.951685 I kernel selftest.case name=ticker2 ok=true result=exit code=0
+prev#424    0.951714 I kernel selftest.case name=spin1 ok=true result=exit code=0
+prev#424    0.951742 I kernel selftest.case name=spin2 ok=true result=exit code=0
+prev#424    0.951774 I kernel selftest.m2_stats elapsed_ms=245 preemptions=12 fpu_switches=4 fpu_saves=2 idle_waits=6
+prev#424    0.976491 I kernel loader.verified name=timers major=0 minor=1 patch=0 build_id=c8e99f38b575ff45116b342bad9c7254 xip=false verify_us=24649
+prev#424    0.976678 I kernel proc.start pid=1 name=timers20 base=0x48000000 data=0x48002180 build_id=c8e99f38b575ff45116b342bad9c7254
+prev#424    1.000801 I kernel loader.verified name=timers major=0 minor=1 patch=0 build_id=c8e99f38b575ff45116b342bad9c7254 xip=false verify_us=24053
+prev#424    1.000992 I kernel proc.start pid=2 name=timers35 base=0x48800000 data=0x48802180 build_id=c8e99f38b575ff45116b342bad9c7254
+prev#424    1.024124 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=23066
+prev#424    1.024309 I kernel proc.start pid=3 name=spin base=0x49000000 data=0x49001b80 build_id=a24822e2c6097d31431cf08bce1421e2
+prev#424    1.024404 W kernel proc.denied pid=1 name=display
+prev#424    1.024524 W kernel proc.denied pid=2 name=display
+prev#424    1.174592 I pid3   <unknown 0x41d7c04d> 3 58094 0 0
+prev#424    1.174625 I kernel proc.exit pid=3 code=2
+prev#424    1.266511 I pid1   <unknown 0xf839952b> 20 10 200008 19995 20015 0
+prev#424    1.266554 I kernel proc.exit pid=1 code=0
+prev#424    1.306584 I pid2   <unknown 0xf839952b> 35 6 210008 34997 35011 0
+prev#424    1.306626 I kernel proc.exit pid=2 code=0
+prev#424    1.306667 I kernel selftest.case name=timers20 ok=true result=exit code=0
+prev#424    1.306697 I kernel selftest.case name=timers35 ok=true result=exit code=0
+prev#424    1.306726 I kernel selftest.case name=spin ok=true result=exit code=2
+prev#424    1.329698 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 xip=false verify_us=22867
+prev#424    1.329844 I kernel proc.start pid=1 name=hello base=0x48000000 data=0x48001880 build_id=a6b2b9658434ae960f4736e9d51704c5
+prev#424    1.352621 I kernel loader.verified name=hello-xip major=0 minor=1 patch=0 build_id=43d2215373f91d729bd120a140443249 xip=true verify_us=22703
+prev#424    1.352775 I kernel proc.start pid=2 name=hello-xip base=0x42800080 data=0x4a800080 build_id=43d2215373f91d729bd120a140443249
+prev#424    1.479742 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=126562
+prev#424    1.480067 I kernel proc.start pid=3 name=xipcheck base=0x43000080 data=0x4b000080 build_id=01f307438c713df1ded6d70c71bf93a2
+prev#424    1.480319 I pid1   <unknown 0xc8b93008> hello from U-mode
+prev#424    1.480392 I kernel proc.exit pid=1 code=0
+prev#424    1.480517 I pid2   <unknown 0xc8b93008> hello from U-mode
+prev#424    1.480544 I kernel proc.exit pid=2 code=0
+prev#424    1.489266 I pid3   <unknown 0x21ffb526> true 0x4300008a 0x4300156c 0x4b0000e8 1100105550
+prev#424    1.489333 I kernel proc.exit pid=3 code=0
+prev#424    1.489419 I kernel selftest.case name=hello ok=true result=exit code=0
+prev#424    1.489462 I kernel selftest.case name=hello-xip ok=true result=exit code=0
+prev#424    1.489494 I kernel selftest.case name=xipcheck ok=true result=exit code=0
+prev#424    1.489546 I kernel selftest.result failures=0 pass=true
+prev#424    1.489954 I kernel clock.voltage stage=selftest_done dcm_vset=27 regulator_dbias=22 hp_dbias=26 lp_dbias=27 pvt_control=true
+prev#424    1.490047 I kernel ctl.ready slots=4 stack_size=49152 stack_used=16304
+   0.124137 I kernel log.prev_end boot_id=424 frames=171
+   0.124252 I kernel boot.start platform=esp32p4-v1.x boot_id=425 reset_cause=24 abi_major=0 abi_minor=5
+   0.124361 I kernel boot.cpu misa=1083183397 mstatus=0 mtvec=0x40002903
+   0.124434 I kernel boot.rwdt config0=2953309696 stg0_hold=272000
+   0.124520 D kernel boot.clock_reg name=root_clk_ctrl0 addr=0x500e6004 value=96
+   0.124608 D kernel boot.clock_reg name=root_clk_ctrl1 addr=0x500e6008 value=0
+   0.124696 D kernel boot.clock_reg name=root_clk_ctrl2 addr=0x500e600c value=0
+   0.124784 D kernel boot.clock_reg name=soc_clk_ctrl0 addr=0x500e6014 value=3873413103
+   0.124873 D kernel boot.clock_reg name=peri_clk_ctrl00 addr=0x500e6030 value=53341
+   0.124962 D kernel boot.clock_reg name=ana_pll_ctrl0 addr=0x500e60bc value=844
+   0.125048 D kernel boot.clock_reg name=lp_hp_clk_ctrl addr=0x50111040 value=536870909
+   0.125135 D kernel boot.clock_reg name=pmu_rf_pwc addr=0x5011515c value=218103808
+   0.125217 D kernel boot.clock_reg name=pmu_ext_ldo_p1_0p1a addr=0x501151d0 value=1075839360
+   0.125327 D kernel boot.clock_reg name=pmu_ext_ldo_p1_0p1a_ana addr=0x501151d4 value=2776629248
+   0.126436 I kernel boot.clock cpu_khz=89803
+   0.129718 I kernel flash.mapped window=0x41000000 ota0_crc32=3838053574
+   0.138735 I kernel store.open window=0x41000000 catalog_seq=13 apps=9
+   0.138953 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+   0.139083 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+   0.139201 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+   0.139319 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+   0.139450 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+   0.139576 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+   0.140978 I kernel psram.controller
+t5log: -> #1 ps
+   0.307932 I kernel psram.tuned phase=0 phases_ok=15 delayline_id=17 data_delay=2 dqs_delay=0 window=25 delaylines_ok=1073741792 ms=166
+   0.308043 W kernel log.dropped sink=rtt count=2
+   0.316635 I kernel psram.memtest bytes=33554432 step_words=4096 bad_words=0 first_bad=0x00000000 bad_uncached=0 write_mb_s=1 read_mb_s=5
+   0.316754 I kernel psram.ready window=0x48000000 size=33554432 ms=176
+   0.316851 I kernel clock.pvt blk_version=3 gap_efuse=7 supported=true
+   0.316938 I kernel clock.voltage stage=bootloader dcm_vset=27 regulator_dbias=22 hp_dbias=26 lp_dbias=27 pvt_control=false
+   0.319281 I kernel clock.pvt_on gap=17
+   0.319347 I kernel clock.voltage stage=pvt dcm_vset=27 regulator_dbias=22 hp_dbias=25 lp_dbias=26 pvt_control=true
+   0.319462 I kernel clock.dividers root_src=1 cpu=3 mem=0 sys=0 apb=0 known=true
+   0.320558 I kernel clock.cpu mhz=360 measured_khz=359996
+   0.320596 I kernel clock.voltage stage=cpu360 dcm_vset=27 regulator_dbias=22 hp_dbias=25 lp_dbias=26 pvt_control=true
+   0.320645 I kernel boot.pool base=0x48000000 size=33554432 slot_size=8388608
+   0.345665 I kernel selftest.case name=verify/tampered ok=true result=Image(BadSignature)
+   0.345737 I kernel selftest.case name=verify/untrusted-key ok=true result=Image(UnknownKey)
+   0.368747 I kernel selftest.case name=verify/abi-mismatch ok=true result=Image(AbiMismatch { major: 9, minor: 0 })
+   0.391445 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 xip=false verify_us=22547
+   0.391722 I kernel proc.start pid=1 name=hello base=0x48000000 data=0x48001880 build_id=a6b2b9658434ae960f4736e9d51704c5
+   0.391939 I pid1   <unknown 0xc8b93008> hello from U-mode
+   0.392012 I kernel proc.exit pid=1 code=0
+   0.392092 I kernel selftest.case name=hello ok=true result=exit code=0
+   0.415410 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=23246
+   0.415568 I kernel proc.start pid=1 name=fault/ok base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.415645 I pid1   <unknown 0x0d63886c> 0 0x00000000
+   0.415674 I kernel proc.exit pid=1 code=0
+   0.415708 I kernel selftest.case name=fault/ok ok=true result=exit code=0
+   0.438615 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22857
+   0.438766 I kernel proc.start pid=1 name=fault/load-mmio base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.438846 I pid1   <unknown 0x0d63886c> 1 0x500d2000
+   0.438890 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+   0.438950 I kernel selftest.case name=fault/load-mmio ok=true result=load access fault code=5 pc=0x48000084 tval=0x500d2000
+   0.461875 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+   0.462024 I kernel proc.start pid=1 name=fault/load-kernel base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.462105 I pid1   <unknown 0x0d63886c> 1 0x40000b7c
+   0.462139 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+   0.462196 I kernel selftest.case name=fault/load-kernel ok=true result=load access fault code=5 pc=0x48000084 tval=0x40000b7c
+   0.485123 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+   0.485271 I kernel proc.start pid=1 name=fault/store-kernel base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.485353 I pid1   <unknown 0x0d63886c> 2 0x40000b7c
+   0.485383 W kernel proc.fault: 1 killed by store access fault at 0x480000da
+   0.485442 I kernel selftest.case name=fault/store-kernel ok=true result=store access fault code=7 pc=0x480000da tval=0x40000b7c
+   0.508369 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22852
+   0.508518 I kernel proc.start pid=1 name=fault/load-kernel-ram base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.508602 I pid1   <unknown 0x0d63886c> 1 0x4ff01254
+   0.508632 W kernel proc.fault: 1 killed by load access fault at 0x48000084
+   0.508690 I kernel selftest.case name=fault/load-kernel-ram ok=true result=load access fault code=5 pc=0x48000084 tval=0x4ff01254
+   0.531620 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+   0.531771 I kernel proc.start pid=1 name=fault/store-kernel-ram base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.531856 I pid1   <unknown 0x0d63886c> 2 0x4ff01254
+   0.531887 W kernel proc.fault: 1 killed by store access fault at 0x480000da
+   0.531945 I kernel selftest.case name=fault/store-kernel-ram ok=true result=store access fault code=7 pc=0x480000da tval=0x4ff01254
+   0.554950 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22926
+   0.555098 I kernel proc.start pid=1 name=fault/exec-data base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.555178 I pid1   <unknown 0x0d63886c> 3 0x00000000
+   0.555212 W kernel proc.fault: 1 killed by instruction access fault at 0x48001be8
+   0.555275 I kernel selftest.case name=fault/exec-data ok=true result=instruction access fault code=1 pc=0x48001be8 tval=0x48001be8
+   0.578206 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+   0.578356 I kernel proc.start pid=1 name=fault/store-text base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.578436 I pid1   <unknown 0x0d63886c> 4 0x00000000
+   0.578467 W kernel proc.fault: 1 killed by store access fault at 0x480000ce
+   0.578526 I kernel selftest.case name=fault/store-text ok=true result=store access fault code=7 pc=0x480000ce tval=0x4800000a
+   0.601452 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22853
+   0.601604 I kernel proc.start pid=1 name=fault/bad-log base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.601683 I pid1   <unknown 0x0d63886c> 5 0x40000b7c
+   0.601716 W kernel log.rejected pid=1 len=5
+   0.601744 W kernel log.rejected pid=1 len=7
+   0.601774 I kernel proc.exit pid=1 code=0
+   0.601809 I kernel selftest.case name=fault/bad-log ok=true result=exit code=0
+   0.624715 I kernel loader.verified name=fault major=0 minor=1 patch=0 build_id=4c6849d10683d552e4fd9592283ea9b5 xip=false verify_us=22852
+   0.624863 I kernel proc.start pid=1 name=fault/open-denied base=0x48000000 data=0x48001b80 build_id=4c6849d10683d552e4fd9592283ea9b5
+   0.624945 I pid1   <unknown 0x0d63886c> 6 0x40000b7c
+   0.624989 W kernel proc.denied pid=1 name=timer
+   0.625022 I pid1   <unknown 0xb9c63d8f> true true
+   0.625049 I kernel proc.exit pid=1 code=0
+   0.625084 I kernel selftest.case name=fault/open-denied ok=true result=exit code=0
+   0.625136 I kernel selftest.m2_start processes=4 slice_ms=10
+   0.648707 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e xip=false verify_us=23520
+   0.648860 I kernel proc.start pid=1 name=ticker1 base=0x48000000 data=0x48001c00 build_id=23dcbe01818507daf03ef6718e8b605e
+   0.672064 I kernel loader.verified name=ticker major=0 minor=1 patch=0 build_id=23dcbe01818507daf03ef6718e8b605e xip=false verify_us=23125
+   0.672298 I kernel proc.start pid=2 name=ticker2 base=0x48800000 data=0x48801c00 build_id=23dcbe01818507daf03ef6718e8b605e
+   0.695657 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=23283
+   0.695890 I kernel proc.start pid=3 name=spin1 base=0x49000000 data=0x49001b80 build_id=a24822e2c6097d31431cf08bce1421e2
+   0.718866 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=22901
+   0.719083 I kernel proc.start pid=4 name=spin2 base=0x49800000 data=0x49801b80 build_id=a24822e2c6097d31431cf08bce1421e2
+   0.769263 I pid1   <unknown 0xefc297ce> 1 0 30009
+   0.784288 I pid2   <unknown 0xefc297ce> 2 0 45009
+   0.799316 I pid1   <unknown 0xefc297ce> 1 1 30011
+   0.819375 I pid3   <unknown 0x41d7c04d> 1 22229 5 0
+   0.819419 I kernel proc.exit pid=3 code=0
+   0.829252 I pid4   <unknown 0x41d7c04d> 2 18490 4 0
+   0.829288 I kernel proc.exit pid=4 code=0
+   0.829336 I pid2   <unknown 0xefc297ce> 2 1 45006
+   0.829381 I pid1   <unknown 0xefc297ce> 1 2 30023
+   0.859427 I pid1   <unknown 0xefc297ce> 1 3 30006
+   0.874439 I pid2   <unknown 0xefc297ce> 2 2 45006
+   0.889475 I pid1   <unknown 0xefc297ce> 1 4 30006
+   0.889511 I kernel proc.exit pid=1 code=0
+   0.919487 I pid2   <unknown 0xefc297ce> 2 3 45006
+   0.964534 I pid2   <unknown 0xefc297ce> 2 4 45006
+   0.964570 I kernel proc.exit pid=2 code=0
+   0.964636 I kernel selftest.case name=ticker1 ok=true result=exit code=0
+   0.964678 I kernel selftest.case name=ticker2 ok=true result=exit code=0
+   0.964716 I kernel selftest.case name=spin1 ok=true result=exit code=0
+   0.964752 I kernel selftest.case name=spin2 ok=true result=exit code=0
+   0.964793 I kernel selftest.m2_stats elapsed_ms=245 preemptions=12 fpu_switches=4 fpu_saves=2 idle_waits=6
+   0.989420 I kernel loader.verified name=timers major=0 minor=1 patch=0 build_id=c8e99f38b575ff45116b342bad9c7254 xip=false verify_us=24549
+   0.989625 I kernel proc.start pid=1 name=timers20 base=0x48000000 data=0x48002180 build_id=c8e99f38b575ff45116b342bad9c7254
+   1.013763 I kernel loader.verified name=timers major=0 minor=1 patch=0 build_id=c8e99f38b575ff45116b342bad9c7254 xip=false verify_us=24054
+   1.013969 I kernel proc.start pid=2 name=timers35 base=0x48800000 data=0x48802180 build_id=c8e99f38b575ff45116b342bad9c7254
+   1.037112 I kernel loader.verified name=spin major=0 minor=1 patch=0 build_id=a24822e2c6097d31431cf08bce1421e2 xip=false verify_us=23063
+   1.037312 I kernel proc.start pid=3 name=spin base=0x49000000 data=0x49001b80 build_id=a24822e2c6097d31431cf08bce1421e2
+   1.037421 W kernel proc.denied pid=1 name=display
+   1.037541 W kernel proc.denied pid=2 name=display
+   1.187614 I pid3   <unknown 0x41d7c04d> 3 57951 0 0
+   1.187655 I kernel proc.exit pid=3 code=2
+   1.279531 I pid1   <unknown 0xf839952b> 20 10 200009 19996 20014 0
+   1.279589 I kernel proc.exit pid=1 code=0
+   1.319607 I pid2   <unknown 0xf839952b> 35 6 210009 34997 35010 0
+   1.319664 I kernel proc.exit pid=2 code=0
+   1.319712 I kernel selftest.case name=timers20 ok=true result=exit code=0
+   1.319750 I kernel selftest.case name=timers35 ok=true result=exit code=0
+   1.319789 I kernel selftest.case name=spin ok=true result=exit code=2
+   1.342753 I kernel loader.verified name=hello major=0 minor=1 patch=0 build_id=a6b2b9658434ae960f4736e9d51704c5 xip=false verify_us=22851
+   1.342916 I kernel proc.start pid=1 name=hello base=0x48000000 data=0x48001880 build_id=a6b2b9658434ae960f4736e9d51704c5
+   1.365706 I kernel loader.verified name=hello-xip major=0 minor=1 patch=0 build_id=43d2215373f91d729bd120a140443249 xip=true verify_us=22703
+   1.365877 I kernel proc.start pid=2 name=hello-xip base=0x42800080 data=0x4a800080 build_id=43d2215373f91d729bd120a140443249
+   1.492863 I kernel loader.verified name=xipcheck major=0 minor=1 patch=0 build_id=01f307438c713df1ded6d70c71bf93a2 xip=true verify_us=126566
+   1.493203 I kernel proc.start pid=3 name=xipcheck base=0x43000080 data=0x4b000080 build_id=01f307438c713df1ded6d70c71bf93a2
+   1.493473 I pid1   <unknown 0xc8b93008> hello from U-mode
+   1.493554 I kernel proc.exit pid=1 code=0
+   1.493685 I pid2   <unknown 0xc8b93008> hello from U-mode
+   1.493720 I kernel proc.exit pid=2 code=0
+   1.502448 I pid3   <unknown 0x21ffb526> true 0x4300008a 0x4300156c 0x4b0000e8 1100105550
+   1.502524 I kernel proc.exit pid=3 code=0
+   1.502616 I kernel selftest.case name=hello ok=true result=exit code=0
+   1.502668 I kernel selftest.case name=hello-xip ok=true result=exit code=0
+   1.502718 I kernel selftest.case name=xipcheck ok=true result=exit code=0
+   1.502779 I kernel selftest.result failures=0 pass=true
+   1.503189 I kernel clock.voltage stage=selftest_done dcm_vset=27 regulator_dbias=22 hp_dbias=26 lp_dbias=27 pvt_control=true
+   1.503296 I kernel ctl.ready slots=4 stack_size=49152 stack_used=16304
+   1.503546 I kernel kernel.stack size=49152 used=17384
+   1.503601 I kernel ctl.done request_id=1 cmd=ps ok=true value=0
+### --cmd install build/apps/greeter.t5a --cmd install build/apps/greeter-0.2.t5a --cmd list
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1..#30 install build/apps/greeter.t5a (7314 bytes)
+t5log: -> #31..#60 install build/apps/greeter-0.2.t5a (7314 bytes)
+t5log: -> #61 list
+   3.633295 I kernel store.install_begin length=6988 extent_first=11 extents=1 busy=0
+   3.633374 I kernel ctl.done request_id=1 cmd=install_begin ok=true value=11
+   3.792758 I kernel store.installed name=greeter major=0 minor=1 patch=0 extent_first=11 length=6988 catalog_seq=14 replaced=false pending=false erases=3 writes=44 erase_us=43396 write_us=11662 max_op_us=16575 total_ms=159
+   3.792879 I kernel ctl.done request_id=30 cmd=install_end ok=true value=6988
+   3.793054 I kernel store.install_begin length=6988 extent_first=12 extents=1 busy=0
+   3.793089 I kernel ctl.done request_id=31 cmd=install_begin ok=true value=12
+   3.954789 I kernel store.installed name=greeter major=0 minor=2 patch=0 extent_first=12 length=6988 catalog_seq=15 replaced=true pending=true erases=3 writes=44 erase_us=40009 write_us=13751 max_op_us=13370 total_ms=161
+   3.954885 I kernel ctl.done request_id=60 cmd=install_end ok=true value=6988
+   3.954977 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+   3.955037 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+   3.955090 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+   3.955142 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+   3.955202 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+   3.955260 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+   3.955312 I kernel store.app name=timers major=0 minor=1 patch=0 offset=0x00430000 length=9304 state=2 flags=0
+   3.955365 I kernel store.app name=hello-xip major=0 minor=1 patch=0 offset=0x00490000 length=7012 state=2 flags=0
+   3.955421 I kernel store.app name=xipcheck major=0 minor=1 patch=0 offset=0x004a0000 length=138344 state=2 flags=0
+   3.955475 I kernel store.app name=greeter major=0 minor=2 patch=0 offset=0x004e0000 length=6988 state=1 flags=0
+   3.955529 I kernel store.app name=greeter major=0 minor=1 patch=0 offset=0x004d0000 length=6988 state=4 flags=0
+   3.955604 I kernel ctl.done request_id=61 cmd=list ok=true value=11
+### --cmd run greeter
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1 run greeter
+   6.090543 I kernel loader.verified name=greeter major=0 minor=2 patch=0 build_id=a4825b375d86f63aecb72c745c1a9067 xip=false verify_us=22325
+   6.090837 I kernel proc.start pid=101 name=greeter base=0x48000000 data=0x48001880 build_id=a4825b375d86f63aecb72c745c1a9067
+   6.090954 I kernel ctl.done request_id=1 cmd=run ok=true value=101
+   6.091077 I pid101 <unknown 0xc8b93008> hello from U-mode
+   6.091140 I kernel proc.exit pid=101 code=0
+   6.122591 I kernel store.confirmed name=greeter major=0 minor=2 patch=0 by=exit catalog_seq=16
+### --cmd list
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1 list
+   8.206849 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+   8.206903 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+   8.206956 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+   8.207008 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+   8.207069 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+   8.207126 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+   8.207179 I kernel store.app name=timers major=0 minor=1 patch=0 offset=0x00430000 length=9304 state=2 flags=0
+   8.207232 I kernel store.app name=hello-xip major=0 minor=1 patch=0 offset=0x00490000 length=7012 state=2 flags=0
+   8.207287 I kernel store.app name=xipcheck major=0 minor=1 patch=0 offset=0x004a0000 length=138344 state=2 flags=0
+   8.207342 I kernel store.app name=greeter major=0 minor=2 patch=0 offset=0x004e0000 length=6988 state=2 flags=0
+   8.207401 I kernel ctl.done request_id=1 cmd=list ok=true value=10
+### --cmd install build/apps/greeter-bad.t5a --cmd run greeter 1
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1..#33 install build/apps/greeter-bad.t5a (8119 bytes)
+t5log: -> #34 run greeter 1
+  10.347745 I kernel store.install_begin length=7760 extent_first=11 extents=1 busy=0
+  10.347785 I kernel ctl.done request_id=1 cmd=install_begin ok=true value=11
+  10.514417 I kernel store.installed name=greeter major=0 minor=3 patch=0 extent_first=11 length=7760 catalog_seq=17 replaced=true pending=true erases=3 writes=47 erase_us=41381 write_us=14739 max_op_us=14063 total_ms=166
+  10.514517 I kernel ctl.done request_id=33 cmd=install_end ok=true value=7760
+  10.537762 I kernel loader.verified name=greeter major=0 minor=3 patch=0 build_id=f51f53e0e2d0af2964c72e9ac5b1e493 xip=false verify_us=23130
+  10.537963 I kernel proc.start pid=102 name=greeter base=0x48000000 data=0x48001b80 build_id=f51f53e0e2d0af2964c72e9ac5b1e493
+  10.538065 I kernel ctl.done request_id=34 cmd=run ok=true value=102
+  10.538121 I pid102 <unknown 0x0d63886c> 1 0x00000000
+  10.538171 W kernel proc.fault: 102 killed by load access fault at 0x48000084
+  10.571841 W kernel store.rolled_back name=greeter major=0 minor=2 patch=0 reason=fault catalog_seq=18
+### --cmd list --cmd run greeter
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1 list
+t5log: -> #2 run greeter
+  12.648095 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+  12.648148 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+  12.648202 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+  12.648254 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+  12.648314 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+  12.648372 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+  12.648424 I kernel store.app name=timers major=0 minor=1 patch=0 offset=0x00430000 length=9304 state=2 flags=0
+  12.648478 I kernel store.app name=hello-xip major=0 minor=1 patch=0 offset=0x00490000 length=7012 state=2 flags=0
+  12.648533 I kernel store.app name=xipcheck major=0 minor=1 patch=0 offset=0x004a0000 length=138344 state=2 flags=0
+  12.648588 I kernel store.app name=greeter major=0 minor=2 patch=0 offset=0x004e0000 length=6988 state=2 flags=0
+  12.648647 I kernel ctl.done request_id=1 cmd=list ok=true value=10
+  12.671247 I kernel loader.verified name=greeter major=0 minor=2 patch=0 build_id=a4825b375d86f63aecb72c745c1a9067 xip=false verify_us=22517
+  12.671396 I kernel proc.start pid=103 name=greeter base=0x48000000 data=0x48001880 build_id=a4825b375d86f63aecb72c745c1a9067
+  12.671491 I kernel ctl.done request_id=2 cmd=run ok=true value=103
+  12.671539 I pid103 <unknown 0xc8b93008> hello from U-mode
+  12.671576 I kernel proc.exit pid=103 code=0
+### --cmd install build/apps/spin-xip.t5a --cmd install build/apps/spin-xip-0.2.t5a --cmd run spin-xip 4 3000
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1..#33 install build/apps/spin-xip.t5a (8140 bytes)
+t5log: -> #34..#66 install build/apps/spin-xip-0.2.t5a (8140 bytes)
+t5log: -> #67 run spin-xip 4 3000
+  14.800696 I kernel store.install_begin length=7780 extent_first=11 extents=1 busy=0
+  14.800736 I kernel ctl.done request_id=1 cmd=install_begin ok=true value=11
+  14.981989 I kernel store.installed name=spin-xip major=0 minor=1 patch=0 extent_first=11 length=7780 catalog_seq=19 replaced=false pending=false erases=3 writes=47 erase_us=41319 write_us=12707 max_op_us=14711 total_ms=181
+  14.982090 I kernel ctl.done request_id=33 cmd=install_end ok=true value=7780
+  14.982264 I kernel store.install_begin length=7780 extent_first=13 extents=1 busy=0
+  14.982300 I kernel ctl.done request_id=34 cmd=install_begin ok=true value=13
+  15.138839 I kernel store.installed name=spin-xip major=0 minor=2 patch=0 extent_first=13 length=7780 catalog_seq=20 replaced=true pending=true erases=3 writes=47 erase_us=19053 write_us=14811 max_op_us=13250 total_ms=156
+  15.138928 I kernel ctl.done request_id=66 cmd=install_end ok=true value=7780
+  15.162001 I kernel loader.verified name=spin-xip major=0 minor=2 patch=0 build_id=e4636a46809e9542c49a57e141f19ce5 xip=true verify_us=22973
+  15.162188 I kernel proc.start pid=104 name=spin-xip base=0x42000080 data=0x4a000080 build_id=e4636a46809e9542c49a57e141f19ce5
+  15.162310 I kernel ctl.done request_id=67 cmd=run ok=true value=104
+### --cmd list
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1 list
+  17.182905 I kernel store.confirmed name=spin-xip major=0 minor=2 patch=0 by=running catalog_seq=21
+  18.162496 I pid104 <unknown 0x41d7c04d> 4 1115482 2 0
+  18.162534 I kernel proc.exit pid=104 code=0
+  21.275624 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+  21.275678 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+  21.275731 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+  21.275784 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+  21.275844 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+  21.275902 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+  21.275955 I kernel store.app name=timers major=0 minor=1 patch=0 offset=0x00430000 length=9304 state=2 flags=0
+  21.276008 I kernel store.app name=hello-xip major=0 minor=1 patch=0 offset=0x00490000 length=7012 state=2 flags=0
+  21.276064 I kernel store.app name=xipcheck major=0 minor=1 patch=0 offset=0x004a0000 length=138344 state=2 flags=0
+  21.276119 I kernel store.app name=greeter major=0 minor=2 patch=0 offset=0x004e0000 length=6988 state=2 flags=0
+  21.276173 I kernel store.app name=spin-xip major=0 minor=2 patch=0 offset=0x004f0000 length=7780 state=2 flags=0
+  21.276233 I kernel ctl.done request_id=1 cmd=list ok=true value=11
+### --cmd install build/apps/greeter-bad.t5a --cmd rollback greeter --cmd remove greeter --cmd remove spin-xip --cmd list
+t5log: attached to esp32p4 via 303a:1001:30:ED:A0:E0:CB:86
+t5log: RTT control block at 0x5010e81c
+t5log: -> #1..#33 install build/apps/greeter-bad.t5a (8119 bytes)
+t5log: -> #34 rollback greeter
+t5log: -> #35 remove greeter
+t5log: -> #36 remove spin-xip
+t5log: -> #37 list
+  23.416219 I kernel store.install_begin length=7760 extent_first=11 extents=1 busy=0
+  23.416255 I kernel ctl.done request_id=1 cmd=install_begin ok=true value=11
+  23.596594 I kernel store.installed name=greeter major=0 minor=3 patch=0 extent_first=11 length=7760 catalog_seq=22 replaced=true pending=true erases=3 writes=47 erase_us=44848 write_us=14203 max_op_us=15431 total_ms=180
+  23.596694 I kernel ctl.done request_id=33 cmd=install_end ok=true value=7760
+  23.616349 W kernel store.rolled_back name=greeter major=0 minor=2 patch=0 reason=command catalog_seq=23
+  23.616401 I kernel ctl.done request_id=34 cmd=rollback ok=true value=23
+  23.636187 I kernel store.removed name=greeter catalog_seq=24
+  23.636220 I kernel ctl.done request_id=35 cmd=remove ok=true value=24
+  23.658463 I kernel store.removed name=spin-xip catalog_seq=25
+  23.658497 I kernel ctl.done request_id=36 cmd=remove ok=true value=25
+  23.658548 I kernel store.app name=hello major=0 minor=1 patch=0 offset=0x00420000 length=6988 state=2 flags=0
+  23.658601 I kernel store.app name=ticker major=0 minor=1 patch=0 offset=0x00440000 length=7884 state=2 flags=0
+  23.658654 I kernel store.app name=spin major=0 minor=1 patch=0 offset=0x00450000 length=7752 state=2 flags=0
+  23.658707 I kernel store.app name=hello-untrusted major=0 minor=1 patch=0 offset=0x00460000 length=6996 state=2 flags=0
+  23.658767 I kernel store.app name=hello-badabi major=0 minor=1 patch=0 offset=0x00470000 length=6992 state=2 flags=0
+  23.658825 I kernel store.app name=fault major=0 minor=1 patch=0 offset=0x00480000 length=7760 state=2 flags=0
+  23.658877 I kernel store.app name=timers major=0 minor=1 patch=0 offset=0x00430000 length=9304 state=2 flags=0
+  23.658931 I kernel store.app name=hello-xip major=0 minor=1 patch=0 offset=0x00490000 length=7012 state=2 flags=0
+  23.658986 I kernel store.app name=xipcheck major=0 minor=1 patch=0 offset=0x004a0000 length=138344 state=2 flags=0
+  23.659045 I kernel ctl.done request_id=37 cmd=list ok=true value=9
