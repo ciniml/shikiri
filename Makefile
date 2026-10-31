@@ -318,6 +318,14 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --host-peer-target 192.168.50.2 --host-peer-start net.peer_probes \
 	    --expect-event net.rules --expect-event net.drop --expect-event net.peer_probes \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# NAT and DHCP server (N5, doc/25): the test LAN's peer gets its
+	@# address from net's DHCP server and pings the PC, which sees the
+	@# pings come from 10.55.0.2 (masquerade on the host link).
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net 3" --ctl "run netctl 5" --ctl "wait-ms 30000" --host-peer 16384 \
+	    --host-peer-start none --host-peer-pinged-by 10.55.0.2 \
+	    --expect-event net.dhcp_lease --expect-event net.peer_dhcp --expect-event net.peer_answered \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is
 	@# selected in otadata, and reboot ends the run (no bootloader here).

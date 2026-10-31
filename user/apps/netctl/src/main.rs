@@ -10,7 +10,11 @@
 //! - 2: the guard set (only the PC on the host link may start traffic to
 //!   the Tab5; nothing is forwarded that the PC did not start);
 //! - 3: no rules (everything passes);
-//! - 4: log each rule's count (`net.rule_hits`).
+//! - 4: log each rule's count (`net.rule_hits`);
+//! - 5: the NAT test set (t5emu, doc/25): the test LAN masqueraded behind
+//!   the host link, a DHCP server on the test LAN;
+//! - 6: the NAT set for the Tab5: the test LAN and the PC masqueraded
+//!   behind Wi-Fi, a DHCP server on the test LAN.
 //!
 //! Built with `--permit svc:netctl --permit svc:fs`. Exit 0 if the service
 //! took the rules; otherwise the step that failed, or 100 + the first line
@@ -42,6 +46,17 @@ pass forward on host
 pass forward state established,related
 ";
 
+const NAT_TEST_SET: &str = "\
+masquerade on host from 192.168.50.0/24
+dhcp-server on test0 range 192.168.50.100-192.168.50.149
+";
+
+const NAT_SET: &str = "\
+masquerade on wlan0 from 192.168.50.0/24
+masquerade on wlan0 from 10.55.0.0/24
+dhcp-server on test0 range 192.168.50.100-192.168.50.149
+";
+
 fn main(mode: usize, _: usize) -> usize {
     let r = match mode {
         0 => from_file(),
@@ -49,6 +64,8 @@ fn main(mode: usize, _: usize) -> usize {
         2 => load(GUARD_SET),
         3 => simple(ctl::CLEAR),
         4 => simple(ctl::STATS),
+        5 => load(NAT_TEST_SET),
+        6 => load(NAT_SET),
         _ => Err(1),
     };
     match r {

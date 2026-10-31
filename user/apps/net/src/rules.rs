@@ -18,14 +18,20 @@
 //! host, wlan0, test0. States: new, established,
 //! related, invalid. CIDR: `any` or A.B.C.D[/LEN]; `port` is the
 //! destination port.
+//!
+//! Besides the filter (N5, doc/25):
+//! `masquerade on LINK [from CIDR]` (at most 4) and
+//! `dhcp-server on LINK range FIRST-LAST [dns ADDR]` (one).
 
-use crate::filter::{self, Action, OUT, Rule, Ruleset, st};
+use crate::filter::{self, Action, DhcpServer, Masq, OUT, Rule, Ruleset, st};
 
 /// What one line holds.
 pub enum Line {
     Empty,
     Rule(Rule),
     Policy(u8, Action, bool),
+    Masq(Masq),
+    Dhcp(DhcpServer),
 }
 
 fn hook(s: &str) -> Option<u8> {
@@ -85,6 +91,36 @@ pub fn parse_line(line: &str) -> Option<Line> {
     let line = line.split('#').next().unwrap_or("");
     let mut w = line.split_ascii_whitespace();
     let Some(first) = w.next() else { return Some(Line::Empty) };
+    if first == "masquerade" {
+        if w.next()? != "on" {
+            return None;
+        }
+        let mut m = Masq { link: filter::link_named(w.next()?)?, src: 0, src_len: 0 };
+        match w.next() {
+            None => {}
+            Some("from") => (m.src, m.src_len) = cidr(w.next()?)?,
+            Some(_) => return None,
+        }
+        return w.next().is_none().then_some(Line::Masq(m));
+    }
+    if first == "dhcp-server" {
+        if w.next()? != "on" {
+            return None;
+        }
+        let link = filter::link_named(w.next()?)?;
+        if w.next()? != "range" {
+            return None;
+        }
+        let (a, b) = w.next()?.split_once('-')?;
+        let mut d = DhcpServer { link, first: ipv4(a)?, last: ipv4(b)?, dns: 0 };
+        match w.next() {
+            None => {}
+            Some("dns") => d.dns = ipv4(w.next()?)?,
+            Some(_) => return None,
+        }
+        let ok = d.first <= d.last && d.last - d.first < 256 && w.next().is_none();
+        return ok.then_some(Line::Dhcp(d));
+    }
     if first == "policy" {
         let h = hook(w.next()?)?;
         let a = action(w.next()?).filter(|&a| a != Action::Reject)?;
@@ -155,6 +191,11 @@ impl Staging {
                 self.set.policy[h as usize] = a;
                 self.set.policy_log[h as usize] = log;
             }
+            Some(Line::Masq(m)) if self.set.masq.iter().any(Option::is_none) => {
+                let i = self.set.masq.iter().position(Option::is_none).unwrap();
+                self.set.masq[i] = Some(m);
+            }
+            Some(Line::Dhcp(d)) if self.set.dhcp.is_none() => self.set.dhcp = Some(d),
             Some(Line::Rule(r)) if self.set.len < filter::MAX_RULES => {
                 self.set.rules[self.set.len] = r;
                 self.set.len += 1;

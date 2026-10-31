@@ -88,6 +88,27 @@ impl Rule {
     }
 }
 
+/// `masquerade on LINK [from CIDR]` (N5, doc/25): packets forwarded out
+/// of `link` from `src/src_len` leave with the link's address.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Masq {
+    pub link: u8,
+    pub src: u32,
+    pub src_len: u8,
+}
+
+/// `dhcp-server on LINK range FIRST-LAST [dns ADDR]` (N5, doc/25).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DhcpServer {
+    pub link: u8,
+    pub first: u32,
+    pub last: u32,
+    /// 0: the link's own address.
+    pub dns: u32,
+}
+
+pub const MAX_MASQ: usize = 4;
+
 #[derive(Clone, Copy)]
 pub struct Ruleset {
     pub rules: [Rule; MAX_RULES],
@@ -95,11 +116,13 @@ pub struct Ruleset {
     /// Per hook, and whether what the policy drops is logged.
     pub policy: [Action; 3],
     pub policy_log: [bool; 3],
+    pub masq: [Option<Masq>; MAX_MASQ],
+    pub dhcp: Option<DhcpServer>,
 }
 
 impl Ruleset {
     /// Everything passes.
-    pub const OPEN: Ruleset = Ruleset { rules: [Rule::new(Action::Pass, IN); MAX_RULES], len: 0, policy: [Action::Pass; 3], policy_log: [false; 3] };
+    pub const OPEN: Ruleset = Ruleset { rules: [Rule::new(Action::Pass, IN); MAX_RULES], len: 0, policy: [Action::Pass; 3], policy_log: [false; 3], masq: [None; MAX_MASQ], dhcp: None };
 }
 
 struct Filter {
@@ -112,6 +135,8 @@ struct Filter {
     log_left: u32,
     log_until: u64,
     log_suppressed: u32,
+    /// Counts rule set changes (the DHCP server follows it).
+    generation: u32,
 }
 
 static mut FILTER: Filter = Filter {
@@ -123,6 +148,7 @@ static mut FILTER: Filter = Filter {
     log_left: 0,
     log_until: 0,
     log_suppressed: 0,
+    generation: 0,
 };
 
 fn f() -> &'static mut Filter {
@@ -134,7 +160,14 @@ pub fn replace(r: &Ruleset) {
     let f = f();
     f.rules = *r;
     f.hits = [0; MAX_RULES + 3];
+    f.generation += 1;
     event!(Info, "net.rules", rules = r.len as u32, policy_in = r.policy[0] == Action::Pass, policy_forward = r.policy[1] == Action::Pass, policy_out = r.policy[2] == Action::Pass);
+}
+
+/// The rule set in force and its generation.
+pub fn active() -> (&'static Ruleset, u32) {
+    let f = f();
+    (&f.rules, f.generation)
 }
 
 /// Logs each rule's count and the connection table's use.
@@ -149,6 +182,8 @@ pub fn log_stats() {
     let now = time_ns();
     let live = f.table.iter().flatten().filter(|c| c.expires > now).count() as u32;
     event!(Info, "net.conntrack", live = live, tracked = f.tracked, table_full = f.table_full);
+    let (mapped, full) = crate::nat::stats();
+    event!(Info, "net.nat", mapped = mapped, full = full);
 }
 
 // ---- packets ----
@@ -344,7 +379,8 @@ pub fn check(hook: u8, in_link: u8, out_link: u8, ip: &[u8]) -> Action {
     if p.dst >> 24 == 127 || p.src >> 24 == 127 {
         return Action::Pass;
     }
-    if hook == IN && p.proto == PROTO_UDP && p.sport == 67 && p.dport == 68 {
+    // DHCP: answers to the client, and requests to the server (doc/25).
+    if hook == IN && p.proto == PROTO_UDP && (p.sport == 67 && p.dport == 68 || p.sport == 68 && p.dport == 67) {
         return Action::Pass;
     }
     let f = f();

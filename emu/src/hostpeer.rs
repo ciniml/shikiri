@@ -114,6 +114,8 @@ pub struct HostPeer {
     pub tcp_ms: i64,
     /// ICMP errors seen (forwarding test).
     pub icmp_errors: Vec<u8>,
+    /// Sources of the echo requests that came while idle (NAT test).
+    pub pinged_by: std::collections::BTreeSet<IpAddress>,
     pub why: String,
 }
 
@@ -162,6 +164,7 @@ impl HostPeer {
             ping_ms: Vec::new(),
             tcp_ms: 0,
             icmp_errors: Vec::new(),
+            pinged_by: Default::default(),
             why: String::new(),
         }
     }
@@ -191,6 +194,16 @@ impl HostPeer {
         self.dev.rx.extend(usj.packets_out.drain(..));
         let now = Instant::from_millis(now_ms);
         self.iface.poll(now, &mut self.dev, &mut self.sockets);
+        if self.step == Step::Idle {
+            // Who pings the PC (answered by the stack itself).
+            let r = self.sockets.get_mut::<raw::Socket>(self.raw);
+            while let Ok(p) = r.recv() {
+                let ihl = (p[0] & 0xF) as usize * 4;
+                if p.get(ihl) == Some(&8) {
+                    self.pinged_by.insert(IpAddress::v4(p[12], p[13], p[14], p[15]));
+                }
+            }
+        }
         if !self.finished() && self.step != Step::Idle {
             self.advance(now_ms);
             self.iface.poll(now, &mut self.dev, &mut self.sockets);

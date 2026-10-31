@@ -10,6 +10,7 @@ use t5_rt::{event, time_ns};
 
 use crate::Stack;
 use crate::filter::{self, Action};
+use crate::nat;
 use crate::link::{ETH_FRAME, ETH_HDR, HOST_ADDR, HOST_PREFIX, MTU, Ring};
 
 /// Interfaces (and links): 0 is loopback with the host link, then the
@@ -249,6 +250,9 @@ impl Stack {
             return;
         };
         p[8] -= 1;
+        if let Some((addr, _)) = self.link_addr(route.link) {
+            nat::outbound(p, route.link as u8, addr);
+        }
         p[10] = 0;
         p[11] = 0;
         let c = checksum(&p[..ihl]);

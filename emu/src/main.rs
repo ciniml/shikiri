@@ -140,7 +140,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
-                     [--linger-ms N] [--host-peer BYTES] [--host-peer-target A.B.C.D] [--host-peer-start EVENT] \
+                     [--linger-ms N] [--host-peer BYTES] [--host-peer-target A.B.C.D] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -169,8 +169,10 @@ struct Opts {
     /// Run the PC end of the host link, sending this many bytes to the echo.
     host_peer: Option<usize>,
     host_peer_target: std::net::Ipv4Addr,
-    /// The event that starts the host peer.
+    /// The event that starts the host peer ("none": it only answers).
     host_peer_start: String,
+    /// The passive host peer must have been pinged from this address.
+    host_peer_pinged_by: Option<std::net::Ipv4Addr>,
     elf: String,
 }
 
@@ -199,6 +201,7 @@ fn parse_args() -> Result<Opts, String> {
         host_peer: None,
         host_peer_target: std::net::Ipv4Addr::new(10, 55, 0, 2),
         host_peer_start: "nettest.listening".into(),
+        host_peer_pinged_by: None,
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -238,6 +241,7 @@ fn parse_args() -> Result<Opts, String> {
             "--host-peer" => o.host_peer = Some(val()?.parse().map_err(|e| format!("--host-peer: {e}"))?),
             "--host-peer-target" => o.host_peer_target = val()?.parse().map_err(|e| format!("--host-peer-target: {e}"))?,
             "--host-peer-start" => o.host_peer_start = val()?,
+            "--host-peer-pinged-by" => o.host_peer_pinged_by = Some(val()?.parse().map_err(|e| format!("--host-peer-pinged-by: {e}"))?),
             "--linger-ms" => o.linger_ms = val()?.parse().map_err(|e| format!("--linger-ms: {e}"))?,
             "--flash" => {
                 let v = val()?;
@@ -480,6 +484,17 @@ fn main() -> ExitCode {
     }
     let peer_ok = match &mon.peer {
         None => true,
+        Some(p) if mon.peer_start == "none" => {
+            let by: Vec<String> = p.pinged_by.iter().map(|a| a.to_string()).collect();
+            eprintln!("t5emu: host peer (passive): pinged by {by:?}");
+            match o.host_peer_pinged_by {
+                Some(a) if !p.pinged_by.contains(&smoltcp::wire::IpAddress::Ipv4(a)) => {
+                    eprintln!("t5emu: host peer was not pinged by {a}");
+                    false
+                }
+                _ => true,
+            }
+        }
         Some(p) if p.passed() => {
             eprintln!("t5emu: host peer: ping {:?} ms, TCP echo in {} ms, ICMP errors {:?}", p.ping_ms, p.tcp_ms, p.icmp_errors);
             true

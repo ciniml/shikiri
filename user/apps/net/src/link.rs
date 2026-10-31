@@ -16,6 +16,7 @@ use t5_rt::{Error, Handle, event, netdev, sleep_ms};
 
 use crate::filter::{self, ANY_LINK, Action, IN, OUT};
 use crate::fwd::{self, IFACE0};
+use crate::nat;
 
 pub const MTU: usize = 1500;
 pub const ETH_FRAME: usize = netdev::ETH_FRAME;
@@ -166,6 +167,10 @@ impl Device for Links {
         loop {
             out.len = h.read(&mut out.frame[..MTU]).ok()?;
             self.from_host += 1;
+            if nat::inbound(&mut out.frame[..out.len], IFACE0 as u8) {
+                fwd::inbox().push(IFACE0 as u8, &out.frame[..out.len]);
+                continue;
+            }
             let ip = &out.frame[..out.len];
             if transit(ip, Some((HOST_ADDR, HOST_PREFIX))) {
                 fwd::inbox().push(IFACE0 as u8, ip);
@@ -289,6 +294,12 @@ impl Device for EthNic {
         loop {
             out.len = self.port.read(&mut out.frame)?;
             self.rx += 1;
+            let n = out.len;
+            if n > ETH_HDR && out.frame[..6] == self.mac && out.frame[12..14] == ETHERTYPE_IPV4 && nat::inbound(&mut out.frame[ETH_HDR..n], self.link as u8) {
+                self.rx_unicast += 1;
+                fwd::inbox().push(self.link as u8, &out.frame[..n]);
+                continue;
+            }
             let f = &out.frame[..out.len];
             if f.len() < ETH_HDR {
                 continue;

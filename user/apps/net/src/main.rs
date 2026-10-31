@@ -24,7 +24,9 @@
 mod filter;
 mod fwd;
 mod link;
+mod nat;
 mod rules;
+mod dhcpd;
 mod testlan;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
@@ -76,8 +78,9 @@ static mut ICMP_TX: [[u8; ICMP_BUF]; POOL] = [[0; ICMP_BUF]; POOL];
 static mut ICMP_RX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; POOL];
 static mut ICMP_TX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; POOL];
 static mut STORAGE0: [SocketStorage<'static>; POOL] = [SocketStorage::EMPTY; POOL];
-/// The Ethernet interfaces' sockets: any of the pool, plus DHCP and DNS.
-static mut ETH_STORAGE: [[SocketStorage<'static>; POOL + 2]; IFACES - 1] = [const { [SocketStorage::EMPTY; POOL + 2] }; IFACES - 1];
+/// The Ethernet interfaces' sockets: any of the pool, plus the DHCP
+/// client, DNS and the DHCP server.
+static mut ETH_STORAGE: [[SocketStorage<'static>; POOL + 3]; IFACES - 1] = [const { [SocketStorage::EMPTY; POOL + 3] }; IFACES - 1];
 static mut DNS_SLOTS: [Option<dns::DnsQuery>; DNS_QUERIES] = [const { None }; DNS_QUERIES];
 
 /// Row `i` of a static table, for pool entry `i` only (each entry's
@@ -124,8 +127,9 @@ pub struct EthLink {
     dhcp: Option<SocketHandle>,
     /// Made when DHCP names DNS servers.
     dns: Option<SocketHandle>,
-    /// The default router DHCP gave.
+    /// The default router and the first DNS server DHCP gave.
     pub router: Option<u32>,
+    dns_server: Option<u32>,
     /// While it has no address: when to log the counters next.
     report_at: u64,
     /// Its address changed: the interfaces' addresses are to be redone.
@@ -136,7 +140,7 @@ impl EthLink {
     fn new(link: usize, port: Port, mac: [u8; 6]) -> EthLink {
         let mut dev = EthNic { link, port, mac, own: None, rx: 0, rx_unicast: 0, tx: 0, tx_dropped: 0 };
         let iface = Interface::new(Config::new(HardwareAddress::Ethernet(EthernetAddress(mac))), &mut dev, now());
-        EthLink { iface, dev, sockets: SocketSet::new(eth_storage(link)), dhcp: None, dns: None, router: None, report_at: time_ns() + 5_000_000_000, changed: true }
+        EthLink { iface, dev, sockets: SocketSet::new(eth_storage(link)), dhcp: None, dns: None, router: None, dns_server: None, report_at: time_ns() + 5_000_000_000, changed: true }
     }
 
     fn set_addr(&mut self, addr: u32, prefix: u8, router: Option<u32>) {
@@ -175,7 +179,9 @@ impl EthLink {
                     *s = IpAddress::Ipv4(*d);
                 }
                 event!(Info, "net.dhcp", link = name, addr = addr, prefix = prefix as u32, router = router.unwrap_or(0), dns = c.dns_servers.first().map_or(0, |d| d.to_bits()));
+                let dns_server = c.dns_servers.first().map(|d| d.to_bits());
                 self.set_addr(addr, prefix, router);
+                self.dns_server = dns_server;
                 match self.dns {
                     Some(d) => self.sockets.get_mut::<dns::Socket>(d).update_servers(&servers[..n]),
                     None if n > 0 => {
@@ -272,6 +278,9 @@ pub struct Stack {
     pool_used: [bool; POOL],
     next_port: u16,
     pub fwd: Forwarder,
+    /// The DHCP server, and the rule set generation it was made from.
+    dhcpd: Option<dhcpd::Server>,
+    rules_gen: u32,
 }
 
 impl Stack {
@@ -300,6 +309,7 @@ impl Stack {
             if self.eth.iter().flatten().any(|e| e.changed) {
                 self.sync_addrs();
             }
+            self.serve_dhcp();
             if let Some(p) = &mut self.peer {
                 p.poll();
             }
@@ -310,6 +320,31 @@ impl Stack {
             }
         }
         self.sweep();
+    }
+
+    /// Runs the DHCP server the rule set asks for (made again when the set
+    /// changes).
+    fn serve_dhcp(&mut self) {
+        let (rules, generation) = filter::active();
+        if generation != self.rules_gen {
+            self.rules_gen = generation;
+            if let Some(old) = self.dhcpd.take()
+                && let Some(e) = self.eth[old.cfg.link as usize - 1].as_mut()
+            {
+                old.remove(&mut e.sockets);
+            }
+            if let Some(cfg) = rules.dhcp
+                && cfg.link as usize != IFACE0
+                && let Some(e) = self.eth[cfg.link as usize - 1].as_mut()
+            {
+                self.dhcpd = Some(dhcpd::Server::new(cfg, &mut e.sockets));
+            }
+        }
+        let Some(srv) = &mut self.dhcpd else { return };
+        let dns = self.eth[WLAN - 1].as_ref().and_then(|w| w.dns_server);
+        let Some(e) = self.eth[srv.cfg.link as usize - 1].as_mut() else { return };
+        let Some(own) = e.dev.own else { return };
+        srv.poll(&mut e.sockets, own, dns.unwrap_or(own.0));
     }
 
     /// Gives each interface, besides its own addresses, the Tab5's
@@ -838,7 +873,8 @@ fn reply(status: u32, v0: u32, v1: u32) -> [u8; proto::REPLY_SIZE] {
     r
 }
 
-/// `run net [FLAGS]`: FLAGS bit 0 adds the test LAN (doc/23 §4).
+/// `run net [FLAGS]`: FLAGS bit 0 adds the test LAN (doc/23 §4); bit 1
+/// has its peer use DHCP (doc/25 §4).
 /// `run net ADDR [ROUTER]` (ADDR an IPv4 address as a number, so ≥ 256):
 /// the Wi-Fi link uses ADDR/24 and ROUTER instead of DHCP (doc/22 §7).
 fn main(a0: usize, a1: usize) -> usize {
@@ -853,6 +889,8 @@ fn main(a0: usize, a1: usize) -> usize {
 }
 
 const FLAG_TEST_LAN: u32 = 1;
+/// The test LAN's peer takes its address by DHCP (doc/25 §4).
+const FLAG_PEER_DHCP: u32 = 2;
 
 fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let pool_shm = Shm::alloc(CLIENTS * proto::SLICE).map_err(|_| 1u32)?;
@@ -875,6 +913,8 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         pool_used: [false; POOL],
         next_port: 49152,
         fwd: Forwarder::new(),
+        dhcpd: None,
+        rules_gen: 0,
     };
     let has_host = stack.dev.host.is_some();
     stack.iface.update_ip_addrs(|a| {
@@ -901,7 +941,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         let mut t = EthLink::new(TEST, Port::Test, testlan::NET_MAC);
         t.set_addr(testlan::NET_ADDR, testlan::PREFIX, None);
         stack.eth[TEST - 1] = Some(t);
-        stack.peer = Some(testlan::Peer::new());
+        stack.peer = Some(testlan::Peer::new(flags & FLAG_PEER_DHCP != 0));
         event!(Info, "net.link", link = "test0", addr = "192.168.50.1/24", mtu = netdev::MTU as u32);
     }
 
