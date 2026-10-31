@@ -19,6 +19,13 @@
 //! | UDP_BIND | – | port | socket |
 //! | UDP_SEND | IPv4 | port << 16 \| bytes | bytes sent (0: queue full) |
 //! | UDP_RECV | – | – | bytes at slice + `UDP_HEADER` / source IPv4; the source port is the slice's first u16 |
+//! | PING | IPv4 | echo data bytes from the slice (≤ 64) | socket (one echo request sent) |
+//! | PING_RESULT | – | – | 1 once the reply came / round trip in µs |
+//! | RESOLVE | – | name bytes from the slice (≤ `NAME_MAX`) | socket (one DNS lookup for an A record) |
+//! | RESOLVE_RESULT | – | – | 1 once answered / IPv4 (`UNREACHABLE`: failed or no A record) |
+//!
+//! PING and RESOLVE sockets are freed with CLOSE like the others. Names are
+//! resolved on the Wi-Fi link only, with the DNS servers DHCP gave.
 
 pub const SERVICE: &str = "net";
 pub const SLICE: usize = 64 << 10;
@@ -26,6 +33,8 @@ pub const REQUEST_SIZE: usize = 12;
 pub const REPLY_SIZE: usize = 12;
 /// UDP_RECV puts the source port here, the payload after it.
 pub const UDP_HEADER: usize = 4;
+/// Longest name RESOLVE takes.
+pub const NAME_MAX: usize = 255;
 
 pub mod op {
     pub const TCP_LISTEN: u8 = 1;
@@ -37,6 +46,10 @@ pub mod op {
     pub const UDP_BIND: u8 = 7;
     pub const UDP_SEND: u8 = 8;
     pub const UDP_RECV: u8 = 9;
+    pub const PING: u8 = 10;
+    pub const PING_RESULT: u8 = 11;
+    pub const RESOLVE: u8 = 12;
+    pub const RESOLVE_RESULT: u8 = 13;
 }
 
 pub mod status {

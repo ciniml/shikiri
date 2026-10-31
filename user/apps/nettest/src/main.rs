@@ -10,7 +10,9 @@
 //! the host link, doc/21), serving one connection after another until
 //! killed. With `mode` 2 it fetches `http://ARG/` (ARG an IPv4 address as
 //! a number, e.g. 0x01010101) and logs the status line and the size: a
-//! test of the way out over Wi-Fi (doc/22).
+//! test of the way out over Wi-Fi (doc/22). With `mode` 3 it pings ARG four
+//! times; with `mode` 4 it resolves a few names by DNS and fetches the
+//! first one's `/` (doc/22 §8).
 //!
 //! Built with `--permit svc:net`. Exit 0 if everything held, otherwise the
 //! number of the failed check.
@@ -27,6 +29,8 @@ fn main(mode: usize, arg: usize) -> usize {
     let r = match mode {
         1 => echo_server(),
         2 => http_get(arg as u32),
+        3 => ping(arg as u32),
+        4 => resolve(),
         _ => run(),
     };
     match r {
@@ -68,6 +72,47 @@ fn connect() -> Result<Net, u32> {
             Err(_) => return Err(1),
         }
     }
+}
+
+fn ping(ip: u32) -> Result<(), u32> {
+    let mut net = connect()?;
+    let mut answered = 0u32;
+    for seq in 0..4u32 {
+        match net.ping(ip, 2000) {
+            Ok(us) => {
+                answered += 1;
+                event!(Info, "nettest.ping", ip = ip, seq_num = seq, rtt_us = us);
+            }
+            Err(_) => event!(Warn, "nettest.ping_lost", ip = ip, seq_num = seq),
+        }
+        sleep_ms(200);
+    }
+    if answered == 0 { Err(50) } else { Ok(()) }
+}
+
+/// Names that should resolve on any network with a working resolver.
+const NAMES: [&str; 3] = ["example.com", "one.one.one.one", "www.espressif.com"];
+
+fn resolve() -> Result<(), u32> {
+    let mut net = connect()?;
+    let mut first = 0;
+    for name in NAMES {
+        let t = time_ns();
+        match net.resolve(name, 5000) {
+            Ok(ip) => {
+                event!(Info, "nettest.resolved", name = name, ip = ip, ms = ((time_ns() - t) / 1_000_000) as u32);
+                if first == 0 {
+                    first = ip;
+                }
+            }
+            Err(_) => event!(Warn, "nettest.resolve_failed", name = name),
+        }
+    }
+    if first == 0 {
+        return Err(60);
+    }
+    drop(net);
+    http_get(first)
 }
 
 fn echo_server() -> Result<(), u32> {

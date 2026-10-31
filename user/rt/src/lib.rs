@@ -638,6 +638,43 @@ impl Net {
         }
     }
 
+    /// Sends one echo request to `ip` and waits up to `ms` for the reply;
+    /// returns the round trip in µs.
+    pub fn ping(&mut self, ip: u32, ms: u64) -> Result<u32, NetError> {
+        let data = b"t5 ping";
+        self.slice[..data.len()].copy_from_slice(data);
+        let (s, _) = self.call(net::op::PING, 0, ip, data.len() as u32)?;
+        let r = self.poll_result(net::op::PING_RESULT, s as u16, ms);
+        let _ = self.close(s as u16);
+        r
+    }
+
+    /// Looks up the IPv4 address of `name` (DNS, A record), waiting up to
+    /// `ms`.
+    pub fn resolve(&mut self, name: &str, ms: u64) -> Result<u32, NetError> {
+        let n = name.len().min(net::NAME_MAX);
+        self.slice[..n].copy_from_slice(&name.as_bytes()[..n]);
+        let (s, _) = self.call(net::op::RESOLVE, 0, 0, n as u32)?;
+        let r = self.poll_result(net::op::RESOLVE_RESULT, s as u16, ms);
+        let _ = self.close(s as u16);
+        r
+    }
+
+    /// Asks `op` on `s` every millisecond until it answers (1, value).
+    fn poll_result(&self, op: u8, s: u16, ms: u64) -> Result<u32, NetError> {
+        let end = time_ns() + ms * 1_000_000;
+        loop {
+            let (done, v) = self.call(op, s, 0, 0)?;
+            if done != 0 {
+                return Ok(v);
+            }
+            if time_ns() > end {
+                return Err(NetError::TimedOut);
+            }
+            sleep_ms(1);
+        }
+    }
+
     /// Waits up to `ms` for a datagram: (length, source IPv4, source port).
     pub fn udp_recv(&mut self, s: u16, buf: &mut [u8], ms: u64) -> Result<(usize, u32, u16), NetError> {
         let end = time_ns() + ms * 1_000_000;

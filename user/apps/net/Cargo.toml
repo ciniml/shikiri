@@ -6,4 +6,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 t5-rt = { path = "../../rt" }
-smoltcp = { version = "0.14.0", default-features = false, features = ["medium-ip", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "auto-icmp-echo-reply"] }
+smoltcp = { version = "0.14.0", default-features = false, features = ["medium-ip", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-icmp", "socket-dns", "auto-icmp-echo-reply"] }

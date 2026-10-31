@@ -12,7 +12,7 @@
 | N2b-1 | 電源、リセット、SDMMC slot1 での SDIO の識別（CMD5/3/7、CCCR、function 1） | 実機で確認（§4） |
 | N2b-2 | 4 ビット・20MHz、function 1 のブロック長、SLC ホストのレジスタ、esp_hosted の INIT イベント（C6 のファームウェアの版） | 実機で確認（§5）。**C6 は esp_hosted 2.12.7** |
 | N2b-3a | 転送のドライバ（受信の切り出し、送信）、`wlan:ctl` と `netdev:wlan0`（ABI 0.12）、`wifi` サービス（RPC で初期化から接続まで） | 実機で AP に接続（§6） |
-| N2b-3b | `net` に Wi-Fi のリンク（Ethernet、DHCP）、外への ping と TCP | 実機で DHCP、HTTP、PC からの ping（§7） |
+| N2b-3b | `net` に Wi-Fi のリンク（Ethernet、DHCP）、外への ping と TCP | 実機で DHCP、HTTP、PC からの ping（§7）。ping と DNS の API、SD との並行（§7.4）。**N2b の完了条件を満たした** |
 
 ## 2. 電源とリセット（kernel/src/platform/esp32p4v1/tab5.rs `wlan_power_on`）
 - エクスパンダ #2 の OUT（0x05）、DIR（0x03）、OUT_H_IM（0x07）を読んでログに出す（`wlan.expander`）。bit0 が「出力・High・高インピーダンスでない」なら、もう電源は入っているので**何も書かない**。
@@ -137,8 +137,26 @@ wifi.connected ssid=<利用者の AP> bssid=… channel=11 authmode=6 aid=42
 - `nettest 2 192.168.8.1`: 接続 6〜9 ms、HTTP の応答 1084 バイトを 17〜18 ms で受信（`HTTP/1.1 200 OK`）。
 - PC（同じ AP）から Tab5 への ping: 5/5 応答、28〜208 ms（C6 の省電力と、カーネルが C6 をポーリングしていることによる遅れと考える。未計測）。
 
+### 7.4 ping、DNS、SD との並行（2026-11-01、AP「iotap」、WPA3）
+`svc:net` に 4 つの操作を足した（`abi/src/net.rs`）。
+- `PING`/`PING_RESULT`: エコー要求を 1 つ送り、応答と往復の時間（µs）を返す。smoltcp の ICMP のソケット（`socket-icmp`）を、スロットごとの識別子（0x7450 + スロット番号）で使う。
+- `RESOLVE`/`RESOLVE_RESULT`: DNS の A レコードを引く。smoltcp の `socket-dns` を Wi-Fi 側に 1 つ作り、DHCP で得た DNS サーバ（最大 3 つ）を使う。同時に引ける名前は 4 つまで。静的なアドレスで起動したときは使えない（`UNREACHABLE`）。
+- どちらも、ほかのソケットと同じく `CLOSE` で返す。`t5-rt` の `Net::ping`、`Net::resolve` が待ちまで行う。`nettest 3 ADDR` で 4 回 ping、`nettest 4` で 3 つの名前を引いて、最初の名前に HTTP の GET を送る。
+
+実機の結果:
+- iotap でも 1 回目で接続した（以前の 202 → 205 は起きなかった。原因は分からないまま）。DHCP で 192.168.2.112/24。
+- `nettest 3 192.168.2.254`（ゲートウェイ）: 4/4 応答。往復は 1.9〜11 ms。
+- `nettest 4`: example.com、one.one.one.one、www.espressif.com を 14〜24 ms で解決。example.com への HTTP は応答 358 バイト（`403 Forbidden`、CDN の応答。通信自体は成功）を 21 ms。
+- `nettest 2 1.1.1.1`: 応答 358 バイトを 37 ms。インターネットまで出られる。
+- **SD との並行**: `fs` と `fstest 2048`（SD に 2 MiB を書いて読み戻して比べる）を動かしている間に、PC（有線で同じ LAN）から Tab5 へ 50 ms ごとに ping を 600 回、Tab5 からは `nettest 4` を動かした。
+  - `fstest` は一致（書き込み 23.5 秒、読み出し 2.1 秒）。
+  - ping は 598/600 応答（平均 17.7 ms、最大 214 ms）。
+  - `nettest 4` も成功。
+  - SDMMC のホストを SD（slot0）と C6（slot1）で共有しても、両方とも壊れない。
+- PC から Tab5 への ping は遅く、ばらつく（1〜214 ms）。Tab5 からゲートウェイへの ping は 2 ms 前後。カーネルは C6 の受信をスケジューラの回り目でしか見ないので、何もしていないときはタイマの割り込みまで気づかないと考える（推測）。SDIO のカードの割り込みで起こすようにすれば縮むはず。
+
 ## 8. まだ
-- WPA3 の AP で最初の 2 回の接続に失敗する（202 → 205）原因。
+- WPA3 の AP で最初の 2 回の接続に失敗することがあった（202 → 205）原因。2026-11-01 には再現しなかった。
 - 待ち受けと UDP を Wi-Fi 側でも使えるようにする。
 - ポーリングをやめて SDIO のカードの割り込み（SDMMC の `sdio_int_mask`）でカーネルを起こす。
 - 接続先を SD カードの設定ファイルから読む。
