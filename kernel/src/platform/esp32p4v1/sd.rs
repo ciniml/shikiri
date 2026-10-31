@@ -180,7 +180,18 @@ fn set_source_div(div: u32) {
     clear_bits(PERI_CLK_CTRL02, SDIO_CFG_UPDATE);
 }
 
-fn host_init() -> Result<(), &'static str> {
+/// The host is shared by the SD card (slot 0) and the Wi-Fi chip's SDIO
+/// (slot 1, `sdio.rs`): it is set up once. The first clock stage is fixed
+/// at 40 MHz; each slot divides it with its own divider (CLKDIV field,
+/// CLKSRC), so one slot's clock changes never touch the other's (doc/22).
+static mut HOST_UP: bool = false;
+/// The first stage's divider of the 160 MHz source: 40 MHz.
+const SOURCE_DIV: u32 = 4;
+
+pub(super) fn host_up() -> Result<(), &'static str> {
+    if unsafe { HOST_UP } {
+        return Ok(());
+    }
     let ref160_div = (unsafe { rd(REF_CLK_CTRL0) } >> 24) & 0xFF;
     let ref160_en = unsafe { rd(REF_CLK_CTRL2) } & REF_160M_CLK_EN != 0;
     if ref160_div != 2 || !ref160_en {
@@ -191,7 +202,7 @@ fn host_init() -> Result<(), &'static str> {
     set_bits(LP_SDMMC_EMAC_RST_CTRL, RST_EN_SDMMC);
     delay_us(10);
     clear_bits(LP_SDMMC_EMAC_RST_CTRL, RST_EN_SDMMC);
-    set_source_div(10); // 16 MHz; the host divides by 2 x 20 for 400 kHz
+    set_source_div(SOURCE_DIV);
     clear_bits(PERI_CLK_CTRL01, SDIO_HS_MODE | SDIO_LS_CLK_SRC_PLL_200M);
     set_bits(PERI_CLK_CTRL01, SDIO_LS_CLK_EN);
     set_bits(PERI_CLK_CTRL02, SDIO_PHASE_CLK_EN);
@@ -210,19 +221,8 @@ fn host_init() -> Result<(), &'static str> {
         wr(INTMASK, 0);
         wr(RINTSTS, 0xFFFF_FFFF);
         wr(IDSTS, 0x3FF);
-        // Pins.
-        for p in DATA_PINS.iter().chain(&CLK_CMD_PINS) {
-            wr(io_mux_reg(*p), IO_MUX_SD);
-            wr(func_out_sel(*p), SIG_GPIO_OUT);
-        }
-        // D3 stays an input (pulled up) until 4-bit mode: a high D3 at CMD0
-        // selects SD mode.
-        wr(io_mux_reg(D3), (1 << 12) | (1 << 9));
-        wr(GPIO_ENABLE1_W1TC, 1 << (D3 - 32));
-        wr(IN_SEL_CD, IN_CONST_LOW);
-        wr(IN_SEL_WP, IN_CONST_LOW);
-        wr(IN_SEL_INT, IN_CONST_HIGH);
-        wr(CTYPE, 0); // one data line
+        wr(CTYPE, 0); // one data line on every slot
+        wr(CLKENA, 0);
         // IDMAC: reset, then on (sdmmc_ll_init_dma); polled through IDSTS.
         wr(CTRL, rd(CTRL) | CTRL_DMA_ENABLE | CTRL_USE_IDMAC);
         wr(BMOD, BMOD_SWR);
@@ -237,14 +237,35 @@ fn host_init() -> Result<(), &'static str> {
         cdetect = unsafe { rd(CDETECT) },
         wrtprt = unsafe { rd(WRTPRT) }
     );
-    set_card_clock(20, 400)
+    unsafe { HOST_UP = true };
+    Ok(())
 }
 
-/// Sends the "update clock registers" command.
-fn update_clock() -> Result<(), &'static str> {
+/// Slot 0's pins and its 400 kHz clock for identification.
+fn slot0_up() -> Result<(), &'static str> {
+    host_up()?;
+    unsafe {
+        for p in DATA_PINS.iter().chain(&CLK_CMD_PINS) {
+            wr(io_mux_reg(*p), IO_MUX_SD);
+            wr(func_out_sel(*p), SIG_GPIO_OUT);
+        }
+        // D3 stays an input (pulled up) until 4-bit mode: a high D3 at CMD0
+        // selects SD mode.
+        wr(io_mux_reg(D3), (1 << 12) | (1 << 9));
+        wr(GPIO_ENABLE1_W1TC, 1 << (D3 - 32));
+        wr(IN_SEL_CD, IN_CONST_LOW);
+        wr(IN_SEL_WP, IN_CONST_LOW);
+        wr(IN_SEL_INT, IN_CONST_HIGH);
+        wr(CTYPE, rd(CTYPE) & !1);
+    }
+    set_card_clock(0, 50, 400)
+}
+
+/// Sends the "update clock registers" command for `slot`.
+fn update_clock(slot: u32) -> Result<(), &'static str> {
     unsafe {
         wr(CMDARG, 0);
-        wr(CMD, UPDATE_CLOCK);
+        wr(CMD, UPDATE_CLOCK | slot << 16);
     }
     if !wait(100_000, || unsafe { rd(CMD) } & CMD_START == 0) {
         return Err("SDMMC clock update not taken");
@@ -252,29 +273,24 @@ fn update_clock() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The card clock: the host's divider (`div2`, 0 = bypass) on the first
-/// stage's output; `khz` sets the data timeout (m7-sdcard.md §3.2).
-fn set_card_clock(div2: u32, khz: u32) -> Result<(), &'static str> {
-    set_card_clock_from(None, div2, khz)
-}
-
-/// As `set_card_clock`, also changing the first stage's divider (of the
-/// 160 MHz source) while the card clock is off.
-fn set_card_clock_from(source_div: Option<u32>, div2: u32, khz: u32) -> Result<(), &'static str> {
-    unsafe { wr(CLKENA, 0) };
-    update_clock()?;
-    if let Some(d) = source_div {
-        set_source_div(d);
-    }
+/// `slot`'s card clock: its own divider (`div2`: 40 MHz / (2 x div2),
+/// 0 = 40 MHz) on the first stage; `khz` (what that gives) sets the data
+/// timeout (m7-sdcard.md §3.2). The other slot's clock keeps running.
+pub(super) fn set_card_clock(slot: u32, div2: u32, khz: u32) -> Result<(), &'static str> {
+    let bit = 1 << slot;
+    unsafe { wr(CLKENA, rd(CLKENA) & !bit) };
+    update_clock(slot)?;
     unsafe {
-        wr(CLKDIV, div2);
-        wr(CLKSRC, 0);
+        let shift = 8 * slot;
+        wr(CLKDIV, (rd(CLKDIV) & !(0xFF << shift)) | div2 << shift);
+        // Slot n uses divider n.
+        wr(CLKSRC, (rd(CLKSRC) & !(0b11 << (2 * slot))) | slot << (2 * slot));
     }
-    update_clock()?;
-    unsafe { wr(CLKENA, 1) }; // running, not stopped when idle
-    update_clock()?;
+    update_clock(slot)?;
+    unsafe { wr(CLKENA, rd(CLKENA) | bit) }; // running, not stopped when idle
+    update_clock(slot)?;
     unsafe { wr(TMOUT, ((100 * khz).min(0xFF_FFFF) << 8) | 255) };
-    event!(Info, "sd.clock", khz = khz);
+    event!(Info, "sd.clock", slot = slot, khz = khz);
     Ok(())
 }
 
@@ -282,7 +298,7 @@ fn set_card_clock_from(source_div: Option<u32>, div2: u32, khz: u32) -> Result<(
 
 /// The data phase of a command, through the IDMAC and the bounce buffer
 /// (at most its size).
-enum Data<'a> {
+pub(super) enum Data<'a> {
     None,
     Read(&'a mut [u8]),
     Write(&'a [u8]),
@@ -298,9 +314,15 @@ impl Data<'_> {
     }
 }
 
-/// Issues `cmd` with `arg` and its data phase (blocks of at most 512
-/// bytes). Returns the four response words (RESP0 = bits 31:0).
+/// `command_on` for the SD card's slot.
 fn command(cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
+    command_on(0, SECTOR, cmd, arg, data)
+}
+
+/// Issues `cmd` (its register value for slot 0) to `slot` with `arg` and
+/// its data phase (blocks of at most `block` bytes). Returns the four
+/// response words (RESP0 = bits 31:0).
+pub(super) fn command_on(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
     if !wait(1_000_000, || unsafe { rd(CMD) } & CMD_START == 0) {
         return Err("SDMMC busy");
     }
@@ -313,7 +335,7 @@ fn command(cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
         if len > 0 {
             wr(CTRL, rd(CTRL) | CTRL_FIFO_RESET);
             let _ = wait(10_000, || rd(CTRL) & CTRL_FIFO_RESET == 0);
-            wr(BLKSIZ, len.min(SECTOR) as u32);
+            wr(BLKSIZ, len.min(block) as u32);
             wr(BYTCNT, len as u32);
             if let Data::Write(b) = &data {
                 let dst = core::ptr::addr_of_mut!(BOUNCE).cast::<u8>();
@@ -322,7 +344,7 @@ fn command(cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
             dma_start(len);
         }
         wr(CMDARG, arg);
-        wr(CMD, cmd);
+        wr(CMD, cmd | slot << 16);
     }
     if !wait(1_000_000, || unsafe { rd(CMD) } & CMD_START == 0) {
         return Err("SDMMC command not taken");
@@ -338,7 +360,7 @@ fn command(cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
         return Err("no response");
     }
     if ints & CMD_ERRORS != 0 {
-        event!(Warn, "sd.cmd_error", cmd = cmd & 0x3F, rintsts = ints, status = unsafe { rd(STATUS) });
+        event!(Warn, "sd.cmd_error", slot = slot, cmd = cmd & 0x3F, rintsts = ints, status = unsafe { rd(STATUS) });
         return Err("response error");
     }
     let resp = unsafe { [rd(RESP0), rd(RESP0 + 4), rd(RESP0 + 8), rd(RESP0 + 12)] };
@@ -458,7 +480,7 @@ pub fn init() -> Result<Card, &'static str> {
     if let Some(c) = card() {
         return Ok(c);
     }
-    host_init()?;
+    slot0_up()?;
     delay_us(1000);
     command(CMD0, 0, Data::None)?;
     delay_us(20_000);
@@ -534,19 +556,19 @@ fn speed_up(rca: u32) -> Result<(), &'static str> {
     if four_bit {
         app_command(rca, ACMD6, 2, Data::None)?;
         unsafe {
-            wr(CTYPE, 1);
+            wr(CTYPE, rd(CTYPE) | 1);
             wr(io_mux_reg(D3), IO_MUX_SD);
             wr(func_out_sel(D3), SIG_GPIO_OUT);
         }
     }
-    set_card_clock_from(Some(8), 0, 20_000)?;
+    set_card_clock(0, 1, 20_000)?;
     // CMD6 mode 1, group 1 function 1 (High Speed); the answer's bits
     // 379:376 say which function is now selected.
     let mut high_speed = false;
     if spec >= 1 {
         let mut st = [0u8; 64];
         if command(CMD6, 0x80FF_FFF1, Data::Read(&mut st)).is_ok() && st[16] & 0xF == 1 {
-            set_card_clock_from(Some(4), 0, 40_000)?;
+            set_card_clock(0, 0, 40_000)?;
             high_speed = true;
         }
     }

@@ -153,6 +153,10 @@ pub trait Platform {
     fn handle_irq(_code: usize) -> bool {
         false
     }
+    /// Powers the Wi-Fi chip and identifies it on SDIO (N2b-1, doc/22).
+    fn wlan_probe() -> Result<u32, &'static str> {
+        Err("no Wi-Fi")
+    }
     /// Initialises the SD card if needed and logs what is on it (M7a).
     fn sd_info() -> Result<u32, &'static str> {
         Err("no SD card slot")

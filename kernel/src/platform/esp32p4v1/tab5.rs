@@ -2,7 +2,8 @@
 //! resets, the touch controller on I2C tells which of the three panel lots
 //! this is, and touch points are read by polling
 //! (doc/research/m6-panel-touch.md §2, §3, §6). IO expander #2 (0x44) is
-//! only read: one of its bits powers the Tab5 off (doc/06 §1.3).
+//! read, and written only to set bit0 (the Wi-Fi chip's power,
+//! `wlan_power_on`): its bit4 powers the Tab5 off (doc/06 §1.3).
 
 use t5_abi::event;
 
@@ -253,4 +254,37 @@ fn gt_read(addr: u8, out: &mut [TouchPoint; MAX_POINTS]) -> Result<usize, &'stat
     let [hi, lo] = GT_STATUS.to_be_bytes();
     i2c::transfer(addr, &[hi, lo, 0], &mut []).map_err(e)?;
     Ok(n)
+}
+
+/// IO expander #2's bit0 (WLAN_PWR_EN) powers the ESP32-C6. Turns it on
+/// with one read-modify-write per register that changes bit0 only; bit4
+/// powers the Tab5 off and is never changed (doc/22 §2, approved by the
+/// user on 2026-10-31). Reads back and checks that nothing else changed.
+/// Returns whether the C6 was already powered.
+pub fn wlan_power_on() -> Result<bool, &'static str> {
+    let read3 = || -> Result<[u8; 3], i2c::Error> { Ok([exp_read(EXP2, EXP_OUT)?, exp_read(EXP2, EXP_DIR)?, exp_read(EXP2, EXP_OUT_H_IM)?]) };
+    let [out, dir, him] = read3().map_err(|e| e.as_str())?;
+    event!(Info, "wlan.expander", out = out, dir = dir, out_h_im = him);
+    let on = |[o, d, h]: [u8; 3]| o & 1 != 0 && d & 1 != 0 && h & 1 == 0;
+    if on([out, dir, him]) {
+        return Ok(true);
+    }
+    // Level first, then the direction, so the pin goes straight to high.
+    let steps = [(EXP_OUT, out, out | 1), (EXP_DIR, dir, dir | 1), (EXP_OUT_H_IM, him, him & !1)];
+    for (reg, old, new) in steps {
+        if new != old {
+            exp_write(EXP2, reg, new).map_err(|e| e.as_str())?;
+        }
+    }
+    let after = read3().map_err(|e| e.as_str())?;
+    event!(Info, "wlan.power_on", out = after[0], dir = after[1], out_h_im = after[2]);
+    let others_same = (after[0] ^ out) & !1 == 0 && (after[1] ^ dir) & !1 == 0 && (after[2] ^ him) & !1 == 0;
+    if !others_same {
+        event!(Error, "wlan.expander_changed", out = after[0], dir = after[1], out_h_im = after[2]);
+        return Err("expander #2 changed beyond bit0");
+    }
+    if !on(after) {
+        return Err("WLAN_PWR_EN did not take");
+    }
+    Ok(false)
 }

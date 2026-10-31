@@ -10,6 +10,7 @@ mod display;
 mod i2c;
 mod psram;
 mod sd;
+mod sdio;
 mod tab5;
 
 // USB Serial/JTAG (doc/06 §3.1): usb_serial_jtag_reg.h
@@ -745,6 +746,10 @@ impl Platform for Esp32p4v1 {
             return true;
         }
         false
+    }
+
+    fn wlan_probe() -> Result<u32, &'static str> {
+        sdio::probe()
     }
 
     fn sd_info() -> Result<u32, &'static str> {

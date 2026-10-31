@@ -60,6 +60,8 @@ pub mod cmd {
     pub const SD_READ: u8 = 23;
     /// Write/read-back test and speed of the SD card (M7b).
     pub const SD_TEST: u8 = 24;
+    /// Power the Wi-Fi chip and identify it on SDIO (N2b-1, doc/22).
+    pub const WLAN_PROBE: u8 = 25;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -94,6 +96,7 @@ pub enum Command<'a> {
     SdInfo,
     SdRead { lba: u32 },
     SdTest,
+    WlanProbe,
 }
 
 impl Command<'_> {
@@ -123,6 +126,7 @@ impl Command<'_> {
             Command::SdInfo => "sdinfo",
             Command::SdRead { .. } => "sdread",
             Command::SdTest => "sdtest",
+            Command::WlanProbe => "wlanprobe",
         }
     }
 }
@@ -159,6 +163,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::SD_INFO if args.is_empty() => Command::SdInfo,
         cmd::SD_READ if args.len() == 4 => Command::SdRead { lba: u32_at(args, 0)? },
         cmd::SD_TEST if args.is_empty() => Command::SdTest,
+        cmd::WLAN_PROBE if args.is_empty() => Command::WlanProbe,
         cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -213,6 +218,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::SdInfo => put(&[cmd::SD_INFO])?,
         Command::SdRead { .. } => put(&[cmd::SD_READ])?,
         Command::SdTest => put(&[cmd::SD_TEST])?,
+        Command::WlanProbe => put(&[cmd::WLAN_PROBE])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -294,11 +300,12 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("display") => Command::Display,
         Some("sdinfo") => Command::SdInfo,
         Some("sdtest") => Command::SdTest,
+        Some("wlanprobe") => Command::WlanProbe,
         Some("sdread") => Command::SdRead { lba: num(Some(w.next().ok_or("sdread LBA")?))? },
         Some("rotate") => Command::Rotate { degrees: num(Some(w.next().ok_or("rotate 0|90|180|270")?))? },
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe");
         }
     };
     if w.next().is_some() {
@@ -327,7 +334,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

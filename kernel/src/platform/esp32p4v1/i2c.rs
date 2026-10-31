@@ -41,7 +41,7 @@ pub(super) const fn io_mux_reg(n: usize) -> usize {
 pub(super) const fn func_out_sel(n: usize) -> usize {
     0x500E_0558 + 4 * n
 }
-const fn func_in_sel(sig: u32) -> usize {
+pub(super) const fn func_in_sel(sig: u32) -> usize {
     0x500E_0158 + 4 * sig as usize
 }
 

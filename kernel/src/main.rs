@@ -433,6 +433,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::SdInfo => Current::sd_info(),
         Command::SdRead { lba } => Current::sd_dump(lba),
         Command::SdTest => Current::sd_test(),
+        Command::WlanProbe => Current::wlan_probe(),
         Command::Power => {
             Current::log_power("cmd");
             Ok(0)
