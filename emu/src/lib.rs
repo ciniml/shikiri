@@ -2,6 +2,7 @@ pub mod bus;
 pub mod cache;
 pub mod dsi;
 pub mod elf;
+pub mod hostpeer;
 pub mod i2c;
 pub mod machine;
 pub mod periph;

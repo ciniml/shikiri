@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 use t5emu::bus::Bus;
 use t5emu::cache;
+use t5emu::hostpeer::HostPeer;
 use t5emu::machine::{Machine, Stop};
 use t5emu::periph;
 
@@ -46,6 +47,9 @@ struct Monitor<'a> {
     stop_at: Option<u64>,
     /// Events (current boot) seen so far, by name.
     seen: std::collections::BTreeSet<String>,
+    /// The PC end of the host link; it starts when `nettest.listening` is
+    /// logged and ends the run when it has finished.
+    peer: Option<HostPeer>,
 }
 
 impl Monitor<'_> {
@@ -62,6 +66,11 @@ impl Monitor<'_> {
             self.seen.insert(name.to_string());
             match name {
                 "selftest.result" => self.selftest_done = true,
+                "nettest.listening" => {
+                    if let Some(p) = &mut self.peer {
+                        p.start();
+                    }
+                }
                 "ctl.ready" => self.ready = true,
                 "ctl.done" | "ctl.failed" => {
                     if let Some(t5log::Value::U(id)) = e.field(self.schemas, "request_id") {
@@ -69,6 +78,13 @@ impl Monitor<'_> {
                     }
                 }
                 _ => {}
+            }
+        }
+        if let Some(p) = &mut self.peer {
+            let ms = (m.bus.ticks() * 1000 / periph::SYSTIMER_HZ) as i64;
+            p.poll(&mut m.bus.periph.usj, ms);
+            if p.finished() {
+                return false;
             }
         }
         if self.commands.is_empty() {
@@ -123,7 +139,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
-                     [--linger-ms N] \
+                     [--linger-ms N] [--host-peer BYTES] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -149,6 +165,8 @@ struct Opts {
     ctl: Vec<String>,
     expect_events: Vec<String>,
     linger_ms: u64,
+    /// Run the PC end of the host link, sending this many bytes to the echo.
+    host_peer: Option<usize>,
     elf: String,
 }
 
@@ -174,6 +192,7 @@ fn parse_args() -> Result<Opts, String> {
         ctl: Vec::new(),
         expect_events: Vec::new(),
         linger_ms: 300,
+        host_peer: None,
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -210,6 +229,7 @@ fn parse_args() -> Result<Opts, String> {
                 o.ctl.push(v);
             }
             "--expect-event" => o.expect_events.push(val()?),
+            "--host-peer" => o.host_peer = Some(val()?.parse().map_err(|e| format!("--host-peer: {e}"))?),
             "--linger-ms" => o.linger_ms = val()?.parse().map_err(|e| format!("--linger-ms: {e}"))?,
             "--flash" => {
                 let v = val()?;
@@ -306,6 +326,7 @@ fn main() -> ExitCode {
         linger_cycles: o.linger_ms * o.mhz * 1000,
         stop_at: None,
         seen: Default::default(),
+        peer: o.host_peer.map(HostPeer::new),
     };
     let stop = loop {
         let stop = m.run(limit, &mut |m| mon.tick(m));
@@ -335,6 +356,7 @@ fn main() -> ExitCode {
         boots += 1;
     };
 
+    m.bus.periph.usj.flush();
     // The RTT channel must carry exactly the frames the console carried (the
     // console has one extra 0x00 that separates the bootloader's text).
     let usj = &m.bus.periph.usj.output;
@@ -447,7 +469,22 @@ fn main() -> ExitCode {
     if dsi.frames > 0 {
         eprintln!("t5emu: display: {} frame(s) sent; list item at {:#010x}", dsi.frames, dsi.last_llp & !0x3F);
     }
-    let all_ok = passed && rtt_ok && board_ok && missing.is_empty() && mon.pending.is_empty();
+    let peer_ok = match &mon.peer {
+        None => true,
+        Some(p) if p.passed() => {
+            eprintln!("t5emu: host peer: ping {:?} ms, TCP echo in {} ms", p.ping_ms, p.tcp_ms);
+            true
+        }
+        Some(p) if p.finished() => {
+            eprintln!("t5emu: host peer failed: {}", p.why);
+            false
+        }
+        Some(_) => {
+            eprintln!("t5emu: host peer did not finish (no nettest.listening, or too slow)");
+            false
+        }
+    };
+    let all_ok = passed && rtt_ok && board_ok && missing.is_empty() && mon.pending.is_empty() && peer_ok;
     match stop {
         // A reset is an end like any other once everything expected was
         // seen (`reboot`, doc/16 §3.6).

@@ -294,6 +294,12 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "run net" --ctl "run nettest" --ctl "wait-ms 30000" \
 	    --expect-event net.ready --expect-event nettest.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Host link (N2a, doc/21): t5emu plays the PC (10.55.0.1) on the
+	@# console line: 3 pings, then 16 KiB through the TCP echo server.
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net" --ctl "run nettest 1" --ctl "wait-ms 40000" --host-peer 16384 \
+	    --expect-event net.ready --expect-event hostlink.open \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is
 	@# selected in otadata, and reboot ends the run (no bootloader here).

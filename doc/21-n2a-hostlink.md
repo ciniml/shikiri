@@ -62,8 +62,13 @@ TCP の echo は `nettest 1`（ポート 7777）に PC から乱数を送り、�
 - ログは同じ線で読めている。ただし `t5log hostlink` が動いていない間（誰も読まない間）は、コンソールのログは捨てられる（`log.dropped sink=console`）。RTT のほうには残る。
 - 書き込み・インストール・実行は、利用者が足した許可（`t5log rtt --probe <Tab5>`）で Claude が行った。TUN の装置は利用者が作った。
 
+## 5.1 t5emu の中の PC 役（`--host-peer BYTES`）
+- emu/src/hostpeer.rs: smoltcp 0.14（`net` と同じ版、ホスト側は std）のインタフェース 10.55.0.1/24。パケットは `t5log hostlink` と同じ形のフレームで USJ を行き来する。PC からの分は 64 バイト（USB の 1 パケット）ずつ入れる。
+- USJ のモデル（emu/src/periph.rs）に受信を足した: OUT の FIFO（`EP1` の読み出し、`EP1_CONF` の DATA_AVAIL）、`INT_RAW`/`INT_ST`/`INT_ENA`/`INT_CLR` の `SERIAL_OUT_RECV_PKT`、割り込み元 22。Tab5 からのパケットのフレームはログの出力から外すので、RTT との突き合わせはそのまま通る。
+- 手順: `nettest.listening` が出たら ping を 3 回、次に 7777 番へ 16KiB を送り、戻りを照合する。終わったら走行を止める。答えが 5 秒（TCP は 20 秒）来なければ失敗。
+- `make test-p4emu` に入れた。結果（40MHz）: ping 0〜1ms、16KiB の echo が 69ms（模擬時間）。
+
 ## 6. まだ
 - **さらに速く**: 今は受信を 1 バイトずつレジスタから読み、送信も 1 バイトずつ書いている。`net` は要求ごとに 1 パケットずつ `read`/`write` する。どこが効いているかは測っていない（推測の候補: USB FS の 64 バイトのパケット、システムコールの回数、TCP の窓）。今の用途（開発中の PC とのやりとり）には足りるので、後回しにする（判断）。
-- **t5emu の中の相手役のホスト**（research §4）: まだ無い。今の確認は実機だけで、`make test-p4emu` には入っていない。
 - PC から Tab5 へログ以外の制御（コマンド）を同じ線で送ること。今は RTT を使っている。
 - 次は N2b（Wi-Fi）。エクスパンダ #2 の bit0（WLAN_PWR_EN）の書き込みには利用者の承認が要る。C6 のファームウェアの版も確かめる必要がある。

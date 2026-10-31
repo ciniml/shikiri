@@ -16,27 +16,82 @@ use crate::i2c::{I2C1_BASE, I2C1_SIZE};
 /// The SYSTIMER counts at 16 MHz (esp_hw_support/port/esp32p4/systimer.c:20).
 pub const SYSTIMER_HZ: u64 = 16_000_000;
 
-/// USB Serial/JTAG CDC console. Only the EP1 FIFO is modelled; the FIFO is
+/// USB Serial/JTAG, the console (usb_serial_jtag_reg.h). The IN FIFO is
 /// always free, as when a host has the port open. The bytes are log frames
-/// (doc/12), decoded by `main`.
+/// (doc/12), decoded by `main`, and host link packets (doc/21): a frame
+/// whose decoded first byte is `PACKET` goes to `packets_out` instead of
+/// `output`, so `output` stays the log (and matches RTT). The OUT FIFO
+/// (`input`) carries what the host sends; each `send` is one USB packet and
+/// raises SERIAL_OUT_RECV_PKT.
 #[derive(Default)]
 pub struct Usj {
     pub output: Vec<u8>,
+    /// The frame being written (until its 0x00).
+    frame: Vec<u8>,
+    pub packets_out: std::collections::VecDeque<Vec<u8>>,
+    input: std::collections::VecDeque<u8>,
+    int_raw: u32,
+    int_ena: u32,
 }
+
+/// First byte of a host link packet frame (kernel/src/hostlink.rs).
+pub const PACKET: u8 = 0xFF;
+/// INT_*.SERIAL_OUT_RECV_PKT.
+const USJ_OUT_RECV_PKT: u32 = 1 << 2;
+/// ETS_USB_SERIAL_JTAG_INTR_SOURCE (interrupts.h).
+pub const SRC_USJ: usize = 22;
 
 impl Usj {
     fn read(&mut self, off: u32) -> u32 {
         match off {
-            0x4 => 1 << 1, // EP1_CONF.SERIAL_IN_EP_DATA_FREE
+            0x0 => self.input.pop_front().unwrap_or(0) as u32,
+            // EP1_CONF: SERIAL_IN_EP_DATA_FREE, SERIAL_OUT_EP_DATA_AVAIL.
+            0x4 => 1 << 1 | (!self.input.is_empty() as u32) << 2,
+            0x8 => self.int_raw,
+            0xC => self.int_st(),
+            0x10 => self.int_ena,
             _ => 0,
         }
     }
 
     fn write(&mut self, off: u32, v: u32) {
         match off {
-            0x0 => self.output.push(v as u8),
+            0x0 => self.push_out(v as u8),
+            0x10 => self.int_ena = v,
+            0x14 => self.int_raw &= !v,
             _ => {}
         }
+    }
+
+    fn push_out(&mut self, b: u8) {
+        if b != 0 {
+            self.frame.push(b);
+            return;
+        }
+        let mut decoded = vec![0u8; self.frame.len()];
+        match t5_abi::log::cobs_decode(&self.frame, &mut decoded) {
+            Some(n) if n >= 2 && decoded[0] == PACKET => self.packets_out.push_back(decoded[1..n].to_vec()),
+            _ => {
+                self.output.extend_from_slice(&self.frame);
+                self.output.push(0);
+            }
+        }
+        self.frame.clear();
+    }
+
+    /// Moves a frame still missing its 0x00 into `output` (end of the run).
+    pub fn flush(&mut self) {
+        self.output.append(&mut self.frame);
+    }
+
+    /// What the host sends: one USB packet.
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.input.extend(bytes);
+        self.int_raw |= USJ_OUT_RECV_PKT;
+    }
+
+    pub fn int_st(&self) -> u32 {
+        self.int_raw & self.int_ena
     }
 }
 
@@ -485,6 +540,12 @@ impl Peripherals {
         }
         if self.dsi.irq(ticks) {
             let idx = self.intmtx.map[SRC_GDMA] as usize;
+            if idx < CLIC_LINES {
+                lines[idx] = true;
+            }
+        }
+        if self.usj.int_st() != 0 {
+            let idx = self.intmtx.map[SRC_USJ] as usize;
             if idx < CLIC_LINES {
                 lines[idx] = true;
             }
