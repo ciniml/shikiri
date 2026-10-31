@@ -22,7 +22,17 @@ pub const MTU: usize = 1500;
 pub const ETH_FRAME: usize = netdev::ETH_FRAME;
 pub const ETH_HDR: usize = 14;
 const ETHERTYPE_IPV4: [u8; 2] = [0x08, 0x00];
+const ETHERTYPE_IPV6: [u8; 2] = [0x86, 0xDD];
 const ETHERTYPE_ARP: [u8; 2] = [0x08, 0x06];
+
+/// Whether an IP packet stays on the Tab5 (127/8, ::1).
+fn loopback(ip: &[u8]) -> bool {
+    match ip.first().map(|v| v >> 4) {
+        Some(4) => ip.get(16) == Some(&127),
+        Some(6) => ip.get(24..40).is_some_and(|d| d[..15].iter().all(|&b| b == 0) && d[15] == 1),
+        _ => false,
+    }
+}
 
 /// The host link's address and network (doc/21).
 pub const HOST_ADDR: u32 = 0x0A37_0002; // 10.55.0.2
@@ -137,7 +147,7 @@ impl TxToken for LinkTx<'_> {
         let mut buf = [0u8; MTU];
         let r = f(&mut buf[..len]);
         let links = self.0;
-        if len >= 20 && buf[16] != 127
+        if len >= 20 && !loopback(&buf[..len])
             && let Some(h) = &links.host
         {
             if filter::check(OUT, ANY_LINK, IFACE0 as u8, &buf[..len]) != Action::Pass {
@@ -273,7 +283,8 @@ impl TxToken for EthTx<'_> {
         let mut buf = [0u8; ETH_FRAME];
         let r = f(&mut buf[..len]);
         let nic = self.0;
-        if len > ETH_HDR && buf[12..14] == ETHERTYPE_IPV4 && filter::check(OUT, ANY_LINK, nic.link as u8, &buf[ETH_HDR..len]) != Action::Pass {
+        let ip = buf[12..14] == ETHERTYPE_IPV4 || buf[12..14] == ETHERTYPE_IPV6;
+        if len > ETH_HDR && ip && filter::check(OUT, ANY_LINK, nic.link as u8, &buf[ETH_HDR..len]) != Action::Pass {
             return r;
         }
         if nic.port.write(&buf[..len]) {
@@ -316,8 +327,8 @@ impl Device for EthNic {
             if to_me {
                 self.rx_unicast += 1;
             }
-            if ethertype == ETHERTYPE_IPV4 && (to_me || f[0] & 1 != 0) {
-                if to_me && transit(&f[ETH_HDR..], self.own) {
+            if (ethertype == ETHERTYPE_IPV4 || ethertype == ETHERTYPE_IPV6) && (to_me || f[0] & 1 != 0) {
+                if to_me && ethertype == ETHERTYPE_IPV4 && transit(&f[ETH_HDR..], self.own) {
                     fwd::inbox().push(self.link as u8, f);
                     continue;
                 }

@@ -22,6 +22,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [23](23-n3-forwarding.md) | N3: リンク間の転送（経路表、ARP、TTL、ICMP のエラー）、待ち受けのアドレスとリンクの指定、`net` の中の試験用 LAN。t5emu で PC → Tab5 → 試験用 LAN を確認 |
 | [24](24-n4-filter.md) | N4: パケットのフィルタ（in/forward/out、規則、規定）と接続の追跡、`svc:netctl` と `netctl` アプリ、別のリンクの自分のアドレスへの配送。t5emu と実機で確認 |
 | [25](25-n5-nat-dhcp.md) | N5: NAT（masquerade、TCP/UDP/ICMP echo、差分のチェックサム）と DHCP サーバ。試験用 LAN の相手が DHCP で借り、実機で Wi-Fi の NAT を通って外の Web に届いた |
+| [26](26-ipv6.md) | IPv6 の V1〜V3: smoltcp の IPv6 と SLAAC、フィルタの IPv6、`svc:net` と `t5-rt` の IPv6、AAAA。実機で SLAAC のアドレス、LAN からの ping6 と TCP、IPv6 で外の Web。V4（転送）は方式の相談待ち |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |

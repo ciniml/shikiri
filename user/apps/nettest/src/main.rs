@@ -14,8 +14,14 @@
 //! times; with `mode` 4 it resolves a few names by DNS and fetches the
 //! first one's `/` (doc/22 §8).
 //!
+//! IPv6 (doc/26 §5): `mode` 5 resolves one.one.one.one's AAAA, pings it and
+//! fetches its `/` over IPv6; `mode` 6 sends UDP round trips and 64 KiB of
+//! TCP over ::1; `mode` 7 pings the test LAN's peer (fd50::2).
+//!
 //! Built with `--permit svc:net`. Exit 0 if everything held, otherwise the
 //! number of the failed check.
+
+use core::net::{IpAddr, Ipv6Addr};
 
 use t5_rt::net::ipv4;
 use t5_rt::{Net, event, sleep_ms, time_ns};
@@ -31,6 +37,9 @@ fn main(mode: usize, arg: usize) -> usize {
         2 => http_get(arg as u32),
         3 => ping(arg as u32),
         4 => resolve(),
+        5 => web6(),
+        6 => loop6(),
+        7 => ping6(IpAddr::V6(Ipv6Addr::new(0xfd50, 0, 0, 0, 0, 0, 0, 2))),
         _ => run(),
     };
     match r {
@@ -144,10 +153,94 @@ fn echo_server() -> Result<(), u32> {
     }
 }
 
-fn http_get(ip: u32) -> Result<(), u32> {
+/// Pings `ip` (either family) four times.
+fn ping6(ip: IpAddr) -> Result<(), u32> {
+    let mut net = connect()?;
+    let mut answered = 0u32;
+    let bytes = match ip {
+        IpAddr::V6(a) => a.octets(),
+        IpAddr::V4(a) => a.to_ipv6_mapped().octets(),
+    };
+    for seq in 0..4u32 {
+        match net.ping_ip(ip, 2000) {
+            Ok(us) => {
+                answered += 1;
+                event!(Info, "nettest.ping6", addr = &bytes[..], seq_num = seq, rtt_us = us);
+            }
+            Err(_) => event!(Warn, "nettest.ping6_lost", addr = &bytes[..], seq_num = seq),
+        }
+        sleep_ms(200);
+    }
+    if answered == 0 { Err(70) } else { Ok(()) }
+}
+
+fn web6() -> Result<(), u32> {
     let mut net = connect()?;
     let t = time_ns();
-    let s = net.tcp_connect(ip, 80).map_err(|_| 40u32)?;
+    let ip = net.resolve6("one.one.one.one", 5000).map_err(|_| 71u32)?;
+    event!(Info, "nettest.resolved6", name = "one.one.one.one", addr = &ip.octets()[..], ms = ((time_ns() - t) / 1_000_000) as u32);
+    drop(net);
+    ping6(IpAddr::V6(ip))?;
+    http_get_ip(IpAddr::V6(ip))
+}
+
+/// UDP round trips and TCP over ::1.
+fn loop6() -> Result<(), u32> {
+    let mut net = connect()?;
+    let lo = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let a = net.udp_bind(5100).map_err(|_| 80u32)?;
+    let b = net.udp_bind(5101).map_err(|_| 81u32)?;
+    let mut buf = [0u8; 512];
+    let t = time_ns();
+    for i in 0..20u32 {
+        let msg = i.to_le_bytes();
+        net.udp_send_ip(a, lo, 5101, &msg).map_err(|_| 82u32)?;
+        let (n, from, port) = net.udp_recv_ip(b, &mut buf, 1000).map_err(|_| 83u32)?;
+        if n != 4 || buf[..4] != msg || from != lo || port != 5100 {
+            return Err(84);
+        }
+        net.udp_send_ip(b, from, port, &buf[..n]).map_err(|_| 85u32)?;
+        net.udp_recv_ip(a, &mut buf, 1000).map_err(|_| 86u32)?;
+    }
+    let udp_ms = ((time_ns() - t) / 1_000_000) as u32;
+    let l = net.tcp_listen(7778).map_err(|_| 87u32)?;
+    let c = net.tcp_connect_ip(lo, 7778).map_err(|_| 88u32)?;
+    net.wait_established(c, 5000).map_err(|_| 89u32)?;
+    let t = time_ns();
+    let (mut sent, mut got) = (0usize, 0usize);
+    const N: usize = 64 << 10;
+    let mut sum = (Fnv::new(), Fnv::new());
+    let mut chunk = [0u8; 2048];
+    while got < N {
+        if sent < N {
+            for (j, c) in chunk.iter_mut().enumerate() {
+                *c = byte(sent + j);
+            }
+            let k = net.send(c, &chunk[..(N - sent).min(chunk.len())]).map_err(|_| 90u32)?;
+            sum.0.update(&chunk[..k]);
+            sent += k;
+        }
+        let r = net.recv_now(l, &mut buf).map_err(|_| 91u32)?;
+        sum.1.update(&buf[..r.len]);
+        got += r.len;
+        if r.len == 0 {
+            sleep_ms(1);
+        }
+    }
+    let _ = net.close(c);
+    let _ = net.close(l);
+    event!(Info, "nettest.loop6", udp_round_trips = 20u32, udp_ms = udp_ms, tcp_bytes = N as u32, tcp_ms = ((time_ns() - t) / 1_000_000) as u32, ok = sum.0.0 == sum.1.0);
+    if sum.0.0 == sum.1.0 { Ok(()) } else { Err(92) }
+}
+
+fn http_get(ip: u32) -> Result<(), u32> {
+    http_get_ip(IpAddr::V4(core::net::Ipv4Addr::from_bits(ip)))
+}
+
+fn http_get_ip(ip: IpAddr) -> Result<(), u32> {
+    let mut net = connect()?;
+    let t = time_ns();
+    let s = net.tcp_connect_ip(ip, 80).map_err(|_| 40u32)?;
     net.wait_established(s, 10_000).map_err(|_| 41u32)?;
     let connect_ms = ((time_ns() - t) / 1_000_000) as u32;
     net.send_all(s, b"GET / HTTP/1.0\r\nConnection: close\r\n\r\n").map_err(|_| 42u32)?;
@@ -170,7 +263,7 @@ fn http_get(ip: u32) -> Result<(), u32> {
     event!(
         Info,
         "nettest.http",
-        ip = ip,
+        v6 = ip.is_ipv6(),
         connect_ms = connect_ms,
         bytes = total as u32,
         total_ms = ((time_ns() - t) / 1_000_000) as u32,

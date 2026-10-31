@@ -1,6 +1,6 @@
-//! Packet filter and connection tracking (N4, doc/24). Every IPv4 packet
-//! passes one hook: `IN` (to the Tab5), `FORWARD` (through it) or `OUT`
-//! (from it); 127/8 is not filtered. The active rule set is read top down
+//! Packet filter and connection tracking (N4, doc/24; IPv6: doc/26 §3).
+//! Every IP packet passes one hook: `IN` (to the Tab5), `FORWARD` (through
+//! it) or `OUT` (from it); loopback (127/8, ::1) is not filtered. The active rule set is read top down
 //! and the first rule that matches decides; otherwise the hook's policy.
 //! A rule can ask for the packet's state, which the connection table gives:
 //! a packet of a connection that has seen traffic both ways is
@@ -9,12 +9,20 @@
 //! packet that passes records or refreshes its connection, so the replies
 //! to what the Tab5 starts are known.
 //!
-//! DHCP's answers to the client (UDP 67 → 68) always pass: they come
-//! before the link has an address and match no connection.
+//! DHCP (UDP 67 ↔ 68) always passes: it comes before the link has an
+//! address and matches no connection. So do IPv6's neighbor discovery and
+//! MLD (ICMPv6 130-137, 143), without which IPv6 does not work at all.
+//!
+//! Addresses are kept as u128: IPv4 in the low 32 bits, told apart by the
+//! packet's (or the rule's) family.
 
 use t5_rt::{event, time_ns};
 
 use crate::fwd::{IFACES, LINK_NAMES, be32};
+
+fn be128(b: &[u8]) -> u128 {
+    u128::from_be_bytes(b[..16].try_into().unwrap())
+}
 
 pub const IN: u8 = 0;
 pub const FORWARD: u8 = 1;
@@ -34,6 +42,7 @@ pub mod st {
 pub const PROTO_ICMP: u8 = 1;
 pub const PROTO_TCP: u8 = 6;
 pub const PROTO_UDP: u8 = 17;
+pub const PROTO_ICMPV6: u8 = 58;
 
 pub const MAX_RULES: usize = 64;
 const CONNECTIONS: usize = 512;
@@ -58,9 +67,11 @@ pub struct Rule {
     pub out_link: u8,
     /// 0: any.
     pub proto: u8,
-    pub src: u32,
+    /// 0: either; 4 or 6 when the rule names an address of that family.
+    pub family: u8,
+    pub src: u128,
     pub src_len: u8,
-    pub dst: u32,
+    pub dst: u128,
     pub dst_len: u8,
     /// Destination port range (TCP, UDP); 0..=65535 is any.
     pub port_lo: u16,
@@ -72,18 +83,21 @@ pub struct Rule {
 
 impl Rule {
     pub const fn new(action: Action, hook: u8) -> Rule {
-        Rule { action, hook, in_link: ANY_LINK, out_link: ANY_LINK, proto: 0, src: 0, src_len: 0, dst: 0, dst_len: 0, port_lo: 0, port_hi: u16::MAX, states: 0, log: false }
+        Rule { action, hook, in_link: ANY_LINK, out_link: ANY_LINK, proto: 0, family: 0, src: 0, src_len: 0, dst: 0, dst_len: 0, port_lo: 0, port_hi: u16::MAX, states: 0, log: false }
     }
 
     fn matches(&self, hook: u8, in_link: u8, out_link: u8, p: &Pkt, state: u8) -> bool {
-        let prefix = |addr: u32, net: u32, len: u8| len == 0 || (addr ^ net) >> (32 - len as u32) == 0;
+        let bits = if p.family == 4 { 32 } else { 128 };
+        let prefix = |addr: u128, net: u128, len: u8| len == 0 || (addr ^ net) >> (bits - len as u32) == 0;
+        let tcp_udp = p.proto == PROTO_TCP || p.proto == PROTO_UDP;
         self.hook == hook
+            && (self.family == 0 || self.family == p.family)
             && (self.in_link == ANY_LINK || self.in_link == in_link)
             && (self.out_link == ANY_LINK || self.out_link == out_link)
             && (self.proto == 0 || self.proto == p.proto)
             && prefix(p.src, self.src, self.src_len)
             && prefix(p.dst, self.dst, self.dst_len)
-            && (self.port_lo == 0 && self.port_hi == u16::MAX || (p.proto == PROTO_TCP || p.proto == PROTO_UDP) && (self.port_lo..=self.port_hi).contains(&p.dport))
+            && (self.port_lo == 0 && self.port_hi == u16::MAX || tcp_udp && (self.port_lo..=self.port_hi).contains(&p.dport))
             && (self.states == 0 || self.states & state != 0)
     }
 }
@@ -188,11 +202,14 @@ pub fn log_stats() {
 
 // ---- packets ----
 
-/// What the filter looks at in an IPv4 packet.
+/// What the filter looks at in an IP packet.
 pub struct Pkt {
+    /// 4 or 6.
+    pub family: u8,
+    /// The transport (after IPv6's extension headers).
     pub proto: u8,
-    pub src: u32,
-    pub dst: u32,
+    pub src: u128,
+    pub dst: u128,
     pub sport: u16,
     pub dport: u16,
     tcp_flags: u8,
@@ -213,30 +230,84 @@ fn ports(proto: u8, l4: &[u8]) -> (u16, u16) {
             let id = u16::from_be_bytes([l4[4], l4[5]]);
             (id, id)
         }
+        PROTO_ICMPV6 if l4.len() >= 6 && (l4[0] == 128 || l4[0] == 129) => {
+            let id = u16::from_be_bytes([l4[4], l4[5]]);
+            (id, id)
+        }
         _ => (0, 0),
     }
 }
 
-pub fn parse(ip: &[u8]) -> Option<Pkt> {
-    if ip.len() < 20 || ip[0] >> 4 != 4 {
-        return None;
+/// An IP packet's family, addresses, transport and where it starts; IPv6
+/// extension headers (hop-by-hop, routing, fragment, destination options)
+/// are stepped over.
+fn header(ip: &[u8]) -> Option<(u8, u128, u128, u8, usize)> {
+    match ip.first()? >> 4 {
+        4 if ip.len() >= 20 => Some((4, be32(&ip[12..16]) as u128, be32(&ip[16..20]) as u128, ip[9], (ip[0] & 0xF) as usize * 4)),
+        6 if ip.len() >= 40 => {
+            let (mut next, mut at) = (ip[6], 40);
+            while matches!(next, 0 | 43 | 44 | 60) {
+                let h = ip.get(at..at + 2)?;
+                let len = if next == 44 { 8 } else { (h[1] as usize + 1) * 8 };
+                next = h[0];
+                at += len;
+            }
+            Some((6, be128(&ip[8..24]), be128(&ip[24..40]), next, at))
+        }
+        _ => None,
     }
-    let ihl = (ip[0] & 0xF) as usize * 4;
-    let l4 = ip.get(ihl..)?;
-    let proto = ip[9];
+}
+
+pub fn parse(ip: &[u8]) -> Option<Pkt> {
+    let (family, src, dst, proto, at) = header(ip)?;
+    let l4 = ip.get(at..)?;
     let (sport, dport) = ports(proto, l4);
     let tcp_flags = if proto == PROTO_TCP && l4.len() >= 14 { l4[13] } else { 0 };
-    // Destination Unreachable, Time Exceeded, Parameter Problem: the
-    // header of the packet they are about follows the first 8 bytes.
-    let inner = if proto == PROTO_ICMP && l4.len() >= 8 + 20 && matches!(l4[0], 3 | 11 | 12) {
-        let q = &l4[8..];
-        let qihl = (q[0] & 0xF) as usize * 4;
-        let (a, b) = ports(q[9], q.get(qihl..).unwrap_or(&[]));
-        Some(Key::new(q[9], be32(&q[12..16]), a, be32(&q[16..20]), b))
+    // Errors quote the header of the packet they are about after their
+    // first 8 bytes: ICMP Destination Unreachable, Time Exceeded, Parameter
+    // Problem; ICMPv6 the same and Packet Too Big.
+    let error = match proto {
+        PROTO_ICMP => l4.first().is_some_and(|t| matches!(t, 3 | 11 | 12)),
+        PROTO_ICMPV6 => l4.first().is_some_and(|t| (1..=4).contains(t)),
+        _ => false,
+    };
+    let inner = if error {
+        l4.get(8..).and_then(header).map(|(_, a, b, proto, qat)| {
+            let (pa, pb) = ports(proto, l4[8..].get(qat..).unwrap_or(&[]));
+            Key::new(proto, a, pa, b, pb)
+        })
     } else {
         None
     };
-    Some(Pkt { proto, src: be32(&ip[12..16]), dst: be32(&ip[16..20]), sport, dport, tcp_flags, inner })
+    Some(Pkt { family, proto, src, dst, sport, dport, tcp_flags, inner })
+}
+
+/// Neighbor discovery and MLD, which pass every hook.
+fn ipv6_control(p: &Pkt, ip: &[u8]) -> bool {
+    if p.family != 6 || p.proto != PROTO_ICMPV6 {
+        return false;
+    }
+    let at = header(ip).map_or(40, |h| h.4);
+    ip.get(at).is_some_and(|t| matches!(t, 130..=137 | 143))
+}
+
+fn loopback(p: &Pkt) -> bool {
+    match p.family {
+        4 => p.src >> 24 == 127 || p.dst >> 24 == 127,
+        _ => p.src == 1 || p.dst == 1,
+    }
+}
+
+/// An address as its bytes (4 for IPv4, 16 for IPv6), for the log.
+fn addr_bytes(family: u8, a: u128) -> ([u8; 16], usize) {
+    let b = a.to_be_bytes();
+    if family == 4 {
+        let mut v = [0u8; 16];
+        v[..4].copy_from_slice(&b[12..]);
+        (v, 4)
+    } else {
+        (b, 16)
+    }
 }
 
 // ---- connections ----
@@ -245,19 +316,20 @@ pub fn parse(ip: &[u8]) -> Option<Pkt> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
     proto: u8,
-    a: (u32, u16),
-    b: (u32, u16),
+    a: (u128, u16),
+    b: (u128, u16),
 }
 
 impl Key {
-    fn new(proto: u8, src: u32, sport: u16, dst: u32, dport: u16) -> Key {
+    fn new(proto: u8, src: u128, sport: u16, dst: u128, dport: u16) -> Key {
         let (x, y) = ((src, sport), (dst, dport));
         if x <= y { Key { proto, a: x, b: y } } else { Key { proto, a: y, b: x } }
     }
 
     fn hash(&self) -> usize {
         let mut h = (self.proto as u32).wrapping_mul(0x9E37_79B9);
-        for v in [self.a.0, self.a.1 as u32, self.b.0, self.b.1 as u32] {
+        let fold = |a: u128| (a ^ a >> 32 ^ a >> 64 ^ a >> 96) as u32;
+        for v in [fold(self.a.0), self.a.1 as u32, fold(self.b.0), self.b.1 as u32] {
             h = (h ^ v).wrapping_mul(0x85EB_CA6B).rotate_left(13);
         }
         h as usize
@@ -268,7 +340,7 @@ impl Key {
 struct Conn {
     key: Key,
     /// The first packet's source: the other way is the reply.
-    from: (u32, u16),
+    from: (u128, u16),
     replied: bool,
     expires: u64,
 }
@@ -353,6 +425,7 @@ impl Filter {
             return;
         }
         self.log_left -= 1;
+        let (saddr, daddr) = (addr_bytes(p.family, p.src), addr_bytes(p.family, p.dst));
         event!(
             Info,
             "net.drop",
@@ -361,8 +434,8 @@ impl Filter {
             reject = action == Action::Reject,
             link = LINK_NAMES.get(link as usize).copied().unwrap_or("-"),
             proto = p.proto,
-            saddr = p.src,
-            daddr = p.dst,
+            saddr = &saddr.0[..saddr.1],
+            daddr = &daddr.0[..daddr.1],
             sport = p.sport,
             dport = p.dport,
             state = state
@@ -370,13 +443,13 @@ impl Filter {
     }
 }
 
-/// The filter's decision on IPv4 packet `ip` at `hook`, coming in on
+/// The filter's decision on IP packet `ip` at `hook`, coming in on
 /// `in_link` and leaving by `out_link` (`ANY_LINK` where there is none).
-/// Packets that are not IPv4, or too short to read, pass (the stack drops
-/// them).
+/// Packets that are not IP, or too short to read, pass (the stack drops
+/// them). IPv6 has no reject (no ICMPv6 errors are made yet): it drops.
 pub fn check(hook: u8, in_link: u8, out_link: u8, ip: &[u8]) -> Action {
     let Some(p) = parse(ip) else { return Action::Pass };
-    if p.dst >> 24 == 127 || p.src >> 24 == 127 {
+    if loopback(&p) || ipv6_control(&p, ip) {
         return Action::Pass;
     }
     // DHCP: answers to the client, and requests to the server (doc/25).
@@ -397,7 +470,7 @@ pub fn check(hook: u8, in_link: u8, out_link: u8, ip: &[u8]) -> Action {
             (f.rules.policy[hook as usize], f.rules.policy_log[hook as usize])
         }
     };
-    let action = if hook == OUT && action == Action::Reject { Action::Drop } else { action };
+    let action = if (hook == OUT || p.family == 6) && action == Action::Reject { Action::Drop } else { action };
     if action == Action::Pass {
         f.record(&p, state, slot, now);
     } else if log {

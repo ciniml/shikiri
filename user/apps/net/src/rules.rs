@@ -16,8 +16,9 @@
 //! the packet leaves by. `policy HOOK pass|drop` sets what happens when no
 //! rule matches; `policy HOOK drop log` also logs what it drops. Links:
 //! host, wlan0, test0. States: new, established,
-//! related, invalid. CIDR: `any` or A.B.C.D[/LEN]; `port` is the
-//! destination port.
+//! related, invalid. CIDR: `any`, A.B.C.D[/LEN] or an IPv6 address
+//! [/LEN] (doc/26 §3); a rule with an address only matches its family.
+//! Protocols: tcp, udp, icmp, icmp6. `port` is the destination port.
 //!
 //! Besides the filter (N5, doc/25):
 //! `masquerade on LINK [from CIDR]` (at most 4) and
@@ -61,16 +62,42 @@ fn ipv4(s: &str) -> Option<u32> {
     (parts == 4).then_some(v)
 }
 
-/// (address, prefix length).
-fn cidr(s: &str) -> Option<(u32, u8)> {
+/// (family (0 for any), address, prefix length).
+fn cidr(s: &str) -> Option<(u8, u128, u8)> {
     if s == "any" {
-        return Some((0, 0));
+        return Some((0, 0, 0));
     }
     let (a, len) = match s.split_once('/') {
-        Some((a, l)) => (a, number::<u8>(l).filter(|&l| l <= 32)?),
-        None => (s, 32),
+        Some((a, l)) => (a, Some(number::<u8>(l)?)),
+        None => (s, None),
     };
-    Some((ipv4(a)?, len))
+    if let Some(v4) = ipv4(a) {
+        let len = len.unwrap_or(32);
+        return (len <= 32).then_some((4, v4 as u128, len));
+    }
+    let v6: core::net::Ipv6Addr = a.parse().ok()?;
+    let len = len.unwrap_or(128);
+    (len <= 128).then_some((6, v6.to_bits(), len))
+}
+
+/// An IPv4 CIDR (masquerade).
+fn cidr4(s: &str) -> Option<(u32, u8)> {
+    match cidr(s)? {
+        (6, ..) => None,
+        (_, a, len) => Some((a as u32, len)),
+    }
+}
+
+/// Sets the rule's family from an address; false if it disagrees.
+fn family(r: &mut Rule, f: u8) -> bool {
+    if f == 0 || r.family == 0 || r.family == f {
+        if f != 0 {
+            r.family = f;
+        }
+        true
+    } else {
+        false
+    }
 }
 
 fn states(s: &str) -> Option<u8> {
@@ -98,7 +125,7 @@ pub fn parse_line(line: &str) -> Option<Line> {
         let mut m = Masq { link: filter::link_named(w.next()?)?, src: 0, src_len: 0 };
         match w.next() {
             None => {}
-            Some("from") => (m.src, m.src_len) = cidr(w.next()?)?,
+            Some("from") => (m.src, m.src_len) = cidr4(w.next()?)?,
             Some(_) => return None,
         }
         return w.next().is_none().then_some(Line::Masq(m));
@@ -144,11 +171,17 @@ pub fn parse_line(line: &str) -> Option<Line> {
                     "tcp" => filter::PROTO_TCP,
                     "udp" => filter::PROTO_UDP,
                     "icmp" => filter::PROTO_ICMP,
+                    "icmp6" => filter::PROTO_ICMPV6,
                     _ => return None,
                 }
             }
-            "from" => (r.src, r.src_len) = cidr(w.next()?)?,
-            "to" => (r.dst, r.dst_len) = cidr(w.next()?)?,
+            "from" | "to" => {
+                let (f, a, len) = cidr(w.next()?)?;
+                if !family(&mut r, f) {
+                    return None;
+                }
+                if word == "from" { (r.src, r.src_len) = (a, len) } else { (r.dst, r.dst_len) = (a, len) }
+            }
             "port" => {
                 let p = w.next()?;
                 (r.port_lo, r.port_hi) = match p.split_once('-') {

@@ -32,7 +32,7 @@ mod testlan;
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address};
+use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
 use t5_rt::net::{self as proto, op, state, status};
 use t5_rt::{Channel, Error, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
 
@@ -60,6 +60,28 @@ const DNS_QUERIES: usize = 4;
 const IDLE_NS: u64 = 50_000_000;
 /// The pool index of the shared DNS socket (not in the pool).
 const SHARED: usize = usize::MAX;
+
+/// IPv6 (doc/26 §2): the host link's ULA network (the PC is ::1 in it, the
+/// Tab5 ::2) and the test LAN's (`net` ::1, the peer ::2).
+pub const HOST_NET6: Ipv6Address = Ipv6Address::new(0xfd55, 0, 0, 0, 0, 0, 0, 0);
+pub const TEST_NET6: Ipv6Address = Ipv6Address::new(0xfd50, 0, 0, 0, 0, 0, 0, 0);
+
+/// Address `host` in the /64 `net`.
+pub fn in64(net: Ipv6Address, host: u16) -> Ipv6Address {
+    let s = net.segments();
+    Ipv6Address::new(s[0], s[1], s[2], s[3], 0, 0, 0, host)
+}
+
+fn same64(a: &Ipv6Address, net: &Ipv6Address) -> bool {
+    a.segments()[..4] == net.segments()[..4]
+}
+
+/// The link-local address made from a MAC address (EUI-64, RFC 4291 §2.5.1).
+pub fn link_local(mac: [u8; 6]) -> IpCidr {
+    let w = |a: u8, b: u8| u16::from_be_bytes([a, b]);
+    IpCidr::new(Ipv6Address::new(0xfe80, 0, 0, 0, w(mac[0] ^ 2, mac[1]), w(mac[2], 0xff), w(0xfe, mac[3]), w(mac[4], mac[5])).into(), 64)
+}
+
 
 pub fn now() -> Instant {
     Instant::from_micros((time_ns() / 1000) as i64)
@@ -134,18 +156,54 @@ pub struct EthLink {
     report_at: u64,
     /// Its address changed: the interfaces' addresses are to be redone.
     changed: bool,
+    /// The global IPv6 address last logged (SLAAC).
+    v6_logged: Option<Ipv6Address>,
 }
 
 impl EthLink {
-    fn new(link: usize, port: Port, mac: [u8; 6]) -> EthLink {
+    /// `slaac`: take IPv6 addresses and the default route from router
+    /// advertisements.
+    fn new(link: usize, port: Port, mac: [u8; 6], slaac: bool) -> EthLink {
         let mut dev = EthNic { link, port, mac, own: None, rx: 0, rx_unicast: 0, tx: 0, tx_dropped: 0 };
-        let iface = Interface::new(Config::new(HardwareAddress::Ethernet(EthernetAddress(mac))), &mut dev, now());
-        EthLink { iface, dev, sockets: SocketSet::new(eth_storage(link)), dhcp: None, dns: None, router: None, dns_server: None, report_at: time_ns() + 5_000_000_000, changed: true }
+        let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+        config.slaac = slaac;
+        config.random_seed = time_ns() ^ u64::from_le_bytes([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0, 0]);
+        let mut iface = Interface::new(config, &mut dev, now());
+        iface.update_ip_addrs(|a| {
+            let _ = a.push(link_local(mac));
+        });
+        EthLink {
+            iface,
+            dev,
+            sockets: SocketSet::new(eth_storage(link)),
+            dhcp: None,
+            dns: None,
+            router: None,
+            dns_server: None,
+            report_at: time_ns() + 5_000_000_000,
+            changed: true,
+            v6_logged: None,
+        }
+    }
+
+    /// Logs the global IPv6 address when SLAAC gives (or changes) it.
+    fn log_ipv6(&mut self) {
+        let global = self.iface.ip_addrs().iter().find_map(|c| match c {
+            IpCidr::Ipv6(c) if !c.address().is_unicast_link_local() => Some(c.address()),
+            _ => None,
+        });
+        if global != self.v6_logged {
+            self.v6_logged = global;
+            if let Some(a) = global {
+                event!(Info, "net.ipv6", link = LINK_NAMES[self.dev.link], addr = &a.octets()[..]);
+            }
+        }
     }
 
     fn set_addr(&mut self, addr: u32, prefix: u8, router: Option<u32>) {
         self.iface.update_ip_addrs(|a| {
-            a.clear();
+            // IPv6 addresses (SLAAC's among them) stay.
+            a.retain(|c| matches!(c, IpCidr::Ipv6(_)));
             let _ = a.push(IpCidr::new(Ipv4Address::from_bits(addr).into(), prefix));
         });
         match router {
@@ -164,6 +222,7 @@ impl EthLink {
     /// Applies what DHCP says (address, default route, DNS servers).
     fn dhcp(&mut self) {
         let name = LINK_NAMES[self.dev.link];
+        self.log_ipv6();
         if self.dev.own.is_none() && time_ns() >= self.report_at {
             self.report_at = time_ns() + 5_000_000_000;
             link::log_counters(name, &self.dev);
@@ -192,7 +251,7 @@ impl EthLink {
                 }
             }
             Some(dhcpv4::Event::Deconfigured) => {
-                self.iface.update_ip_addrs(|a| a.clear());
+                self.iface.update_ip_addrs(|a| a.retain(|c| matches!(c, IpCidr::Ipv6(_))));
                 self.iface.routes_mut().remove_default_ipv4_route();
                 self.dev.own = None;
                 self.router = None;
@@ -221,7 +280,7 @@ fn open_wifi() -> Option<EthLink> {
         event!(Warn, "net.no_wifi_mac");
         return None;
     };
-    let mut l = EthLink::new(WLAN, Port::Dev(h), mac);
+    let mut l = EthLink::new(WLAN, Port::Dev(h), mac, true);
     l.dhcp = Some(l.sockets.add(dhcpv4::Socket::new()));
     event!(Info, "net.link", link = "wlan0", addr = "dhcp", mtu = netdev::MTU as u32);
     Some(l)
@@ -260,6 +319,8 @@ struct Slot {
     sent_ns: u64,
     /// Dns: the lookup, until its result is taken.
     query: Option<dns::QueryHandle>,
+    /// Dns: an AAAA lookup.
+    v6: bool,
 }
 
 /// The echo identifier of client socket `i`.
@@ -281,6 +342,8 @@ pub struct Stack {
     /// The DHCP server, and the rule set generation it was made from.
     dhcpd: Option<dhcpd::Server>,
     rules_gen: u32,
+    /// An IPv6 address for the reply being made (doc/26 §4).
+    reply_addr: Option<[u8; 16]>,
 }
 
 impl Stack {
@@ -357,7 +420,8 @@ impl Stack {
         let others = move |k: usize| (0..IFACES).filter(move |&j| j != k).filter_map(move |j| own[j].map(|(a, _)| a));
         let has_host = self.dev.host.is_some();
         self.iface.update_ip_addrs(|a| {
-            a.clear();
+            // IPv6 addresses (SLAAC's among them) stay.
+            a.retain(|c| matches!(c, IpCidr::Ipv6(_)));
             let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
             if has_host {
                 let _ = a.push(cidr(HOST_ADDR, HOST_PREFIX));
@@ -370,7 +434,8 @@ impl Stack {
             let k = e.dev.link;
             e.changed = false;
             e.iface.update_ip_addrs(|a| {
-                a.clear();
+                // IPv6 addresses (SLAAC's among them) stay.
+            a.retain(|c| matches!(c, IpCidr::Ipv6(_)));
                 if let Some((p, len)) = own[k] {
                     let _ = a.push(cidr(p, len));
                     for x in others(k) {
@@ -474,7 +539,7 @@ impl Stack {
 
     fn new_slot(&mut self, client: usize, kind: Kind) -> Result<usize, u32> {
         let i = self.slots.iter().position(Option::is_none).ok_or(status::NO_SOCKETS)?;
-        self.slots[i] = Some(Slot { kind, owner: Some(client), socks: [None; IFACES], primary: IFACE0, sent_ns: 0, query: None });
+        self.slots[i] = Some(Slot { kind, owner: Some(client), socks: [None; IFACES], primary: IFACE0, sent_ns: 0, query: None, v6: false });
         Ok(i)
     }
 
@@ -501,24 +566,56 @@ impl Stack {
     }
 
     /// The interface a packet to `dst` leaves by.
-    fn out_iface(&self, dst: u32) -> Option<usize> {
-        if dst >> 24 == 127 { Some(IFACE0) } else { self.route(dst).map(|r| r.link) }
+    fn out_iface(&self, dst: IpAddress) -> Option<usize> {
+        match dst {
+            IpAddress::Ipv4(a) if a.octets()[0] == 127 => Some(IFACE0),
+            IpAddress::Ipv4(a) => self.route(a.to_bits()).map(|r| r.link),
+            IpAddress::Ipv6(a) => self.route6(&a),
+        }
+    }
+
+    /// IPv6 (doc/26 §2): ::1 and the host link's network stay on interface
+    /// 0, the test LAN's network goes there, the rest to Wi-Fi (its routes
+    /// come from router advertisements). No IPv6 forwarding yet.
+    fn route6(&self, a: &Ipv6Address) -> Option<usize> {
+        let present = |k: usize| self.eth[k - 1].is_some();
+        if a.is_loopback() || same64(a, &HOST_NET6) && self.dev.host.is_some() {
+            Some(IFACE0)
+        } else if same64(a, &TEST_NET6) && present(TEST) {
+            Some(TEST)
+        } else if present(WLAN) {
+            Some(WLAN)
+        } else if present(TEST) && a.is_unicast_link_local() {
+            Some(TEST)
+        } else {
+            None
+        }
+    }
+
+    /// Whether interface `k` has address `a`.
+    fn has_addr(&self, k: usize, a: IpAddress) -> bool {
+        match k {
+            IFACE0 => self.iface.has_ip_addr(a),
+            _ => self.eth[k - 1].as_ref().is_some_and(|e| e.iface.has_ip_addr(a)),
+        }
     }
 
     /// Where TCP_LISTEN or UDP_BIND puts its sockets: for each interface,
     /// None (not there) or the local address to accept (None = any).
-    fn bind_targets(&self, addr: u32, link: u8) -> Result<[Option<Option<u32>>; IFACES], u32> {
+    fn bind_targets(&self, addr: Option<IpAddress>, v6: bool, link: u8) -> Result<[Option<Option<IpAddress>>; IFACES], u32> {
         let mut t = [None; IFACES];
         let present = |k: usize| k == IFACE0 || self.eth[k - 1].is_some();
-        if addr != 0 {
-            let k = if addr >> 24 == 127 {
-                IFACE0
-            } else {
-                (0..IFACES).find(|&k| self.link_addr(k).is_some_and(|(a, _)| a == addr)).ok_or(status::NO_ADDRESS)?
+        if let Some(addr) = addr {
+            let k = match addr {
+                IpAddress::Ipv4(a) if a.octets()[0] == 127 => IFACE0,
+                IpAddress::Ipv6(a) if a.is_loopback() => IFACE0,
+                _ => (0..IFACES).find(|&k| self.has_addr(k, addr)).ok_or(status::NO_ADDRESS)?,
             };
             t[k] = Some(Some(addr));
             return Ok(t);
         }
+        let v4 = |a: u32| Some(Some(IpAddress::Ipv4(Ipv4Address::from_bits(a))));
+        let v6a = |a: Ipv6Address| Some(Some(IpAddress::Ipv6(a)));
         match link {
             proto::link::ANY => {
                 for (k, slot) in t.iter_mut().enumerate() {
@@ -527,8 +624,8 @@ impl Stack {
                     }
                 }
             }
-            proto::link::LO => t[IFACE0] = Some(Some(0x7F00_0001)),
-            proto::link::HOST if self.dev.host.is_some() => t[IFACE0] = Some(Some(HOST_ADDR)),
+            proto::link::LO => t[IFACE0] = if v6 { v6a(Ipv6Address::LOCALHOST) } else { v4(0x7F00_0001) },
+            proto::link::HOST if self.dev.host.is_some() => t[IFACE0] = if v6 { v6a(in64(HOST_NET6, 2)) } else { v4(HOST_ADDR) },
             proto::link::WLAN0 if present(WLAN) => t[WLAN] = Some(None),
             proto::link::TEST0 if present(TEST) => t[TEST] = Some(None),
             _ => return Err(status::NO_ADDRESS),
@@ -569,9 +666,9 @@ impl Stack {
     }
 
     /// TCP_LISTEN and UDP_BIND.
-    fn bind(&mut self, client: usize, kind: Kind, addr: u32, b: u32) -> Result<(u32, u32), u32> {
+    fn bind(&mut self, client: usize, kind: Kind, addr: Option<IpAddress>, v6: bool, b: u32) -> Result<(u32, u32), u32> {
         let (port, link) = (b as u16, (b >> 16) as u8);
-        let targets = self.bind_targets(addr, link)?;
+        let targets = self.bind_targets(addr, v6, link)?;
         let i = self.new_slot(client, kind)?;
         let mut first = None;
         for (k, t) in targets.iter().enumerate() {
@@ -584,7 +681,7 @@ impl Stack {
                 }
             };
             self.slots[i].as_mut().unwrap().socks[k] = Some(s);
-            let ep = IpListenEndpoint { addr: local.map(|a| Ipv4Address::from_bits(a).into()), port };
+            let ep = IpListenEndpoint { addr: local, port };
             let set = self.set(k).unwrap();
             let ok = match kind {
                 Kind::Tcp => set.get_mut::<tcp::Socket>(s.handle).listen(ep).is_ok(),
@@ -606,18 +703,25 @@ impl Stack {
         }
         let code = m[0];
         let sock = u16::from_le_bytes([m[2], m[3]]);
-        let a = u32::from_le_bytes([m[4], m[5], m[6], m[7]]);
         let b = u32::from_le_bytes([m[8], m[9], m[10], m[11]]);
-        let addr = |a: u32| IpAddress::Ipv4(Ipv4Address::from_bits(a));
+        // The address: IPv4 in `a`, or IPv6 after the request.
+        let v6 = m[1] == proto::FAMILY_V6;
+        let a = if v6 {
+            let o: [u8; 16] = m.get(proto::REQUEST_SIZE..proto::REQUEST_SIZE_V6).ok_or(status::BAD_REQUEST)?.try_into().unwrap();
+            IpAddress::Ipv6(Ipv6Address::from(o))
+        } else {
+            IpAddress::Ipv4(Ipv4Address::from_bits(u32::from_le_bytes([m[4], m[5], m[6], m[7]])))
+        };
+        let local = (!a.is_unspecified()).then_some(a);
         match code {
-            op::TCP_LISTEN => self.bind(client, Kind::Tcp, a, b),
-            op::UDP_BIND => self.bind(client, Kind::Udp, a, b),
+            op::TCP_LISTEN => self.bind(client, Kind::Tcp, local, v6, b),
+            op::UDP_BIND => self.bind(client, Kind::Udp, local, v6, b),
             op::TCP_CONNECT => {
                 let k = self.out_iface(a).ok_or(status::UNREACHABLE)?;
                 let (i, s) = self.open_one(client, Kind::Tcp, k)?;
                 let port = self.ephemeral();
                 let (iface, set) = self.iface_set(k).unwrap();
-                if set.get_mut::<tcp::Socket>(s.handle).connect(iface.context(), (addr(a), b as u16), port).is_err() {
+                if set.get_mut::<tcp::Socket>(s.handle).connect(iface.context(), (a, b as u16), port).is_err() {
                     self.unalloc(i);
                     return Err(status::UNREACHABLE);
                 }
@@ -673,7 +777,7 @@ impl Stack {
                 let s = self.set(k).unwrap().get_mut::<udp::Socket>(h);
                 let (port, n) = ((b >> 16) as u16, (b & 0xFFFF) as usize);
                 let n = n.min(mem.len());
-                match s.send_slice(&mem[..n], IpEndpoint::new(addr(a), port)) {
+                match s.send_slice(&mem[..n], IpEndpoint::new(a, port)) {
                     Ok(()) => Ok((n as u32, 0)),
                     Err(udp::SendError::BufferFull) => Ok((0, 0)),
                     Err(_) => Err(status::UNREACHABLE),
@@ -687,8 +791,7 @@ impl Stack {
                     let Some(set) = self.set(k) else { continue };
                     if let Ok((n, meta)) = set.get_mut::<udp::Socket>(s.handle).recv_slice(&mut mem[proto::UDP_HEADER..]) {
                         mem[..2].copy_from_slice(&meta.endpoint.port.to_le_bytes());
-                        let IpAddress::Ipv4(src) = meta.endpoint.addr;
-                        return Ok((n as u32, src.to_bits()));
+                        return Ok((n as u32, self.reply_with(meta.endpoint.addr)));
                     }
                 }
                 Ok((0, 0))
@@ -699,14 +802,20 @@ impl Stack {
                 let (i, s) = self.open_one(client, Kind::Ping, k)?;
                 let ident = ping_ident(i);
                 let sk = self.set(k).unwrap().get_mut::<icmp::Socket>(s.handle);
-                let repr = Icmpv4Repr::EchoRequest { ident, seq_no: 0, data: &mem[..n] };
+                let data = &mem[..n];
+                // smoltcp fills in the ICMPv6 checksum (it knows the source).
                 let sent = sk.bind(icmp::Endpoint::Ident(ident)).is_ok()
-                    && match sk.send(repr.buffer_len(), addr(a)) {
-                        Ok(buf) => {
-                            repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &Default::default());
-                            true
+                    && match a {
+                        IpAddress::Ipv4(_) => {
+                            let repr = Icmpv4Repr::EchoRequest { ident, seq_no: 0, data };
+                            sk.send(repr.buffer_len(), a).map(|buf| repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &Default::default())).is_ok()
                         }
-                        Err(_) => false,
+                        IpAddress::Ipv6(dst) => {
+                            let repr = Icmpv6Repr::EchoRequest { ident, seq_no: 0, data };
+                            sk.send(repr.buffer_len(), a)
+                                .map(|buf| repr.emit(&Ipv6Address::UNSPECIFIED, &dst, &mut Icmpv6Packet::new_unchecked(buf), &Default::default()))
+                                .is_ok()
+                        }
                     };
                 if !sent {
                     self.unalloc(i);
@@ -719,11 +828,14 @@ impl Stack {
                 let (k, h) = self.primary(client, sock, Kind::Ping)?;
                 let sent_ns = self.slots[sock as usize].unwrap().sent_ns;
                 let s = self.set(k).unwrap().get_mut::<icmp::Socket>(h);
-                while let Ok((buf, _)) = s.recv() {
-                    let Ok(p) = Icmpv4Packet::new_checked(buf) else { continue };
-                    if let Ok(Icmpv4Repr::EchoReply { ident, .. }) = Icmpv4Repr::parse(&p, &Default::default())
-                        && ident == ping_ident(sock as usize)
-                    {
+                while let Ok((buf, from)) = s.recv() {
+                    // The type (0: echo reply, 129: ICMPv6 echo reply) and
+                    // the identifier.
+                    let reply = match from {
+                        IpAddress::Ipv4(_) => 0,
+                        IpAddress::Ipv6(_) => 129,
+                    };
+                    if buf.len() >= 8 && buf[0] == reply && u16::from_be_bytes([buf[4], buf[5]]) == ping_ident(sock as usize) {
                         return Ok((1, ((time_ns() - sent_ns) / 1000) as u32));
                     }
                 }
@@ -737,7 +849,7 @@ impl Stack {
                 let q = w
                     .sockets
                     .get_mut::<dns::Socket>(dns)
-                    .start_query(w.iface.context(), name, DnsQueryType::A)
+                    .start_query(w.iface.context(), name, if v6 { DnsQueryType::Aaaa } else { DnsQueryType::A })
                     .map_err(|e| if e == dns::StartQueryError::NoFreeSlot { status::NO_SOCKETS } else { status::BAD_REQUEST })?;
                 let i = match self.new_slot(client, Kind::Dns) {
                     Ok(i) => i,
@@ -747,7 +859,9 @@ impl Stack {
                     }
                 };
                 self.attach(i, WLAN, Sock { handle: dns, pool: SHARED });
-                self.slots[i].as_mut().unwrap().query = Some(q);
+                let slot = self.slots[i].as_mut().unwrap();
+                slot.query = Some(q);
+                slot.v6 = v6;
                 Ok((i as u32, 0))
             }
             op::RESOLVE_RESULT => {
@@ -758,12 +872,9 @@ impl Stack {
                 match w.sockets.get_mut::<dns::Socket>(h).get_query_result(q) {
                     Ok(addrs) => {
                         slot.query = None;
-                        let ip = addrs.iter().find_map(|a| match a {
-                            IpAddress::Ipv4(v) => Some(v.to_bits()),
-                            #[allow(unreachable_patterns)]
-                            _ => None,
-                        });
-                        ip.map(|ip| (1, ip)).ok_or(status::UNREACHABLE)
+                        let want6 = slot.v6;
+                        let ip = addrs.iter().copied().find(|a| matches!(a, IpAddress::Ipv6(_)) == want6).ok_or(status::UNREACHABLE)?;
+                        Ok((1, self.reply_with(ip)))
                     }
                     Err(dns::GetQueryResultError::Pending) => Ok((0, 0)),
                     Err(dns::GetQueryResultError::Failed) => {
@@ -773,6 +884,17 @@ impl Stack {
                 }
             }
             _ => Err(status::BAD_REQUEST),
+        }
+    }
+
+    /// An address for the reply: IPv4 as the value, IPv6 after the reply.
+    fn reply_with(&mut self, a: IpAddress) -> u32 {
+        match a {
+            IpAddress::Ipv4(v) => v.to_bits(),
+            IpAddress::Ipv6(v) => {
+                self.reply_addr = Some(v.octets());
+                0
+            }
         }
     }
 
@@ -873,6 +995,14 @@ fn reply(status: u32, v0: u32, v1: u32) -> [u8; proto::REPLY_SIZE] {
     r
 }
 
+/// A reply with an IPv6 address after it.
+fn reply6(status: u32, v0: u32, v1: u32, addr: [u8; 16]) -> [u8; proto::REPLY_SIZE_V6] {
+    let mut r = [0u8; proto::REPLY_SIZE_V6];
+    r[..proto::REPLY_SIZE].copy_from_slice(&reply(status, v0, v1));
+    r[proto::REPLY_SIZE..].copy_from_slice(&addr);
+    r
+}
+
 /// `run net [FLAGS]`: FLAGS bit 0 adds the test LAN (doc/23 §4); bit 1
 /// has its peer use DHCP (doc/25 §4).
 /// `run net ADDR [ROUTER]` (ADDR an IPv4 address as a number, so ≥ 256):
@@ -915,11 +1045,14 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         fwd: Forwarder::new(),
         dhcpd: None,
         rules_gen: 0,
+        reply_addr: None,
     };
     let has_host = stack.dev.host.is_some();
     stack.iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(Ipv6Address::LOCALHOST.into(), 128));
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
         if has_host {
+            let _ = a.push(IpCidr::new(in64(HOST_NET6, 2).into(), 64));
             let _ = a.push(IpCidr::new(Ipv4Address::from_bits(HOST_ADDR).into(), HOST_PREFIX));
         }
     });
@@ -938,7 +1071,10 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         event!(Info, "net.static", link = "wlan0", addr = static_addr, router = static_router);
     }
     if flags & FLAG_TEST_LAN != 0 {
-        let mut t = EthLink::new(TEST, Port::Test, testlan::NET_MAC);
+        let mut t = EthLink::new(TEST, Port::Test, testlan::NET_MAC, false);
+        t.iface.update_ip_addrs(|a| {
+            let _ = a.push(IpCidr::new(in64(TEST_NET6, 1).into(), 64));
+        });
         t.set_addr(testlan::NET_ADDR, testlan::PREFIX, None);
         stack.eth[TEST - 1] = Some(t);
         stack.peer = Some(testlan::Peer::new(flags & FLAG_PEER_DHCP != 0));
@@ -1028,14 +1164,18 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         let mem = &mut pool[i * proto::SLICE..(i + 1) * proto::SLICE];
         let c = clients[i].as_ref().unwrap();
         while let Ok(len) = c.0.read(&mut msg) {
-            let r = match stack.handle(i, mem, &msg[..len]) {
-                Ok((v0, v1)) => reply(status::OK, v0, v1),
-                Err(s) => reply(s, 0, 0),
+            stack.reply_addr = None;
+            let (st, v0, v1) = match stack.handle(i, mem, &msg[..len]) {
+                Ok((v0, v1)) => (status::OK, v0, v1),
+                Err(s) => (s, 0, 0),
             };
             // Let the stack act on the request before answering (a send
             // reaches the peer, a connect starts).
             stack.poll();
-            let _ = c.send(&r);
+            let _ = match stack.reply_addr.take() {
+                Some(a) => c.send(&reply6(st, v0, v1, a)),
+                None => c.send(&reply(st, v0, v1)),
+            };
         }
     }
 }

@@ -326,6 +326,17 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --host-peer-start none --host-peer-pinged-by 10.55.0.2 \
 	    --expect-event net.dhcp_lease --expect-event net.peer_dhcp --expect-event net.peer_answered \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# IPv6 (doc/26): the PC (fd55::1) pings fd55::2 and sends 16 KiB
+	@# through the TCP echo over IPv6; then ::1 (UDP and TCP) and a ping to
+	@# the test LAN's peer (fd50::2).
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net" --ctl "run nettest 1" --ctl "wait-ms 40000" --host-peer 16384 \
+	    --host-peer-target fd55::2 \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net 1" --ctl "run nettest 6" --ctl "wait-ms 8000" --ctl "run nettest 7" --ctl "wait-ms 8000" \
+	    --expect-event nettest.loop6 --expect-event nettest.ping6 \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is
 	@# selected in otadata, and reboot ends the run (no bootloader here).

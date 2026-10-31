@@ -140,7 +140,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
-                     [--linger-ms N] [--host-peer BYTES] [--host-peer-target A.B.C.D] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
+                     [--linger-ms N] [--host-peer BYTES] [--host-peer-target ADDR] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -168,7 +168,7 @@ struct Opts {
     linger_ms: u64,
     /// Run the PC end of the host link, sending this many bytes to the echo.
     host_peer: Option<usize>,
-    host_peer_target: std::net::Ipv4Addr,
+    host_peer_target: std::net::IpAddr,
     /// The event that starts the host peer ("none": it only answers).
     host_peer_start: String,
     /// The passive host peer must have been pinged from this address.
@@ -199,7 +199,7 @@ fn parse_args() -> Result<Opts, String> {
         expect_events: Vec::new(),
         linger_ms: 300,
         host_peer: None,
-        host_peer_target: std::net::Ipv4Addr::new(10, 55, 0, 2),
+        host_peer_target: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 55, 0, 2)),
         host_peer_start: "nettest.listening".into(),
         host_peer_pinged_by: None,
         elf: String::new(),
@@ -338,7 +338,7 @@ fn main() -> ExitCode {
         linger_cycles: o.linger_ms * o.mhz * 1000,
         stop_at: None,
         seen: Default::default(),
-        peer: o.host_peer.map(|b| HostPeer::new(b, o.host_peer_target)),
+        peer: o.host_peer.map(|b| HostPeer::new(b, o.host_peer_target.into())),
         peer_start: o.host_peer_start.clone(),
     };
     let stop = loop {

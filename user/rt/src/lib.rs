@@ -6,6 +6,8 @@
 
 #![no_std]
 
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 pub use t5_abi::log::{self, Addr, Level};
 pub use t5_abi::{Error, FOREVER, chan, display, event, fs, net, netdev, rights, sd, shm, svc, sys, timer, touch, wlan};
 
@@ -540,17 +542,59 @@ impl Net {
     }
 
     fn call(&self, op: u8, sock: u16, a: u32, b: u32) -> Result<(u32, u32), NetError> {
-        self.chan.send(&net::request(op, sock, a, b)).map_err(NetError::Ipc)?;
+        self.call_ip(op, sock, IpAddr::V4(Ipv4Addr::from_bits(a)), b).map(|(v0, v1, _)| (v0, v1))
+    }
+
+    /// A request with an address of either family (doc/26 §4); the reply's
+    /// values and, if it has one, its IPv6 address.
+    fn call_ip(&self, op: u8, sock: u16, addr: IpAddr, b: u32) -> Result<(u32, u32, Option<Ipv6Addr>), NetError> {
+        let sent = match addr {
+            IpAddr::V4(a) => self.chan.send(&net::request(op, sock, a.to_bits(), b)),
+            IpAddr::V6(a) => self.chan.send(&net::request6(op, sock, a.octets(), b)),
+        };
+        sent.map_err(NetError::Ipc)?;
         let mut r = [0u8; chan::MSG_MAX];
         let k = self.chan.recv(&mut r).map_err(NetError::Ipc)?;
         if k < net::REPLY_SIZE {
             return Err(NetError::Ipc(Error::Size));
         }
         let u = |o: usize| u32::from_le_bytes([r[o], r[o + 1], r[o + 2], r[o + 3]]);
+        let v6 = (k >= net::REPLY_SIZE_V6).then(|| Ipv6Addr::from(<[u8; 16]>::try_from(&r[net::REPLY_SIZE..net::REPLY_SIZE_V6]).unwrap()));
         match u(0) {
-            net::status::OK => Ok((u(4), u(8))),
+            net::status::OK => Ok((u(4), u(8), v6)),
             s => Err(NetError::Status(s)),
         }
+    }
+
+    /// TCP_CONNECT to an address of either family.
+    pub fn tcp_connect_ip(&self, ip: IpAddr, port: u16) -> Result<u16, NetError> {
+        self.call_ip(net::op::TCP_CONNECT, 0, ip, port as u32).map(|(s, ..)| s as u16)
+    }
+
+    /// Listens on `port` at `addr` (unspecified: any, of that family's
+    /// links as for `tcp_listen_at`).
+    pub fn tcp_listen_ip(&self, addr: IpAddr, link: u8, port: u16) -> Result<u16, NetError> {
+        self.call_ip(net::op::TCP_LISTEN, 0, addr, (link as u32) << 16 | port as u32).map(|(s, ..)| s as u16)
+    }
+
+    /// One echo request to `ip` (either family); the round trip in µs.
+    pub fn ping_ip(&mut self, ip: IpAddr, ms: u64) -> Result<u32, NetError> {
+        let data = b"t5 ping";
+        self.slice[..data.len()].copy_from_slice(data);
+        let (s, ..) = self.call_ip(net::op::PING, 0, ip, data.len() as u32)?;
+        let r = self.poll_result(net::op::PING_RESULT, s as u16, ms).map(|(v, _)| v);
+        let _ = self.close(s as u16);
+        r
+    }
+
+    /// Looks up `name`'s IPv6 address (AAAA), waiting up to `ms`.
+    pub fn resolve6(&mut self, name: &str, ms: u64) -> Result<Ipv6Addr, NetError> {
+        let n = name.len().min(net::NAME_MAX);
+        self.slice[..n].copy_from_slice(&name.as_bytes()[..n]);
+        let (s, ..) = self.call_ip(net::op::RESOLVE, 0, IpAddr::V6(Ipv6Addr::UNSPECIFIED), n as u32)?;
+        let r = self.poll_result(net::op::RESOLVE_RESULT, s as u16, ms);
+        let _ = self.close(s as u16);
+        r?.1.ok_or(NetError::Status(net::status::UNREACHABLE))
     }
 
     /// Listens on `port` on every link.
@@ -657,7 +701,7 @@ impl Net {
         let data = b"t5 ping";
         self.slice[..data.len()].copy_from_slice(data);
         let (s, _) = self.call(net::op::PING, 0, ip, data.len() as u32)?;
-        let r = self.poll_result(net::op::PING_RESULT, s as u16, ms);
+        let r = self.poll_result(net::op::PING_RESULT, s as u16, ms).map(|(v, _)| v);
         let _ = self.close(s as u16);
         r
     }
@@ -668,18 +712,52 @@ impl Net {
         let n = name.len().min(net::NAME_MAX);
         self.slice[..n].copy_from_slice(&name.as_bytes()[..n]);
         let (s, _) = self.call(net::op::RESOLVE, 0, 0, n as u32)?;
-        let r = self.poll_result(net::op::RESOLVE_RESULT, s as u16, ms);
+        let r = self.poll_result(net::op::RESOLVE_RESULT, s as u16, ms).map(|(v, _)| v);
         let _ = self.close(s as u16);
         r
     }
 
-    /// Asks `op` on `s` every millisecond until it answers (1, value).
-    fn poll_result(&self, op: u8, s: u16, ms: u64) -> Result<u32, NetError> {
+    /// Asks `op` on `s` every millisecond until it answers (1, value[,
+    /// IPv6 address]).
+    fn poll_result(&self, op: u8, s: u16, ms: u64) -> Result<(u32, Option<Ipv6Addr>), NetError> {
         let end = time_ns() + ms * 1_000_000;
         loop {
-            let (done, v) = self.call(op, s, 0, 0)?;
+            let (done, v, a) = self.call_ip(op, s, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)?;
             if done != 0 {
-                return Ok(v);
+                return Ok((v, a));
+            }
+            if time_ns() > end {
+                return Err(NetError::TimedOut);
+            }
+            sleep_ms(1);
+        }
+    }
+
+    /// Sends one datagram to an address of either family, waiting for room.
+    pub fn udp_send_ip(&mut self, s: u16, ip: IpAddr, port: u16, data: &[u8]) -> Result<(), NetError> {
+        let n = data.len().min(0xFFFF).min(self.slice.len());
+        self.slice[..n].copy_from_slice(&data[..n]);
+        loop {
+            let (k, ..) = self.call_ip(net::op::UDP_SEND, s, ip, (port as u32) << 16 | n as u32)?;
+            if k > 0 {
+                return Ok(());
+            }
+            sleep_ms(1);
+        }
+    }
+
+    /// Waits up to `ms` for a datagram from either family: (length, source,
+    /// source port).
+    pub fn udp_recv_ip(&mut self, s: u16, buf: &mut [u8], ms: u64) -> Result<(usize, IpAddr, u16), NetError> {
+        let end = time_ns() + ms * 1_000_000;
+        loop {
+            let (n, ip, v6) = self.call_ip(net::op::UDP_RECV, s, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)?;
+            if n > 0 {
+                let n = (n as usize).min(buf.len());
+                buf[..n].copy_from_slice(&self.slice[net::UDP_HEADER..net::UDP_HEADER + n]);
+                let port = u16::from_le_bytes([self.slice[0], self.slice[1]]);
+                let from = v6.map_or(IpAddr::V4(Ipv4Addr::from_bits(ip)), IpAddr::V6);
+                return Ok((n, from, port));
             }
             if time_ns() > end {
                 return Err(NetError::TimedOut);

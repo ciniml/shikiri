@@ -10,6 +10,9 @@
 //! (`run net 1`, 192.168.50.2). It then also checks the Tab5's ICMP errors:
 //! Time Exceeded for a ping with TTL 1, Destination Unreachable for a ping
 //! to a network without a route.
+//!
+//! The PC also has fd55::1/64 (doc/26): with an IPv6 target (fd55::2) the
+//! pings are ICMPv6 and the TCP echo runs over IPv6.
 
 use std::collections::VecDeque;
 
@@ -17,7 +20,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{icmp, raw, tcp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpProtocol, IpVersion, Ipv4Address};
+use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpProtocol, IpVersion, Ipv4Address, Ipv6Address};
 
 use crate::periph::{PACKET, Usj};
 
@@ -121,10 +124,13 @@ pub struct HostPeer {
 
 impl HostPeer {
     /// `bytes`: how much to send to the echo server at `target`.
-    pub fn new(bytes: usize, target: Ipv4Address) -> HostPeer {
+    pub fn new(bytes: usize, target: IpAddress) -> HostPeer {
         let mut dev = Queues::default();
         let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut dev, Instant::ZERO);
-        iface.update_ip_addrs(|a| a.push(IpCidr::new(PEER, 24)).unwrap());
+        iface.update_ip_addrs(|a| {
+            a.push(IpCidr::new(PEER, 24)).unwrap();
+            a.push(IpCidr::new(Ipv6Address::new(0xfd55, 0, 0, 0, 0, 0, 0, 1).into(), 64)).unwrap();
+        });
         iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(10, 55, 0, 2)).unwrap();
         let mut sockets = SocketSet::new(Vec::new());
         let icmp = sockets.add(icmp::Socket::new(
@@ -155,7 +161,7 @@ impl HostPeer {
             icmp,
             tcp,
             raw,
-            target: IpAddress::Ipv4(target),
+            target,
             step: Step::Idle,
             since: 0,
             data,
@@ -228,17 +234,32 @@ impl HostPeer {
                     s.bind(icmp::Endpoint::Ident(IDENT)).unwrap();
                 }
                 if sent_at < 0 {
-                    let repr = Icmpv4Repr::EchoRequest { ident: IDENT, seq_no: seq, data: b"t5emu host peer" };
-                    let Ok(buf) = s.send(repr.buffer_len(), self.target) else { return };
-                    repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &ChecksumCapabilities::default());
+                    let data = b"t5emu host peer";
+                    let sent = match self.target {
+                        IpAddress::Ipv4(_) => {
+                            let repr = Icmpv4Repr::EchoRequest { ident: IDENT, seq_no: seq, data };
+                            s.send(repr.buffer_len(), self.target).map(|buf| repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &ChecksumCapabilities::default()))
+                        }
+                        // smoltcp fills in the checksum (it knows the source).
+                        IpAddress::Ipv6(dst) => {
+                            let repr = Icmpv6Repr::EchoRequest { ident: IDENT, seq_no: seq, data };
+                            s.send(repr.buffer_len(), self.target)
+                                .map(|buf| repr.emit(&Ipv6Address::UNSPECIFIED, &dst, &mut Icmpv6Packet::new_unchecked(buf), &ChecksumCapabilities::default()))
+                        }
+                    };
+                    if sent.is_err() {
+                        return;
+                    }
                     self.step = Step::Ping { seq, sent_at: now_ms };
                     return;
                 }
                 while let Ok((buf, from)) = s.recv() {
-                    let Ok(p) = Icmpv4Packet::new_checked(buf) else { continue };
-                    let Ok(Icmpv4Repr::EchoReply { seq_no, .. }) = Icmpv4Repr::parse(&p, &ChecksumCapabilities::default()) else {
+                    // Echo reply (0, ICMPv6 129) with our identifier.
+                    let reply = if matches!(from, IpAddress::Ipv4(_)) { 0 } else { 129 };
+                    if buf.len() < 8 || buf[0] != reply || u16::from_be_bytes([buf[4], buf[5]]) != IDENT {
                         continue;
-                    };
+                    }
+                    let seq_no = u16::from_be_bytes([buf[6], buf[7]]);
                     if from == self.target && seq_no == seq {
                         self.ping_ms.push((now_ms - sent_at) as f64);
                         self.step = if seq + 1 == PINGS {
@@ -284,7 +305,9 @@ impl HostPeer {
                 if self.checked == self.data.len() {
                     s.close();
                     self.tcp_ms = now_ms - self.since;
-                    self.step = if self.target == TAB5 { Step::Passed } else { self.send_probe(ICMP_TIME_EXCEEDED, now_ms) };
+                    // The ICMP errors are checked when forwarding over IPv4.
+                    let forwarded = matches!(self.target, IpAddress::Ipv4(_)) && self.target != TAB5;
+                    self.step = if forwarded { self.send_probe(ICMP_TIME_EXCEEDED, now_ms) } else { Step::Passed };
                 } else if !s.is_open() {
                     self.fail(format!("TCP closed after {} of {} bytes", self.checked, self.data.len()));
                 } else if now_ms - self.since > TIMEOUT_MS * 4 {

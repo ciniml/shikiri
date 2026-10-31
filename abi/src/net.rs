@@ -2,8 +2,12 @@
 //! client connects to `svc:net` and is granted `SLICE` bytes of shared
 //! memory for data; requests and replies are channel messages:
 //!
-//! - request: `u8 op | u8 0 | u16 socket | u32 a | u32 b`
-//! - reply: `u32 status | u32 v0 | u32 v1`
+//! - request: `u8 op | u8 family | u16 socket | u32 a | u32 b`, and for
+//!   family 6 the IPv6 address (16 bytes) after it, in place of `a`
+//!   (`REQUEST_SIZE_V6`; doc/26 §4)
+//! - reply: `u32 status | u32 v0 | u32 v1`, and an IPv6 address after it
+//!   where the request was IPv6 and the reply carries an address
+//!   (UDP_RECV's source, RESOLVE_RESULT's answer; `REPLY_SIZE_V6`)
 //!
 //! Nothing blocks in the service: a SEND or RECV that cannot proceed now
 //! answers 0 bytes, and the client tries again.
@@ -21,8 +25,8 @@
 //! | UDP_RECV | – | – | bytes at slice + `UDP_HEADER` / source IPv4; the source port is the slice's first u16 |
 //! | PING | IPv4 | echo data bytes from the slice (≤ 64) | socket (one echo request sent) |
 //! | PING_RESULT | – | – | 1 once the reply came / round trip in µs |
-//! | RESOLVE | – | name bytes from the slice (≤ `NAME_MAX`) | socket (one DNS lookup for an A record) |
-//! | RESOLVE_RESULT | – | – | 1 once answered / IPv4 (`UNREACHABLE`: failed or no A record) |
+//! | RESOLVE | – | name bytes from the slice (≤ `NAME_MAX`) | socket (one DNS lookup: an A record, AAAA with family 6) |
+//! | RESOLVE_RESULT | – | – | 1 once answered / IPv4 (`UNREACHABLE`: failed or no record); IPv6 after the reply |
 //!
 //! TCP_LISTEN and UDP_BIND (doc/23 §5): with address 0 and `link::ANY` the
 //! socket listens on every link (a TCP listener becomes the connection that
@@ -37,6 +41,10 @@ pub const SERVICE: &str = "net";
 pub const SLICE: usize = 64 << 10;
 pub const REQUEST_SIZE: usize = 12;
 pub const REPLY_SIZE: usize = 12;
+pub const REQUEST_SIZE_V6: usize = 28;
+pub const REPLY_SIZE_V6: usize = 28;
+/// A request's family byte: IPv6 (anything else is IPv4).
+pub const FAMILY_V6: u8 = 6;
 /// UDP_RECV puts the source port here, the payload after it.
 pub const UDP_HEADER: usize = 4;
 /// Longest name RESOLVE takes.
@@ -93,6 +101,15 @@ pub mod state {
 
 pub const fn ipv4(a: u8, b: u8, c: u8, d: u8) -> u32 {
     u32::from_be_bytes([a, b, c, d])
+}
+
+/// An IPv6 request (`a` is the address).
+pub fn request6(op: u8, socket: u16, addr: [u8; 16], b: u32) -> [u8; REQUEST_SIZE_V6] {
+    let mut r = [0u8; REQUEST_SIZE_V6];
+    r[..REQUEST_SIZE].copy_from_slice(&request(op, socket, 0, b));
+    r[1] = FAMILY_V6;
+    r[REQUEST_SIZE..].copy_from_slice(&addr);
+    r
 }
 
 pub fn request(op: u8, socket: u16, a: u32, b: u32) -> [u8; REQUEST_SIZE] {

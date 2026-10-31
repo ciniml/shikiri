@@ -110,6 +110,12 @@ impl Peer {
     pub fn new(dhcp: bool) -> Peer {
         let mut dev = PeerDev;
         let mut iface = Interface::new(Config::new(HardwareAddress::Ethernet(EthernetAddress(PEER_MAC))), &mut dev, now());
+        // IPv6 (doc/26): fd50::2 and its link-local address, always.
+        iface.update_ip_addrs(|a| {
+            let _ = a.push(crate::link_local(PEER_MAC));
+            let _ = a.push(IpCidr::new(crate::in64(crate::TEST_NET6, 2).into(), 64));
+        });
+        let _ = iface.routes_mut().add_default_ipv6_route(crate::in64(crate::TEST_NET6, 1));
         if !dhcp {
             iface.update_ip_addrs(|a| {
                 let _ = a.push(IpCidr::new(Ipv4Address::from_bits(PEER_ADDR).into(), PREFIX));
@@ -155,7 +161,7 @@ impl Peer {
         let Some(h) = self.dhcp else { return };
         if let Some(dhcpv4::Event::Configured(c)) = self.sockets.get_mut::<dhcpv4::Socket>(h).poll() {
             self.iface.update_ip_addrs(|a| {
-                a.clear();
+                a.retain(|c| matches!(c, IpCidr::Ipv6(_)));
                 let _ = a.push(IpCidr::Ipv4(c.address));
             });
             if let Some(r) = c.router {
