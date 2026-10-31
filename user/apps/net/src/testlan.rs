@@ -12,6 +12,10 @@
 //! instead (N5, doc/25 §4) and, once it has one, fetches `http://1.1.1.1/`
 //! (`net.peer_http`): through masquerade on Wi-Fi, a device on the LAN
 //! reaches the web.
+//!
+//! The peer also takes IPv6 addresses from router advertisements (SLAAC):
+//! with `ndp-proxy` (doc/27) it gets one in the Wi-Fi link's /64 and then
+//! fetches `http://[2606:4700:4700::1111]/` once (`net.peer_http`, v6).
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, TxToken};
@@ -36,6 +40,7 @@ const PROBE_IDENT: u16 = 0x5050;
 const PROBE_TARGETS: [IpAddress; 2] = [IpAddress::v4(10, 55, 0, 2), IpAddress::v4(10, 55, 0, 1)];
 const PROBE_NAMES: [&str; 2] = ["tab5", "pc"];
 const HTTP_SERVER: IpAddress = IpAddress::v4(1, 1, 1, 1);
+const HTTP_SERVER6: IpAddress = IpAddress::v6(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
 const HTTP_BUF: usize = 4 << 10;
 const HTTP_TIMEOUT_NS: u64 = 10_000_000_000;
 
@@ -104,18 +109,29 @@ pub struct Peer {
     http_done: bool,
     http_sent: bool,
     http_bytes: u32,
+    /// The IPv6 fetch has been started.
+    http6: bool,
+    /// The fetch going on is over IPv6.
+    http_v6: bool,
 }
 
 impl Peer {
     pub fn new(dhcp: bool) -> Peer {
         let mut dev = PeerDev;
-        let mut iface = Interface::new(Config::new(HardwareAddress::Ethernet(EthernetAddress(PEER_MAC))), &mut dev, now());
+        let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(PEER_MAC)));
+        config.slaac = true;
+        let mut iface = Interface::new(config, &mut dev, now());
         // IPv6 (doc/26): fd50::2 and its link-local address, always.
         iface.update_ip_addrs(|a| {
             let _ = a.push(crate::link_local(PEER_MAC));
             let _ = a.push(IpCidr::new(crate::in64(crate::TEST_NET6, 2).into(), 64));
         });
-        let _ = iface.routes_mut().add_default_ipv6_route(crate::in64(crate::TEST_NET6, 1));
+        // Through the Tab5's link-local address, as routers advertise
+        // themselves: its solicitations carry that address's MAC, which
+        // the peer then knows (smoltcp drops a packet while it asks).
+        if let IpCidr::Ipv6(r) = crate::link_local(NET_MAC) {
+            let _ = iface.routes_mut().add_default_ipv6_route(r.address());
+        }
         if !dhcp {
             iface.update_ip_addrs(|a| {
                 let _ = a.push(IpCidr::new(Ipv4Address::from_bits(PEER_ADDR).into(), PREFIX));
@@ -153,6 +169,8 @@ impl Peer {
             http_done: false,
             http_sent: false,
             http_bytes: 0,
+            http6: false,
+            http_v6: false,
         }
     }
 
@@ -205,7 +223,7 @@ impl Peer {
             }
         }
         if n > 0 {
-            event!(Info, "net.peer_http", status = core::str::from_utf8(&status[..n]).unwrap_or("?"), ms = ((time_ns() - since) / 1_000_000) as u32);
+            event!(Info, "net.peer_http", v6 = self.http_v6, status = core::str::from_utf8(&status[..n]).unwrap_or("?"), ms = ((time_ns() - since) / 1_000_000) as u32);
         }
         let ended = !s.may_recv() && self.http_bytes > 0;
         if ended || time_ns() - since > HTTP_TIMEOUT_NS {
@@ -254,8 +272,38 @@ impl Peer {
 
     /// Runs the peer: its stack, its pings, and the echo server (one
     /// connection at a time, listening again when it ends).
+    /// Starts the IPv6 fetch once SLAAC has given a global address (not
+    /// fd50::/64) and no other fetch is going on.
+    fn http6_start(&mut self) {
+        if self.http6 || self.http_since.is_some() {
+            return;
+        }
+        let global = self.iface.ip_addrs().iter().any(|c| match c {
+            IpCidr::Ipv6(c) => !c.address().is_unicast_link_local() && c.address().segments()[0] != 0xfd50,
+            _ => false,
+        });
+        if !global {
+            return;
+        }
+        self.http6 = true;
+        let cx = self.iface.context();
+        let s = self.sockets.get_mut::<tcp::Socket>(self.http);
+        if s.connect(cx, (HTTP_SERVER6, 80), 41001).is_ok() {
+            let addr = self.iface.ip_addrs().iter().find_map(|c| match c {
+                IpCidr::Ipv6(c) if c.address().segments()[0] != 0xfd50 && !c.address().is_unicast_link_local() => Some(c.address().octets()),
+                _ => None,
+            });
+            event!(Info, "net.peer_slaac", addr = &addr.unwrap_or_default()[..]);
+            self.http_since = Some(time_ns());
+            self.http_sent = false;
+            self.http_bytes = 0;
+            self.http_v6 = true;
+        }
+    }
+
     pub fn poll(&mut self) {
         self.dhcp();
+        self.http6_start();
         self.http();
         self.probe();
         for _ in 0..16 {

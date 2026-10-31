@@ -14,7 +14,8 @@
 //! - 5: the NAT test set (t5emu, doc/25): the test LAN masqueraded behind
 //!   the host link, a DHCP server on the test LAN;
 //! - 6: the NAT set for the Tab5: the test LAN and the PC masqueraded
-//!   behind Wi-Fi, a DHCP server on the test LAN.
+//!   behind Wi-Fi, a DHCP server on the test LAN, and the NDP proxy from
+//!   Wi-Fi to the test LAN (IPv6, doc/27).
 //!
 //! Built with `--permit svc:netctl --permit svc:fs`. Exit 0 if the service
 //! took the rules; otherwise the step that failed, or 100 + the first line
@@ -55,6 +56,7 @@ const NAT_SET: &str = "\
 masquerade on wlan0 from 192.168.50.0/24
 masquerade on wlan0 from 10.55.0.0/24
 dhcp-server on test0 range 192.168.50.100-192.168.50.149
+ndp-proxy on wlan0 to test0
 ";
 
 fn main(mode: usize, _: usize) -> usize {

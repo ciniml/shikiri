@@ -132,11 +132,13 @@ pub struct Ruleset {
     pub policy_log: [bool; 3],
     pub masq: [Option<Masq>; MAX_MASQ],
     pub dhcp: Option<DhcpServer>,
+    /// `ndp-proxy on UP to DOWN` (doc/27): (upstream, downstream) link.
+    pub ndp: Option<(u8, u8)>,
 }
 
 impl Ruleset {
     /// Everything passes.
-    pub const OPEN: Ruleset = Ruleset { rules: [Rule::new(Action::Pass, IN); MAX_RULES], len: 0, policy: [Action::Pass; 3], policy_log: [false; 3], masq: [None; MAX_MASQ], dhcp: None };
+    pub const OPEN: Ruleset = Ruleset { rules: [Rule::new(Action::Pass, IN); MAX_RULES], len: 0, policy: [Action::Pass; 3], policy_log: [false; 3], masq: [None; MAX_MASQ], dhcp: None, ndp: None };
 }
 
 struct Filter {

@@ -23,6 +23,7 @@
 
 mod filter;
 mod fwd;
+mod fwd6;
 mod link;
 mod nat;
 mod rules;
@@ -339,6 +340,7 @@ pub struct Stack {
     pool_used: [bool; POOL],
     next_port: u16,
     pub fwd: Forwarder,
+    pub v6: fwd6::Fwd6,
     /// The DHCP server, and the rule set generation it was made from.
     dhcpd: Option<dhcpd::Server>,
     rules_gen: u32,
@@ -352,6 +354,7 @@ impl Stack {
     /// peer's answer).
     fn poll(&mut self) {
         for _ in 0..8 {
+            self.sync_own6();
             let mut moved = false;
             for _ in 0..256 {
                 let r = self.iface.poll(now(), &mut self.dev, &mut self.sockets);
@@ -378,6 +381,7 @@ impl Stack {
             }
             let busy = !fwd::inbox().is_empty() || !link::to_peer().is_empty() || !link::from_peer().is_empty();
             self.forward();
+            self.after_forward6();
             if !moved && !busy {
                 break;
             }
@@ -1043,6 +1047,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         pool_used: [false; POOL],
         next_port: 49152,
         fwd: Forwarder::new(),
+        v6: fwd6::Fwd6::new(),
         dhcpd: None,
         rules_gen: 0,
         reply_addr: None,

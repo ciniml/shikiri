@@ -22,7 +22,8 @@
 //!
 //! Besides the filter (N5, doc/25):
 //! `masquerade on LINK [from CIDR]` (at most 4) and
-//! `dhcp-server on LINK range FIRST-LAST [dns ADDR]` (one).
+//! `dhcp-server on LINK range FIRST-LAST [dns ADDR]` (one), and
+//! `ndp-proxy on UP to DOWN` (IPv6, doc/27; one).
 
 use crate::filter::{self, Action, DhcpServer, Masq, OUT, Rule, Ruleset, st};
 
@@ -33,6 +34,7 @@ pub enum Line {
     Policy(u8, Action, bool),
     Masq(Masq),
     Dhcp(DhcpServer),
+    Ndp(u8, u8),
 }
 
 fn hook(s: &str) -> Option<u8> {
@@ -129,6 +131,18 @@ pub fn parse_line(line: &str) -> Option<Line> {
             Some(_) => return None,
         }
         return w.next().is_none().then_some(Line::Masq(m));
+    }
+    if first == "ndp-proxy" {
+        if w.next()? != "on" {
+            return None;
+        }
+        let up = filter::link_named(w.next()?)?;
+        if w.next()? != "to" {
+            return None;
+        }
+        let down = filter::link_named(w.next()?)?;
+        let ok = up != down && up != 0 && down != 0 && w.next().is_none();
+        return ok.then_some(Line::Ndp(up, down));
     }
     if first == "dhcp-server" {
         if w.next()? != "on" {
@@ -229,6 +243,7 @@ impl Staging {
                 self.set.masq[i] = Some(m);
             }
             Some(Line::Dhcp(d)) if self.set.dhcp.is_none() => self.set.dhcp = Some(d),
+            Some(Line::Ndp(up, down)) if self.set.ndp.is_none() => self.set.ndp = Some((up, down)),
             Some(Line::Rule(r)) if self.set.len < filter::MAX_RULES => {
                 self.set.rules[self.set.len] = r;
                 self.set.len += 1;

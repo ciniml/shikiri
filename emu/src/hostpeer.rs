@@ -132,6 +132,7 @@ impl HostPeer {
             a.push(IpCidr::new(Ipv6Address::new(0xfd55, 0, 0, 0, 0, 0, 0, 1).into(), 64)).unwrap();
         });
         iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(10, 55, 0, 2)).unwrap();
+        iface.routes_mut().add_default_ipv6_route(Ipv6Address::new(0xfd55, 0, 0, 0, 0, 0, 0, 2)).unwrap();
         let mut sockets = SocketSet::new(Vec::new());
         let icmp = sockets.add(icmp::Socket::new(
             icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 1024]),

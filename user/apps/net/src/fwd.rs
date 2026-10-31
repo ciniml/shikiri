@@ -208,7 +208,11 @@ impl Stack {
             let link = link as usize;
             let off = if link == IFACE0 { 0 } else { ETH_HDR };
             if len > off {
-                self.forward_one(link, &mut buf[off..len]);
+                if buf[off] >> 4 == 6 {
+                    self.forward6(link, &mut buf[off..len]);
+                } else {
+                    self.forward_one(link, &mut buf[off..len]);
+                }
             }
         }
         while let Some((link, len)) = rejects().pop(&mut buf) {

@@ -16,6 +16,7 @@ use t5_rt::{Error, Handle, event, netdev, sleep_ms};
 
 use crate::filter::{self, ANY_LINK, Action, IN, OUT};
 use crate::fwd::{self, IFACE0};
+use crate::fwd6;
 use crate::nat;
 
 pub const MTU: usize = 1500;
@@ -182,7 +183,7 @@ impl Device for Links {
                 continue;
             }
             let ip = &out.frame[..out.len];
-            if transit(ip, Some((HOST_ADDR, HOST_PREFIX))) {
+            if transit(ip, Some((HOST_ADDR, HOST_PREFIX))) || fwd6::transit(ip) {
                 fwd::inbox().push(IFACE0 as u8, ip);
                 continue;
             }
@@ -324,6 +325,14 @@ impl Device for EthNic {
                 }
             }
             let to_me = f[..6] == self.mac;
+            if ethertype == ETHERTYPE_IPV6 {
+                fwd6::snoop(self.link, f);
+                if to_me && fwd6::transit(&f[ETH_HDR..]) {
+                    self.rx_unicast += 1;
+                    fwd::inbox().push(self.link as u8, f);
+                    continue;
+                }
+            }
             if to_me {
                 self.rx_unicast += 1;
             }
