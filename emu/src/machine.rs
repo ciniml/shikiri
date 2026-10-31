@@ -270,6 +270,8 @@ pub struct Machine {
     pub other: Option<Box<Core>>,
     /// The running core is in `wfi` with nothing pending.
     pub waiting: bool,
+    /// The running core ran `pause` (it spins on a lock): its turn ends.
+    yielded: bool,
     pub bus: Bus,
     /// Print every trap to stderr.
     pub trace_traps: bool,
@@ -352,7 +354,7 @@ impl Machine {
     }
 
     pub fn new(bus: Bus, entry: u32) -> Machine {
-        Machine { cpu: Cpu::new(entry), other: None, waiting: false, bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_down_pending: Default::default(), rtt_poll_interval: 4096 }
+        Machine { cpu: Cpu::new(entry), other: None, waiting: false, yielded: false, bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_down_pending: Default::default(), rtt_poll_interval: 4096 }
     }
 
     /// Runs until something stops the emulator or `limit_cycles` is reached.
@@ -372,11 +374,12 @@ impl Machine {
                     Err(s) => return s,
                 }
                 turn += 1;
-                if turn >= QUANTUM {
+                if turn >= QUANTUM || core::mem::take(&mut self.yielded) {
+                    // Always hand over: a waiting core checks then whether
+                    // its interrupt has come (`dual_turn`) and gives the
+                    // turn back if not.
                     turn = 0;
-                    if !self.other.as_ref().is_some_and(|o| o.waiting) || self.waiting {
-                        self.switch_core();
-                    }
+                    self.switch_core();
                 }
             }
             if let Err(s) = self.step() {
@@ -873,6 +876,9 @@ impl Machine {
             }
             // fence / fence.i: memory is coherent for data; fence.i does not
             // reach the L1 caches on the P4 (cache module).
+            // `pause` (FENCE W,0; Zihintpause): a core spinning on a lock
+            // gives the other its turn, which is what it waits for.
+            0x0F if insn == 0x0100_000F => self.yielded = self.other.is_some(),
             0x0F if f3 <= 1 => {}
             0x2F if f3 == 2 => self.amo(insn, rd, a, b)?,
             0x73 => return self.system(insn, rd, f3, rs1, a, len),

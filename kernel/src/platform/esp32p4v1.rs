@@ -128,6 +128,16 @@ const SYSTIMER_TARGET0_INT: u32 = 1 << 0;
 // holding the CLIC interrupt index (CPU line + 16, hal/interrupt_clic_ll.h).
 const INTMTX_CORE0_BASE: usize = 0x500D_6000;
 const SYSTIMER_TARGET0_SOURCE: usize = 53; // ETS_SYSTIMER_TARGET0_INTR_SOURCE, map reg +0xD4
+// Core 1's alarm: comparator 1 (systimer_reg.h:42,216,228,290,402,461),
+// routed through core 1's interrupt matrix to the same CLIC line (doc/33).
+const SYSTIMER_TARGET1_WORK_EN: u32 = 1 << 23;
+const SYSTIMER_TARGET1_HI: usize = SYSTIMER_BASE + 0x24;
+const SYSTIMER_TARGET1_LO: usize = SYSTIMER_BASE + 0x28;
+const SYSTIMER_TARGET1_CONF: usize = SYSTIMER_BASE + 0x38;
+const SYSTIMER_COMP1_LOAD: usize = SYSTIMER_BASE + 0x54;
+const SYSTIMER_TARGET1_INT: u32 = 1 << 1;
+const SYSTIMER_TARGET1_SOURCE: usize = 54;
+const INTMTX_CORE1_BASE: usize = 0x500D_6800;
 /// CPU interrupt line used for the scheduler tick.
 const TIMER_CPU_LINE: usize = 1;
 const CLIC_EXT_INTR_NUM_OFFSET: usize = 16;
@@ -388,6 +398,16 @@ fn cpu_khz() -> u64 {
     c1.wrapping_sub(c0) as u64 * SYSTIMER_TICKS_PER_MS / (t1 - t0)
 }
 
+/// This core's alarm comparator: (CONF work-enable bit, interrupt bit,
+/// target hi, target lo, load register).
+fn alarm_regs() -> (u32, u32, usize, usize, usize) {
+    if crate::smp::hartid() == 0 {
+        (SYSTIMER_TARGET0_WORK_EN, SYSTIMER_TARGET0_INT, SYSTIMER_TARGET0_HI, SYSTIMER_TARGET0_LO, SYSTIMER_COMP0_LOAD)
+    } else {
+        (SYSTIMER_TARGET1_WORK_EN, SYSTIMER_TARGET1_INT, SYSTIMER_TARGET1_HI, SYSTIMER_TARGET1_LO, SYSTIMER_COMP1_LOAD)
+    }
+}
+
 unsafe fn rd(addr: usize) -> u32 {
     unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
@@ -419,8 +439,17 @@ impl Platform for Esp32p4v1 {
     }
 
     fn init_secondary() {
-        // Core1's own CLIC: let every enabled level through, as on core 0.
-        unsafe { wr(CLIC_INT_THRESH, 0) };
+        unsafe {
+            // Core1's alarm (comparator 1, one-shot on unit 0) to its CLIC,
+            // on the line core 0's uses; let every enabled level through.
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !SYSTIMER_TARGET1_WORK_EN);
+            wr(SYSTIMER_INT_CLR, SYSTIMER_TARGET1_INT);
+            wr(SYSTIMER_TARGET1_CONF, 0);
+            wr(SYSTIMER_INT_ENA, rd(SYSTIMER_INT_ENA) | SYSTIMER_TARGET1_INT);
+            wr(INTMTX_CORE1_BASE + 4 * SYSTIMER_TARGET1_SOURCE, TIMER_CLIC_INDEX as u32);
+            wr(CLIC_CTRL_BASE + 4 * TIMER_CLIC_INDEX, CLIC_TIMER_CTRL);
+            wr(CLIC_INT_THRESH, 0);
+        }
     }
 
     fn init() {
@@ -477,20 +506,24 @@ impl Platform for Esp32p4v1 {
     fn set_alarm(at: u64) {
         // The P4 alarm fires immediately for a target already in the past
         // (SOC_SYSTIMER_ALARM_MISS_COMPENSATE), so no retry loop is needed.
+        // Each core has its comparator (doc/33). SYSTIMER_CONF is shared:
+        // both cores change it only with the kernel lock held.
+        let (en, int, hi, lo, load) = alarm_regs();
         unsafe {
-            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !SYSTIMER_TARGET0_WORK_EN);
-            wr(SYSTIMER_INT_CLR, SYSTIMER_TARGET0_INT);
-            wr(SYSTIMER_TARGET0_HI, (at >> 32) as u32);
-            wr(SYSTIMER_TARGET0_LO, at as u32);
-            wr(SYSTIMER_COMP0_LOAD, 1);
-            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) | SYSTIMER_TARGET0_WORK_EN);
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !en);
+            wr(SYSTIMER_INT_CLR, int);
+            wr(hi, (at >> 32) as u32);
+            wr(lo, at as u32);
+            wr(load, 1);
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) | en);
         }
     }
 
     fn clear_alarm() {
+        let (en, int, ..) = alarm_regs();
         unsafe {
-            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !SYSTIMER_TARGET0_WORK_EN);
-            wr(SYSTIMER_INT_CLR, SYSTIMER_TARGET0_INT);
+            wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !en);
+            wr(SYSTIMER_INT_CLR, int);
         }
     }
 
@@ -558,6 +591,7 @@ impl Platform for Esp32p4v1 {
     fn map_flash() -> Option<usize> {
         let first = (FLASH_WINDOW - FLASH_WINDOW_BASE) / MMU_PAGE;
         let pages = FLASH_SIZE / MMU_PAGE;
+        crate::smp::quiesce();
         unsafe { map_flash_pages(first, pages, 0, pages) };
         Some(FLASH_WINDOW)
     }
@@ -605,6 +639,7 @@ impl Platform for Esp32p4v1 {
         }
         let vbase = XIP_TEXT + offset;
         let first = (vbase - FLASH_WINDOW_BASE) / MMU_PAGE;
+        crate::smp::quiesce();
         unsafe { map_flash_pages(first, per_slot, flash_offset as usize / MMU_PAGE, pages) };
         Some(vbase)
     }
@@ -625,6 +660,7 @@ impl Platform for Esp32p4v1 {
         if offset % SECTOR != 0 || offset as usize >= FLASH_SIZE {
             return Err("bad sector");
         }
+        crate::smp::quiesce();
         rom_result(unsafe { flash_op(offset, core::ptr::null(), SECTOR) })
     }
 
@@ -640,6 +676,7 @@ impl Platform for Esp32p4v1 {
             words[i / 4] &= !(0xFF << (8 * (i % 4))) | ((b as u32) << (8 * (i % 4)));
         }
         let len = data.len().next_multiple_of(4) as u32;
+        crate::smp::quiesce();
         rom_result(unsafe { flash_op(offset, words.as_ptr(), len) })
     }
 

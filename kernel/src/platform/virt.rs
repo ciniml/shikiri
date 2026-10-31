@@ -36,6 +36,11 @@ impl Platform for Virt {
 
     /// Hart 1 waits in `_start` (QEMU starts every hart there); with
     /// `-smp 1` there is none and `smp::start` times out.
+    fn init_secondary() {
+        Self::clear_alarm();
+        crate::arch::riscv32::csr::write_csr!("mie", crate::arch::riscv32::csr::mie::MTIE);
+    }
+
     fn start_secondary(_entry: usize) -> bool {
         crate::smp::SECONDARY_GO.store(1, core::sync::atomic::Ordering::Release);
         true
@@ -53,11 +58,13 @@ impl Platform for Virt {
     }
 
     fn set_alarm(at: u64) {
-        // Raise hi first so no intermediate value is in the past.
+        // Each hart has its mtimecmp (8 bytes apart). Raise hi first so no
+        // intermediate value is in the past.
+        let cmp = CLINT_MTIMECMP + 8 * crate::smp::hartid();
         unsafe {
-            core::ptr::write_volatile((CLINT_MTIMECMP + 4) as *mut u32, u32::MAX);
-            core::ptr::write_volatile(CLINT_MTIMECMP as *mut u32, at as u32);
-            core::ptr::write_volatile((CLINT_MTIMECMP + 4) as *mut u32, (at >> 32) as u32);
+            core::ptr::write_volatile((cmp + 4) as *mut u32, u32::MAX);
+            core::ptr::write_volatile(cmp as *mut u32, at as u32);
+            core::ptr::write_volatile((cmp + 4) as *mut u32, (at >> 32) as u32);
         }
     }
 

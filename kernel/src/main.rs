@@ -248,7 +248,7 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     Current::log_power("selftest_done");
     event!(Info, "ctl.ready", slots = sched::MAX_PROCS as u32, stack_size = stack_size, stack_used = stack_used);
     loop {
-        s.run(None, &mut |s| {
+        sched::run(&mut s, None, &mut |s| {
             settle_updates(s, store);
             touch_log.poll();
             screen::poll();
@@ -405,16 +405,27 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
                 );
                 n += 1;
             }
-            let idle = s.stats.idle_ticks - s.cpu_mark.1;
+            // Per core, and over all cores (doc/31, doc/33 §5): a process's
+            // per mille is of one core; the totals are of all of them.
+            let cores = if smp::two_cores() { 2 } else { 1 };
+            let idle = [s.stats.idle_ticks[0] - s.cpu_mark.1[0], s.stats.idle_ticks[1] - s.cpu_mark.1[1]];
             s.cpu_mark = (now, s.stats.idle_ticks);
+            let all = |t: u64| (t * 1000 / (window * cores)) as u32;
+            let idle_all = all(idle[0] + idle[1]);
+            let procs_all = all(procs);
             event!(
                 Info,
                 "kernel.cpu",
                 window_ms = (time::ticks_to_ns(window) / 1_000_000) as u32,
-                idle_pm = pm(idle),
-                procs_pm = pm(procs),
-                kernel_pm = 1000u32.saturating_sub(pm(idle) + pm(procs)),
-                idle_total_ms = (time::ticks_to_ns(s.stats.idle_ticks) / 1_000_000) as u32
+                cores = cores as u32,
+                idle_pm = idle_all,
+                procs_pm = procs_all,
+                kernel_pm = 1000u32.saturating_sub(idle_all + procs_all),
+                idle0_pm = pm(idle[0]),
+                idle1_pm = pm(idle[1]),
+                slices0 = s.stats.slices[0],
+                slices1 = s.stats.slices[1],
+                idle_total_ms = (time::ticks_to_ns(s.stats.idle_ticks[0] + s.stats.idle_ticks[1]) / 1_000_000) as u32
             );
             let (size, used) = rv::stack_usage();
             event!(Info, "kernel.stack", size = size, used = used);
@@ -601,7 +612,7 @@ fn selftest_m1(apps: &Apps) -> u32 {
         };
         let mut s = sched::Scheduler::new();
         s.slots[0] = Some(p);
-        s.run(Some(1000), &mut |_| {});
+        sched::run(&mut s, Some(1000), &mut |_| {});
         let p = s.slots[0].take().unwrap();
         let exit = p.exit().unwrap();
         let ok = matches(&exit, &expected);
@@ -673,15 +684,17 @@ fn selftest_m3a(apps: &Apps) -> u32 {
     failures
 }
 
-/// Two tickers sleep on different periods while two spinners compete for the
-/// CPU with all FP registers in use.
+/// Two tickers sleep on different periods while three spinners compete for
+/// the CPU with all FP registers in use (three, so that they still have to
+/// share with two cores, doc/33 §5).
 fn selftest_m2(apps: &Apps) -> u32 {
-    event!(Info, "selftest.m2_start", processes = 4u32, slice_ms = sched::SLICE_MS);
-    let specs: [(&'static str, &'static [u8], usize, usize); 4] = [
+    event!(Info, "selftest.m2_start", processes = 5u32, slice_ms = sched::SLICE_MS);
+    let specs: [(&'static str, &'static [u8], usize, usize); 5] = [
         ("ticker1", apps.ticker, 1, 30),
         ("ticker2", apps.ticker, 2, 45),
         ("spin1", apps.spin, 1, 100),
         ("spin2", apps.spin, 2, 100),
+        ("spin3", apps.spin, 3, 100),
     ];
     let mut failures = 0;
     let mut slot_index = 0;
@@ -690,14 +703,14 @@ fn selftest_m2(apps: &Apps) -> u32 {
         slot_index += 1;
         p
     });
-    let [Some(a), Some(b), Some(c), Some(d)] = loaded else {
+    let [Some(a), Some(b), Some(c), Some(d), Some(e)] = loaded else {
         return 1;
     };
     let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), Some(d), None, None, None, None];
+    s.slots = [Some(a), Some(b), Some(c), Some(d), Some(e), None, None, None];
 
     let start = Current::now();
-    s.run(Some(3000), &mut |_| {});
+    sched::run(&mut s, Some(3000), &mut |_| {});
     let stats = s.stats;
     let elapsed_ms = time::ticks_to_ns(Current::now() - start) / 1_000_000;
 
@@ -753,7 +766,7 @@ fn selftest_m3d(apps: &Apps) -> u32 {
     };
     let mut s = sched::Scheduler::new();
     s.slots = [Some(a), Some(b), Some(c), None, None, None, None, None];
-    s.run(Some(2000), &mut |_| {});
+    sched::run(&mut s, Some(2000), &mut |_| {});
     let mut failures = 0;
     for p in s.slots.iter().flatten() {
         let exit = p.exit().unwrap();
@@ -814,7 +827,7 @@ fn selftest_m5c(apps: &Apps) -> u32 {
             }
         }
         // QEMU's clock is the host's: leave room for a busy host.
-        s.run(Some(5000), &mut |_| {});
+        sched::run(&mut s, Some(5000), &mut |_| {});
         for p in s.slots.iter().flatten() {
             let exit = p.exit().unwrap();
             let ok = match p.name {
@@ -857,7 +870,7 @@ fn selftest_m6c(apps: &Apps) -> u32 {
         };
         let mut s = sched::Scheduler::new();
         s.slots = [Some(p), None, None, None, None, None, None, None];
-        s.run(Some(limit), &mut |_| {});
+        sched::run(&mut s, Some(limit), &mut |_| {});
         let p = s.slots[0].as_ref().unwrap();
         let exit = p.exit().unwrap();
         let ok = matches(&exit, &expected);
@@ -892,7 +905,7 @@ fn selftest_m4b(apps: &Apps) -> u32 {
     };
     let mut s = sched::Scheduler::new();
     s.slots = [Some(a), Some(b), Some(c), None, None, None, None, None];
-    s.run(Some(2000), &mut |_| {});
+    sched::run(&mut s, Some(2000), &mut |_| {});
     let mut failures = 0;
     for p in s.slots.iter().flatten() {
         let exit = p.exit().unwrap();

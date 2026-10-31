@@ -3,8 +3,14 @@
 //! The kernel is a loop: pick a ready process, arm the alarm for the end of
 //! its time slice (or the earliest wake-up of a sleeping process, whichever
 //! comes first), run it until it traps, and act on the trap. The kernel never
-//! runs with interrupts enabled, so there is no locking; the alarm only ever
-//! interrupts U-mode.
+//! runs with interrupts enabled; the alarm only ever interrupts U-mode.
+//!
+//! Two cores (doc/33 §5): the scheduler running on core 0 is published in
+//! `ACTIVE`, and core 1 runs its processes too (`run_secondary`). Both hold
+//! the big kernel lock (`smp::lock`) whenever they touch it and let go only
+//! while they run a process or sleep. A process runs on one core at a time
+//! (`on_core`). The scheduler is reached through a raw pointer and borrowed
+//! only while the lock is held, never across `run_user` or a sleep.
 
 use t5_abi::event;
 use t5_abi::log::Addr;
@@ -14,13 +20,23 @@ use crate::arch::riscv32::fpu::{self, FpState};
 use crate::arch::riscv32::pmp;
 use crate::arch::riscv32::trap::{self, Trap};
 use crate::platform::{Current, Platform};
+use core::sync::atomic::{AtomicPtr, Ordering};
+
 use crate::process::{Exit, Next, Process, State};
+use crate::smp;
 use crate::time;
 
 /// Processes at once (doc/30 §4). With the PSRAM, each gets 1/8 of the app
 /// pool (3 MiB).
 pub const MAX_PROCS: usize = 8;
 pub const SLICE_MS: u64 = 10;
+/// Cores.
+pub const CORES: usize = 2;
+/// `on_core` value of a process no core is running.
+const NONE: u8 = 0xFF;
+/// How long core 1 sleeps at most when it has nothing to run (it is not
+/// woken when core 0 makes a process ready; doc/33 §5).
+const SECONDARY_IDLE_MS: u64 = 10;
 
 /// Counters the self-test checks to see that each path was exercised.
 #[derive(Clone, Copy, Debug, Default)]
@@ -29,38 +45,20 @@ pub struct Stats {
     pub fpu_switches: u32,
     pub fpu_saves: u32,
     pub idle_waits: u32,
-    /// Time (ticks) asleep in `wait_for_interrupt` (doc/31).
-    pub idle_ticks: u64,
+    /// Time (ticks) each core slept (doc/31).
+    pub idle_ticks: [u64; CORES],
+    /// Slices each core ran (doc/33).
+    pub slices: [u32; CORES],
 }
 
-/// Owner of the FPU registers (see `arch::riscv32::fpu`).
-struct Fpu {
+/// A core's FPU registers: whose state they hold (see `arch::riscv32::fpu`).
+/// Given up at the end of each slice, saved if written, so a process can go
+/// on on the other core.
+#[derive(Clone, Copy)]
+struct CoreFpu {
     owner: Option<usize>,
     /// The owner wrote the registers since they were loaded.
     dirty: bool,
-    saved: [FpState; MAX_PROCS],
-}
-
-impl Fpu {
-    fn grant(&mut self, to: usize, stats: &mut Stats) {
-        if let Some(o) = self.owner {
-            if self.dirty {
-                fpu::save(&mut self.saved[o]);
-                stats.fpu_saves += 1;
-            }
-        }
-        fpu::restore(&self.saved[to]);
-        self.owner = Some(to);
-        self.dirty = false;
-        stats.fpu_switches += 1;
-    }
-
-    fn release(&mut self, i: usize) {
-        if self.owner == Some(i) {
-            self.owner = None;
-            self.dirty = false;
-        }
-    }
 }
 
 /// Processes in fixed slots (slot `i` uses pool slot `i` and FPU save area
@@ -69,13 +67,19 @@ impl Fpu {
 /// stops processes from `poll` (doc/14 §3).
 pub struct Scheduler {
     pub slots: [Option<Process>; MAX_PROCS],
-    fpu: Fpu,
+    /// The core running each slot's process, or `NONE`.
+    on_core: [u8; MAX_PROCS],
+    fpu: [CoreFpu; CORES],
+    fpu_saved: [FpState; MAX_PROCS],
     pub stats: Stats,
     next: usize,
-    /// At the last `ps`: the time and the idle total (ticks), so `ps` gives
-    /// the use since then (doc/31).
-    pub cpu_mark: (u64, u64),
+    /// At the last `ps`: the time and each core's idle total (ticks), so
+    /// `ps` gives the use since then (doc/31).
+    pub cpu_mark: (u64, [u64; CORES]),
 }
+
+/// The scheduler core 0 is running, for core 1 (null: none).
+static ACTIVE: AtomicPtr<Scheduler> = AtomicPtr::new(core::ptr::null_mut());
 
 /// How often `run(None, ..)` calls `poll` while processes keep the CPU busy
 /// or everyone sleeps.
@@ -85,18 +89,22 @@ impl Scheduler {
     pub fn new() -> Scheduler {
         Scheduler {
             slots: [const { None }; MAX_PROCS],
-            fpu: Fpu { owner: None, dirty: false, saved: [FpState::default(); MAX_PROCS] },
+            on_core: [NONE; MAX_PROCS],
+            fpu: [CoreFpu { owner: None, dirty: false }; CORES],
+            fpu_saved: [FpState::default(); MAX_PROCS],
             stats: Stats::default(),
             next: 0,
-            cpu_mark: (Current::now(), 0),
+            cpu_mark: (Current::now(), [0; CORES]),
         }
     }
 
     pub fn free_slot(&self) -> Option<usize> {
-        self.slots.iter().position(Option::is_none)
+        (0..MAX_PROCS).find(|&i| self.slots[i].is_none() && self.on_core[i] == NONE)
     }
 
-    /// Stops the process with `pid`. Its slot is freed by `reap`.
+    /// Stops the process with `pid`. Its slot is freed by `reap`. If the
+    /// other core is running it, that core finishes it when it comes back
+    /// (logs, closes its handles).
     pub fn kill(&mut self, pid: u32) -> bool {
         for (i, slot) in self.slots.iter_mut().enumerate() {
             if let Some(p) = slot
@@ -104,102 +112,211 @@ impl Scheduler {
                 && p.exit().is_none()
             {
                 p.state = State::Exited(Exit::Killed);
-                self.fpu.release(i);
-                log_exit(p, Exit::Killed);
+                if self.on_core[i] == NONE {
+                    log_exit(p, Exit::Killed);
+                }
                 return true;
             }
         }
         false
     }
 
-    /// Frees the slots of processes that have exited.
+    /// Frees the slots of processes that have exited (and no core runs).
     pub fn reap(&mut self) {
-        for slot in self.slots.iter_mut() {
-            if slot.as_ref().is_some_and(|p| p.exit().is_some()) {
-                *slot = None;
+        for i in 0..MAX_PROCS {
+            if self.on_core[i] == NONE && self.slots[i].as_ref().is_some_and(|p| p.exit().is_some()) {
+                self.slots[i] = None;
             }
         }
     }
 
-    /// With `Some(limit_ms)`: runs until every process has exited or the
-    /// limit has passed (processes still alive then are killed). With
-    /// `None`: runs forever, calling `poll` at least every `POLL_MS`.
-    pub fn run(&mut self, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mut Scheduler)) {
-        let limit = limit_ms.map(|ms| Current::now() + time::ms_to_ticks(ms));
-        let mut next_poll = Current::now();
+    /// Whether the other core runs one of the processes.
+    fn busy_elsewhere(&self) -> bool {
+        self.on_core.iter().any(|&c| c != NONE)
+    }
 
-        loop {
-            Current::feed_watchdog();
-            Current::display_service();
-            crate::hostlink::poll();
-            crate::wlan::poll();
-            let now = Current::now();
-            if limit.is_none() && now >= next_poll {
-                poll(self);
-                next_poll = now + time::ms_to_ticks(POLL_MS);
-            }
-            if let Some(limit) = limit
-                && now >= limit
-            {
-                for slot in self.slots.iter_mut().flatten() {
-                    if slot.exit().is_none() {
-                        slot.state = State::Exited(Exit::Killed);
-                        log_exit(slot, Exit::Killed);
-                    }
-                }
-                break;
-            }
-            // The earliest of: the limit (self-test) or the next poll
-            // (service), and the wake-ups of sleeping or waiting processes.
-            let mut wake = limit.unwrap_or(next_poll.max(now));
-            let mut woken = None;
-            for (i, p) in self.slots.iter_mut().enumerate() {
-                let Some(p) = p else { continue };
-                if p.try_wake(now) {
-                    woken.get_or_insert(i);
-                } else if let Some(t) = p.wake_at() {
-                    wake = wake.min(t);
-                }
-            }
+    /// The next ready process no core runs, round robin from `next`.
+    fn pick(&self) -> Option<usize> {
+        let ready = |i: usize| self.on_core[i] == NONE && self.slots[i].as_ref().is_some_and(|p| p.state == State::Ready);
+        (0..MAX_PROCS).map(|k| (self.next + k) % MAX_PROCS).find(|&i| ready(i))
+    }
 
-            // A process whose sleep just ended runs next instead of waiting
-            // for its round-robin turn (up to a slice per busy process).
-            if let Some(w) = woken {
-                self.next = w;
-            }
-            let n = MAX_PROCS;
-            let ready = |s: &Option<Process>| s.as_ref().is_some_and(|p| p.state == State::Ready);
-            let Some(i) = (0..n).map(|k| (self.next + k) % n).find(|&i| ready(&self.slots[i])) else {
-                if limit.is_some() && self.slots.iter().flatten().all(|p| p.exit().is_some()) {
-                    break;
-                }
-                if crate::hostlink::pending() || crate::wlan::pending() {
-                    continue;
-                }
-                // Everyone is asleep (or nothing runs). Wake at least every
-                // second to feed the watchdog.
-                Current::set_alarm(wake.min(now + time::ms_to_ticks(1000)));
-                let asleep = Current::now();
-                Current::wait_for_interrupt();
-                self.stats.idle_ticks += Current::now() - asleep;
-                Current::clear_alarm();
-                self.stats.idle_waits += 1;
+    /// Wakes processes whose sleep or wait is over (no core runs them);
+    /// the first woken, and the earliest wake-up of the rest (from `wake`).
+    fn wake(&mut self, now: u64, mut wake: u64) -> (Option<usize>, u64) {
+        let mut woken = None;
+        for i in 0..MAX_PROCS {
+            if self.on_core[i] != NONE {
                 continue;
-            };
-            self.next = (i + 1) % n;
-
-            Current::set_alarm(wake.min(now + time::ms_to_ticks(SLICE_MS)));
-            let p = self.slots[i].as_mut().unwrap();
-            let start = Current::now();
-            run_slice(p, i, &mut self.fpu, &mut self.stats);
-            p.cpu += Current::now() - start;
-            Current::clear_alarm();
-            if let Some(exit) = p.exit() {
-                self.fpu.release(i);
-                log_exit(p, exit);
+            }
+            let Some(p) = self.slots[i].as_mut() else { continue };
+            if p.try_wake(now) {
+                woken.get_or_insert(i);
+            } else if let Some(t) = p.wake_at() {
+                wake = wake.min(t);
             }
         }
-        Current::clear_alarm();
+        (woken, wake)
+    }
+}
+
+/// With `Some(limit_ms)`: runs until every process has exited or the limit
+/// has passed (processes still alive then are killed). With `None`: runs
+/// forever, calling `poll` at least every `POLL_MS`. Core 0 only, with the
+/// lock held; core 1 runs the same processes meanwhile.
+pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mut Scheduler)) {
+    let limit = limit_ms.map(|ms| Current::now() + time::ms_to_ticks(ms));
+    let mut next_poll = Current::now();
+    ACTIVE.store(this, Ordering::Release);
+
+    loop {
+        Current::feed_watchdog();
+        Current::display_service();
+        crate::hostlink::poll();
+        crate::wlan::poll();
+        let now = Current::now();
+        // Borrowed until the process runs or the core sleeps.
+        let s = unsafe { &mut *this };
+        if limit.is_none() && now >= next_poll {
+            poll(s);
+            next_poll = now + time::ms_to_ticks(POLL_MS);
+        }
+        if let Some(limit) = limit
+            && now >= limit
+        {
+            // Processes the other core runs are finished by it when it
+            // comes back.
+            for i in 0..MAX_PROCS {
+                if let Some(p) = s.slots[i].as_mut()
+                    && p.exit().is_none()
+                {
+                    p.state = State::Exited(Exit::Killed);
+                    if s.on_core[i] == NONE {
+                        log_exit(p, Exit::Killed);
+                    }
+                }
+            }
+            break;
+        }
+        // The earliest of: the limit (self-test) or the next poll
+        // (service), and the wake-ups of sleeping or waiting processes.
+        let (woken, wake) = s.wake(now, limit.unwrap_or(next_poll.max(now)));
+        // A process whose sleep just ended runs next instead of waiting
+        // for its round-robin turn (up to a slice per busy process).
+        if let Some(w) = woken {
+            s.next = w;
+        }
+        let Some(i) = s.pick() else {
+            if limit.is_some() && s.slots.iter().flatten().all(|p| p.exit().is_some()) {
+                break;
+            }
+            if crate::hostlink::pending() || crate::wlan::pending() {
+                continue;
+            }
+            // Everyone is asleep (or nothing runs). Wake at least every
+            // second to feed the watchdog.
+            Current::set_alarm(wake.min(now + time::ms_to_ticks(1000)));
+            sleep(this);
+            continue;
+        };
+        s.next = (i + 1) % MAX_PROCS;
+        Current::set_alarm(wake.min(now + time::ms_to_ticks(SLICE_MS)));
+        run_one(this, i);
+    }
+    // Wait until the other core has given up every process of this
+    // scheduler, then withdraw it.
+    while unsafe { (*this).busy_elsewhere() } {
+        smp::pause();
+    }
+    ACTIVE.store(core::ptr::null_mut(), Ordering::Release);
+    Current::clear_alarm();
+    if limit.is_some() {
+        let st = unsafe { (*this).stats };
+        event!(Debug, "sched.done", slices0 = st.slices[0], slices1 = st.slices[1], preemptions = st.preemptions);
+    }
+}
+
+/// Sleeps with the lock let go (the alarm is set), counting the time.
+fn sleep(this: *mut Scheduler) {
+    let core = smp::hartid() & 1;
+    let asleep = Current::now();
+    smp::idle();
+    let s = unsafe { &mut *this };
+    s.stats.idle_ticks[core] += Current::now() - asleep;
+    s.stats.idle_waits += 1;
+    Current::clear_alarm();
+}
+
+/// Runs slot `i` for a slice on this core (lock held; the alarm is set).
+fn run_one(this: *mut Scheduler, i: usize) {
+    let core = smp::hartid() & 1;
+    let p: *mut Process = {
+        let s = unsafe { &mut *this };
+        s.on_core[i] = core as u8;
+        s.slots[i].as_mut().unwrap()
+    };
+    let start = Current::now();
+    unsafe { (*this).stats.slices[core] += 1 };
+    run_slice(this, p, i, core);
+    let s = unsafe { &mut *this };
+    let p = unsafe { &mut *p };
+    p.cpu += Current::now() - start;
+    Current::clear_alarm();
+    // Give the FPU up, saved if written, so the process can go on anywhere.
+    let f = &mut s.fpu[core];
+    if f.owner == Some(i) {
+        if f.dirty {
+            fpu::save(&mut s.fpu_saved[i]);
+            s.stats.fpu_saves += 1;
+        }
+        *f = CoreFpu { owner: None, dirty: false };
+    }
+    s.on_core[i] = NONE;
+    if let Some(exit) = p.exit() {
+        log_exit(p, exit);
+    }
+}
+
+/// Core 1's loop (doc/33 §5): runs ready processes of the published
+/// scheduler; sleeps `SECONDARY_IDLE_MS` when there are none.
+pub fn run_secondary() -> ! {
+    loop {
+        let this = ACTIVE.load(Ordering::Acquire);
+        let now = Current::now();
+        // Sleep no later than the first wake-up: core 0 may be asleep on
+        // an alarm set before a process this core ran began to wait.
+        let mut wake = now + time::ms_to_ticks(SECONDARY_IDLE_MS);
+        let picked = if this.is_null() {
+            None
+        } else {
+            let s = unsafe { &mut *this };
+            let (woken, w) = s.wake(now, wake);
+            wake = w;
+            if let Some(w) = woken {
+                s.next = w;
+            }
+            let i = s.pick();
+            if let Some(i) = i {
+                s.next = (i + 1) % MAX_PROCS;
+            }
+            i
+        };
+        match picked {
+            Some(i) => {
+                Current::set_alarm(now + time::ms_to_ticks(SLICE_MS));
+                run_one(this, i);
+            }
+            None => {
+                Current::set_alarm(wake);
+                let asleep = Current::now();
+                smp::idle();
+                Current::clear_alarm();
+                let this = ACTIVE.load(Ordering::Acquire);
+                if !this.is_null() {
+                    unsafe { (*this).stats.idle_ticks[1] += Current::now() - asleep };
+                }
+            }
+        }
     }
 }
 
@@ -222,19 +339,31 @@ fn log_exit(p: &mut Process, exit: Exit) {
     }
 }
 
-/// Runs process `i` until it is preempted, gives up the CPU or ends.
-fn run_slice(p: &mut Process, i: usize, fpu: &mut Fpu, stats: &mut Stats) {
+/// Runs process `p` (slot `i`) on `core` until it is preempted, gives up
+/// the CPU or ends. The lock is let go while it runs in U-mode.
+fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
+    let p = unsafe { &mut *p };
     pmp::set_process(&p.region);
     loop {
-        let owns_fpu = fpu.owner == Some(i);
-        let fs = if owns_fpu { mstatus::FS_CLEAN } else { mstatus::FS_OFF };
+        let (owns_fpu, fs) = {
+            let s = unsafe { &*this };
+            let owns = s.fpu[core].owner == Some(i);
+            (owns, if owns { mstatus::FS_CLEAN } else { mstatus::FS_OFF })
+        };
+        smp::unlock();
         let t = trap::run_user(&mut p.frame, fs);
+        smp::lock();
+        let s = unsafe { &mut *this };
         if owns_fpu && fpu::dirty() {
-            fpu.dirty = true;
+            s.fpu[core].dirty = true;
+        }
+        if p.exit().is_some() {
+            // Killed from the other core while it ran.
+            return;
         }
         match t {
             Trap::Interrupt { code } if code == Current::TIMER_IRQ => {
-                stats.preemptions += 1;
+                s.stats.preemptions += 1;
                 return;
             }
             Trap::Interrupt { code } if Current::handle_irq(code) => {}
@@ -248,10 +377,13 @@ fn run_slice(p: &mut Process, i: usize, fpu: &mut Fpu, stats: &mut Stats) {
                 }
             }
             // The first FP instruction of a process that does not own the
-            // FPU. Hand it over and retry; if the instruction is illegal for
-            // another reason it faults again with the FPU enabled.
+            // FPU. Take it and retry; if the instruction is illegal for
+            // another reason it faults again with the FPU enabled. The FPU
+            // is free: it is given up at the end of every slice.
             Trap::Exception { code: cause::ILLEGAL_INSN, .. } if !owns_fpu => {
-                fpu.grant(i, stats);
+                fpu::restore(&s.fpu_saved[i]);
+                s.fpu[core] = CoreFpu { owner: Some(i), dirty: false };
+                s.stats.fpu_switches += 1;
             }
             Trap::Exception { code, pc, tval } => {
                 p.state = State::Exited(Exit::Fault { code, pc, tval });

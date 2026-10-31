@@ -235,10 +235,6 @@ pub trait Platform {
     fn reset_cause() -> u32 {
         0
     }
-    /// Waits until an interrupt is pending (MIE stays 0, so no trap is taken).
-    fn wait_for_interrupt() {
-        unsafe { core::arch::asm!("wfi") };
-    }
     /// Ends the run. On QEMU this exits the emulator with `code`.
     fn exit(code: u32) -> !;
 }

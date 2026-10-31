@@ -20,7 +20,7 @@
 //! --permit shm --permit listen:shmt --permit svc:shmt`.
 //! Exit 0 if everything held, otherwise the number of the failed check.
 
-use t5_rt::{Channel, Error, FOREVER, Listener, Shm, chan, event, svc, wait, wait_raw};
+use t5_rt::{Channel, Error, FOREVER, Listener, Shm, chan, event, sleep_ms, svc, wait, wait_raw};
 
 t5_rt::entry!(main);
 
@@ -117,8 +117,20 @@ fn serve_many(clients: usize) -> Result<(), u32> {
     Ok(())
 }
 
+/// Connects to `name`, which may not be listening yet: with two cores the
+/// server starts at the same time as its clients (doc/33 §5). Up to 1 s.
+fn connect(name: &str) -> Option<Channel> {
+    for _ in 0..1000 {
+        if let Ok(c) = Channel::connect(name) {
+            return Some(c);
+        }
+        sleep_ms(1);
+    }
+    None
+}
+
 fn svc_client(count: u32) -> Result<(), u32> {
-    let c = Channel::connect("echo").map_err(|_| 40u32)?;
+    let c = connect("echo").ok_or(40u32)?;
     let mut msg = [0u8; chan::MSG_MAX];
     let mut buf = [0u8; chan::MSG_MAX + 1];
     for k in 0..count {
@@ -169,7 +181,7 @@ fn shm_server(clients: usize) -> Result<(), u32> {
 }
 
 fn shm_client(overrun: bool) -> Result<(), u32> {
-    let c = Channel::connect("shmt").map_err(|_| 60u32)?;
+    let c = connect("shmt").ok_or(60u32)?;
     let ev = wait(&[&c.0], FOREVER).map_err(|_| 61u32)?;
     check(ev.kind == chan::SHM, 62)?;
     let s = c.take_shm().map_err(|_| 63u32)?;
