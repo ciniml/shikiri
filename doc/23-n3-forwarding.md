@@ -10,7 +10,7 @@
 | `net` をリンクのデバイス（`link.rs`）、転送（`fwd.rs`）、試験用 LAN（`testlan.rs`）、本体（`main.rs`）に分けた | 済み |
 | 転送面、経路表（最長一致）、ARP の表、TTL、ICMP の Time Exceeded と Destination Unreachable | t5emu で確認（§6） |
 | 待ち受け（TCP_LISTEN、UDP_BIND）のアドレスとリンクの指定、すべてのリンクでの待ち受け | 実機で Wi-Fi 側の待ち受けを確認（§6） |
-| 実機での転送（PC → Tab5 → 試験用 LAN） | 未。PC に経路を足す必要がある（root、§6.3） |
+| 実機での転送（PC → Tab5 → 試験用 LAN） | 実機で確認（§6.3） |
 
 ## 2. リンクとインタフェース
 smoltcp の `Interface` は種類ごとに 1 つ。番号は `fwd::IFACE0`、`WLAN`、`TEST`。
@@ -79,11 +79,16 @@ t5emu: host peer: ping [4.0, 2.0, 2.0] ms, TCP echo in 65 ms, ICMP errors [11, 3
 - Tab5 から試験用 LAN の相手への ping（`nettest 3 192.168.50.2`）: 4/4、往復 0.48〜0.63 ms。
 - **Wi-Fi 側での待ち受け**: `nettest 1`（TCP の echo、すべてのリンクで待ち受け）に、LAN の PC（有線、192.168.2.14）から Tab5 の Wi-Fi のアドレス（192.168.2.112）の 7777 番へつなぎ、200,000 バイトを送った。全部一致して戻った（0.20 秒）。
 
-### 6.3 実機での転送（未）
-PC から 192.168.50.0/24 への経路が要る。PC で次を実行（root が要る）してから、`t5log hostlink` を動かして ping する:
+### 6.3 実機での転送（2026-11-01）
+PC に経路を足し（利用者が実行。root が要る）、`t5log hostlink` を動かして、`run net 1` の Tab5 を通した:
 ```
 sudo ip route add 192.168.50.0/24 via 10.55.0.2 dev t5
 ```
+- `ping 192.168.50.2`: 10/10、平均 0.64 ms（Tab5 自身の 10.55.0.2 へは 0.40 ms）。
+- `ping -t 1 192.168.50.2`: 10.55.0.2 から「Time to live exceeded」。
+- `ping 192.168.50.99`（いない機器）: 応答なし。ARP が答えられず 1 秒で捨てる。ICMP Host Unreachable はまだ返さない（§7）。
+- TCP の echo（192.168.50.2:7777）に 1 MiB: 一致、3.66 秒（2.29 Mbps）。ホストリンクだけのとき（doc/21、2.3 Mbps）と同じで、転送による遅れは見えない。
+
 Wi-Fi 側の機器から 10.55.0.0/24 への戻りの経路はないので、ホストリンクと Wi-Fi の間の転送は N5（NAT）を待つ。
 
 ## 7. まだ
