@@ -220,15 +220,6 @@ impl TxToken for EthTx<'_> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
         let mut buf = [0u8; netdev::ETH_FRAME];
         let r = f(&mut buf[..len]);
-        // DHCP from the client (UDP 68 -> 67, IPv4 without options): ask
-        // for broadcast replies (BOOTP flags bit 15), as the unicast offer
-        // never arrived on the Tab5 (doc/22 §7). The UDP checksum becomes 0
-        // ("none", allowed for IPv4) since the payload changed.
-        if len > 54 && buf[12..14] == [8, 0] && buf[23] == 17 && buf[34..36] == [0, 68] && buf[36..38] == [0, 67] {
-            buf[52] |= 0x80;
-            buf[40] = 0;
-            buf[41] = 0;
-        }
         let nic = self.0;
         for _ in 0..20 {
             match nic.h.write(&buf[..len]) {

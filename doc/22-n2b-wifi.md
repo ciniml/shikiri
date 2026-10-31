@@ -12,7 +12,7 @@
 | N2b-1 | 電源、リセット、SDMMC slot1 での SDIO の識別（CMD5/3/7、CCCR、function 1） | 実機で確認（§4） |
 | N2b-2 | 4 ビット・20MHz、function 1 のブロック長、SLC ホストのレジスタ、esp_hosted の INIT イベント（C6 のファームウェアの版） | 実機で確認（§5）。**C6 は esp_hosted 2.12.7** |
 | N2b-3a | 転送のドライバ（受信の切り出し、送信）、`wlan:ctl` と `netdev:wlan0`（ABI 0.12）、`wifi` サービス（RPC で初期化から接続まで） | 実機で AP に接続（§6） |
-| N2b-3b | `net` に Wi-Fi のリンク（Ethernet、DHCP）、外への ping と TCP | 途中: 接続はできるがデータが通らない（§7） |
+| N2b-3b | `net` に Wi-Fi のリンク（Ethernet、DHCP）、外への ping と TCP | 実機で DHCP、HTTP、PC からの ping（§7） |
 
 ## 2. 電源とリセット（kernel/src/platform/esp32p4v1/tab5.rs `wlan_power_on`）
 - エクスパンダ #2 の OUT（0x05）、DIR（0x03）、OUT_H_IM（0x07）を読んでログに出す（`wlan.expander`）。bit0 が「出力・High・高インピーダンスでない」なら、もう電源は入っているので**何も書かない**。
@@ -109,37 +109,37 @@ wifi.event event_id=43
 wifi.connected ssid=<利用者の AP> bssid=… channel=11 authmode=6 aid=42
 ```
 - `WifiConnect` から約 0.7 秒で接続した。authmode 6 は ESP-IDF の `WIFI_AUTH_WPA3_PSK`。
+- `wifi.mac` の …:25 は soft-AP の MAC で、引数の取り違えによるもの（§7.2）。STA の MAC は …:24。
 - `wifi` はその後も待ち続けている（`ps`: state=waiting）。カーネルのスタックは 40976/49152。
 
-## 7. N2b-3b（途中）: `net` の Wi-Fi のリンク
+## 7. N2b-3b: `net` の Wi-Fi のリンク
 ### 7.1 作ったもの
 - `net`（user/apps/net）に 2 つ目の smoltcp のインタフェース（`Medium::Ethernet`、MAC は `netdev:wlan0` の `ctl(MAC_LO/HI)`）と、それ専用のソケット集合、DHCP のソケット（smoltcp の `socket-dhcpv4`）を足した。`net` は `--permit netdev:wlan0`。
   - ソケットはどちらのインタフェースのものかを持つ。TCP の接続は宛先が 127/8 でも 10.55.0.0/24 でもなければ Wi-Fi 側に作る。待ち受けと UDP は今は最初のインタフェースだけ。
   - `netdev:wlan0` は Wi-Fi の転送が起動するまで開けない（`NoDevice`）。`net` は `wifi` の後に起動する。
   - 試験用に `run net ADDR ROUTER`（数値の IPv4）で DHCP の代わりに静的な ADDR/24 を使える。
 - `nettest 2 ADDR`: ADDR の 80 番に HTTP/1.0 の GET を送り、応答の 1 行目と大きさを記録する。
-- 送った DHCP の要求に「応答はブロードキャストで」の旗（BOOTP flags の bit15）を立てる（UDP のチェックサムは 0 にする）。下の切り分けのために入れた。
+- 接続先は `wifi` のビルド時に `$T5_WIFI_FILE`（なければ `~/.config/tab5-os/wifi.txt`）から読む（§6.2）。
 
-### 7.2 実機で起きていること（2026-10-31、未解決）
-- **AP には接続できるが、データが通らない**。DHCP でアドレスが取れない。
-  - 受信: ブロードキャストとマルチキャスト（ARP、SSDP、IPv6 の近隣探索、他の機器あての DHCP の応答）は届く。**自分の MAC あてのユニキャストは 1 つも来ない**（`net.wifi_waiting rx_unicast=0`）。
-  - 送信: カーネルからは正しい形の DHCP DISCOVER（送信元 e4:b3:23:9a:1f:25、IP と UDP のチェックサムも正しい）が 10 秒ごとに出ていて、C6 への書き込みも成功している（`wlan.sta_tx ok=true`）。しかし **DHCP サーバ（192.168.2.254）は答えない**。このサーバは他の機器への OFFER をブロードキャストで送っている（届いた OFFER の chaddr は別の機器）ので、自分の DISCOVER がサーバに届いていれば、OFFER は見えるはず。
-  - 静的アドレス（192.168.2.250/24）でゲートウェイの 80 番につなぐと、ARP の要求を出し続けるだけで答えがない。
-  - → **C6 から無線にフレームが出ていない**（または AP がこの局のデータを通していない）と考える（推測）。RPC（同じ SDIO の書き込み、if_type だけが違う）は通っている。
-- **接続の経過がおかしい**: どの起動でも、最初の接続が `WIFI_REASON_AUTH_FAIL`（202）、次が 205（接続失敗）、3 回目で `wifi.connected`（authmode 6 = `WIFI_AUTH_WPA3_PSK`）。TCC（ESP-IDF のホスト、同じ C6 のファームウェア）は 1 回目で接続し、2.7 秒で DHCP のアドレスを得ていた（TCC の `logs/isolate.log:150-155`）。
-- 試したが変わらなかったこと:
-  - `wifi_scan_threshold.authmode = WPA2_PSK`（TCC と同じ）。
-  - STA_START のイベントを待ってから `WifiConnect`（TCC と同じ順）。
-  - INIT イベントへの返事として、ホストの設定（PRIV: HOST_CAPABILITIES、チップ ID、流量制御 80 %/60 %）を送る（`transport_drv.c:726-780,945` と同じ）。
-- C6 側のソースで確かめたこと: STA のフレームは `station_connected` なら `esp_wifi_internal_tx` に渡る（`esp_hosted_coprocessor.c:703-728`）。SDIO のチェックサムは既定で無効（`Kconfig.projbuild:489-491`）。流量制御は閾値 0 なら働かない（`sdio_slave_api.c:136-180`）。network split は既定で無効（`Kconfig.projbuild:1149-1153`）。いずれも原因に見えない。
+### 7.2 データが通らなかった原因（2026-10-31、解決）
+- 症状: AP には接続できるが、DHCP の応答がなく、自分あてのユニキャストが 1 つも来ない。ブロードキャストの受信はできる。送ったフレームは C6 への書き込みまでは成功する。
+- 切り分け: PC と Tab5 を同じ AP（WPA2 の試験用 AP）につなぎ、
+  - PC から UDP のブロードキャストを送ると Tab5 の受信の数が増える（受信は正常）。
+  - Tab5 に静的なアドレスを与えて PC あてに通信させても、PC の近隣表（`ip neigh`）に Tab5 が現れない（Tab5 の ARP の要求が無線に出ていない）。
+- 原因: **`GetMACAddress` の引数を取り違えていた**。C6 はこの値を `esp_wifi_get_mac` にそのまま渡す（esp_hosted の `slave_wifi_std.c:506`）ので、`wifi_interface_t`（STA = 0、AP = 1）である。`wifi` は `WIFI_MODE_STA`（= 1）を渡していたため、**soft-AP の MAC（…:25）を受け取り**、`net` はそれを送信元として使っていた。STA の MAC は …:24。
+  - 送信元が自分の STA の MAC と違うフレームは無線に出ない。AP はこの局を …:24 として知っているので、ユニキャストも来ない。ブロードキャストだけが見えていたのはこのため。
+- 対処: `wifi` は `WIFI_IF_STA`（0）を渡す。`net` に入れていた DHCP の「応答はブロードキャストで」の旗は外した。
+- 以前の iotap（WPA3）で毎回 202 → 205 → 接続となっていた件は別の問題で、未解決（WPA2 の AP では 1 回目で接続する）。
 
-### 7.3 次に確かめること
-- AP 側で、この局（e4:b3:23:9a:1f:25）がどう見えているか（接続済みか、送受信の数）。利用者に頼む。
-- WPA2 の AP（例: スマートフォンのテザリング）で同じことが起きるか。WPA3（SAE）の接続の失敗が関係しているかを切り分ける。
-- （試した）C6 の NVS に古い設定が残っていて自動の接続とぶつかる可能性: `nvs_enable = 0` でも 202 → 205 → 接続、データは通らない、で同じだった。`nvs_enable` は TCC と同じ 1 に戻した。
+### 7.3 実機の結果（2026-10-31、AP「matter-test」、WPA2）
+- 接続まで約 7 秒（電源投入とリセットの 1.5 秒を含む）、1 回目で接続。
+- DHCP で 192.168.8.181/24（ゲートウェイと DNS は 192.168.8.1）を得た。
+- `nettest 2 192.168.8.1`: 接続 6〜9 ms、HTTP の応答 1084 バイトを 17〜18 ms で受信（`HTTP/1.1 200 OK`）。
+- PC（同じ AP）から Tab5 への ping: 5/5 応答、28〜208 ms（C6 の省電力と、カーネルが C6 をポーリングしていることによる遅れと考える。未計測）。
 
 ## 8. まだ
-- 上の 7.2 を解決し、DHCP、ゲートウェイと外への TCP（`nettest 2`）を通す。
+- WPA3 の AP で最初の 2 回の接続に失敗する（202 → 205）原因。
+- 待ち受けと UDP を Wi-Fi 側でも使えるようにする。
 - ポーリングをやめて SDIO のカードの割り込み（SDMMC の `sdio_int_mask`）でカーネルを起こす。
 - 接続先を SD カードの設定ファイルから読む。
 - C6 の電源を入れた・入っていた状態を、M5Stack の元のファームウェア（バックアップ）がどう扱うかは確かめていない。

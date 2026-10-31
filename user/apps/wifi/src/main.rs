@@ -35,6 +35,8 @@ const EVENT_STA_CONNECTED: u32 = 775;
 const EVENT_STA_DISCONNECTED: u32 = 776;
 
 const MODE_STA: u64 = 1;
+/// wifi_interface_t (esp_wifi_types_generic.h).
+const WIFI_IF_STA: u64 = 0;
 /// wifi_event_t (esp_wifi_types_generic.h).
 const WIFI_EVENT_STA_START: i32 = 2;
 /// wifi_auth_mode_t (esp_wifi_types_generic.h).
@@ -366,7 +368,10 @@ fn run() -> Result<(), u32> {
     rpc.call(REQ_SET_MODE, 1, |p| p.uint(1, MODE_STA))?;
     // The MAC address is known once Wi-Fi is initialised
     // (ESP_ERR_WIFI_NOT_INIT before, seen on the Tab5).
-    let m = rpc.call(REQ_GET_MAC, 2, |p| p.uint(1, MODE_STA))?;
+    // The field is a wifi_interface_t (the chip passes it to
+    // esp_wifi_get_mac, slave_wifi_std.c:506), not a mode: 1 would be the
+    // soft-AP's address, and frames sent from it never leave the chip.
+    let m = rpc.call(REQ_GET_MAC, 2, |p| p.uint(1, WIFI_IF_STA))?;
     let mac = bytes(rpc.payload(&m), 1);
     if mac.len() != 6 {
         return Err(2);
