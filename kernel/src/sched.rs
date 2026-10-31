@@ -49,6 +49,8 @@ pub struct Stats {
     pub idle_ticks: [u64; CORES],
     /// Slices each core ran (doc/33).
     pub slices: [u32; CORES],
+    /// Timer interrupts before the alarm time, per core (doc/33 §8).
+    pub spurious: [u32; CORES],
 }
 
 /// A core's FPU registers: whose state they hold (see `arch::riscv32::fpu`).
@@ -363,6 +365,10 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
         }
         match t {
             Trap::Interrupt { code } if code == Current::TIMER_IRQ => {
+                if !Current::alarm_due() {
+                    s.stats.spurious[core] += 1;
+                    continue;
+                }
                 s.stats.preemptions += 1;
                 return;
             }

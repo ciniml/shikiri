@@ -24,7 +24,9 @@ use crate::time;
 /// Other harts wait in `_start` until this is not 0 (QEMU virt starts all
 /// harts there; on the ESP32-P4 Core1 starts where core 0 says).
 pub static SECONDARY_GO: AtomicU32 = AtomicU32::new(0);
-/// Set by core 1 once it is up.
+/// 1: core 1 is up and joins. 2: core 0 gave up waiting; core 1, if it
+/// comes later, stays parked (it is not counted, so `quiesce` would not
+/// wait for it).
 static CORE_UP: AtomicU32 = AtomicU32::new(0);
 /// The big kernel lock, a ticket lock: a core takes the next ticket and
 /// waits until it is served, so the cores take turns. (A plain
@@ -56,7 +58,10 @@ pub fn start() -> usize {
     }
     let end = Current::now() + time::ms_to_ticks(100);
     while CORE_UP.load(Ordering::Acquire) == 0 && Current::now() < end {}
-    let cores = 1 + CORE_UP.load(Ordering::Acquire) as usize;
+    let cores = match CORE_UP.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => 1,
+        Err(_) => 2,
+    };
     event!(Info, "smp.started", cores = cores as u32);
     if cores == 2 {
         TWO_CORES.store(1, Ordering::Release);
@@ -151,9 +156,21 @@ pub extern "C" fn kmain_secondary() -> ! {
     let sp: usize;
     unsafe { core::arch::asm!("mv {}, sp", out(reg) sp) };
     event!(Info, "smp.core_up", hart = hartid() as u32, mtvec = Addr(read_csr!("mtvec") as u32), sp = Addr(sp as u32));
-    CORE_UP.store(1, Ordering::Release);
+    if CORE_UP.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        park();
+    }
     // Core 0 takes the lock once it has seen CORE_UP; this core waits for
     // it in RAM and then runs processes for good.
     lock();
     crate::sched::run_secondary()
+}
+
+/// Core 1 when it came too late: sleeps in RAM for good (nothing is routed
+/// to it).
+#[unsafe(link_section = ".ram_text")]
+#[inline(never)]
+fn park() -> ! {
+    loop {
+        unsafe { core::arch::asm!("wfi") };
+    }
 }

@@ -50,6 +50,11 @@ pub trait Platform {
     fn set_alarm(at: u64);
     /// Disarms the alarm and clears its pending interrupt.
     fn clear_alarm();
+    /// Whether this core's alarm time has come (a timer interrupt before it
+    /// is spurious, doc/33 §8).
+    fn alarm_due() -> bool {
+        true
+    }
     /// Makes the whole flash readable and returns the address of flash
     /// offset 0, or `None` without flash (doc/14 §5.1). Called once.
     fn map_flash() -> Option<usize> {

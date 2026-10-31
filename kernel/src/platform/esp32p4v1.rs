@@ -150,6 +150,7 @@ const CLIC_INT_THRESH: usize = 0x2080_0008;
 const CLIC_CTRL_BASE: usize = 0x2080_1000;
 /// Priority 1 (ctl = 1 << 5 | 0x1F), level-triggered, non-vectored, enabled.
 const CLIC_TIMER_CTRL: u32 = (0x3F << 24) | (1 << 8);
+const CLIC_IP: u32 = 1 << 0;
 
 // Flash MMU (doc/14 §5.1, doc/research/m3-flash-access.md §1): one entry per
 // 64 KiB page of the window 0x4000_0000-0x43FF_FFFF. Write the entry number to
@@ -398,6 +399,9 @@ fn cpu_khz() -> u64 {
     c1.wrapping_sub(c0) as u64 * SYSTIMER_TICKS_PER_MS / (t1 - t0)
 }
 
+/// Each core's alarm time (written by that core only).
+static mut ALARM_AT: [u64; 2] = [u64::MAX; 2];
+
 /// This core's alarm comparator: (CONF work-enable bit, interrupt bit,
 /// target hi, target lo, load register).
 fn alarm_regs() -> (u32, u32, usize, usize, usize) {
@@ -430,9 +434,16 @@ impl Platform for Esp32p4v1 {
 
     fn start_secondary(entry: usize) -> bool {
         unsafe {
+            let set_boot: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_SET_APPCPU_BOOT_ADDR);
+            // Core 1 may still run from before a reset that did not stop it
+            // (a panic, or a kernel older than `stop_secondary`), and the
+            // ROM may still hold the old entry. Clear the entry and restart
+            // core 1 through the ROM, which then waits for the new one
+            // (doc/33 §8).
+            set_boot(0);
+            wr(HP_SYS_CLKRST_HP_RST_EN0, rd(HP_SYS_CLKRST_HP_RST_EN0) | RST_EN_CORE1_GLOBAL);
             wr(HP_SYS_CLKRST_SOC_CLK_CTRL0, rd(HP_SYS_CLKRST_SOC_CLK_CTRL0) | CORE1_CPU_CLK_EN);
             wr(HP_SYS_CLKRST_HP_RST_EN0, rd(HP_SYS_CLKRST_HP_RST_EN0) & !RST_EN_CORE1_GLOBAL);
-            let set_boot: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_SET_APPCPU_BOOT_ADDR);
             set_boot(entry as u32);
         }
         true
@@ -510,6 +521,7 @@ impl Platform for Esp32p4v1 {
         // both cores change it only with the kernel lock held.
         let (en, int, hi, lo, load) = alarm_regs();
         unsafe {
+            ALARM_AT[crate::smp::hartid() & 1] = at;
             wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !en);
             wr(SYSTIMER_INT_CLR, int);
             wr(hi, (at >> 32) as u32);
@@ -522,9 +534,20 @@ impl Platform for Esp32p4v1 {
     fn clear_alarm() {
         let (en, int, ..) = alarm_regs();
         unsafe {
+            ALARM_AT[crate::smp::hartid() & 1] = u64::MAX;
             wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !en);
             wr(SYSTIMER_INT_CLR, int);
+            // The clear reaches this core's CLIC a little later; going back
+            // to U-mode before then traps again at once (doc/33 §8).
+            let mut n = 0;
+            while rd(CLIC_CTRL_BASE + 4 * TIMER_CLIC_INDEX) & CLIC_IP != 0 && n < 256 {
+                n += 1;
+            }
         }
+    }
+
+    fn alarm_due() -> bool {
+        Self::now() >= unsafe { ALARM_AT[crate::smp::hartid() & 1] }
     }
 
     fn console_write(bytes: &[u8]) -> bool {
@@ -615,6 +638,14 @@ impl Platform for Esp32p4v1 {
 
     fn reset() -> ! {
         display::stop();
+        // As esp_restart_noos does (system_internal.c:113-146): hold core 1
+        // in reset and clear its entry, so that after the reset it waits in
+        // the ROM for the next kernel instead of jumping to this one's.
+        unsafe {
+            wr(HP_SYS_CLKRST_HP_RST_EN0, rd(HP_SYS_CLKRST_HP_RST_EN0) | RST_EN_CORE1_GLOBAL);
+            let set_boot: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_SET_APPCPU_BOOT_ADDR);
+            set_boot(0);
+        }
         // esp_rom_software_reset_system (esp32p4.rom.ld:52).
         unsafe {
             let reset: unsafe extern "C" fn() -> ! = core::mem::transmute(ROM_SOFTWARE_RESET);

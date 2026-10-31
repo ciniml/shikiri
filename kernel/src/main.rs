@@ -425,6 +425,8 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
                 idle1_pm = pm(idle[1]),
                 slices0 = s.stats.slices[0],
                 slices1 = s.stats.slices[1],
+                spurious0 = s.stats.spurious[0],
+                spurious1 = s.stats.spurious[1],
                 idle_total_ms = (time::ticks_to_ns(s.stats.idle_ticks[0] + s.stats.idle_ticks[1]) / 1_000_000) as u32
             );
             let (size, used) = rv::stack_usage();
