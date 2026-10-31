@@ -8,16 +8,17 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
 PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --permit shm --permit listen:shmt --permit svc:shmt
 PERMIT_paint  := --permit display --permit touch
 PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
-PERMIT_net    := --permit shm --permit listen:net --permit netdev:host --permit netdev:wlan0 --stack 65536
+PERMIT_net    := --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --stack 65536
 PERMIT_nettest := --permit svc:net --stack 32768
 PERMIT_wifi   := --permit wlan:ctl --stack 16384
+PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin
@@ -308,6 +309,14 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "run net 1" --ctl "wait-ms 40000" --host-peer 16384 \
 	    --host-peer-target 192.168.50.2 --host-peer-start net.link \
 	    --expect-event net.ready --expect-event hostlink.open \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Filter (N4, doc/24): with netctl's test set, the test LAN's peer
+	@# starts pings to the Tab5 (in) and the PC (forward), all dropped
+	@# (net.drop); then the PC's traffic through the Tab5 still passes.
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net 1" --ctl "run netctl 1" --ctl "wait-ms 40000" --host-peer 16384 \
+	    --host-peer-target 192.168.50.2 --host-peer-start net.peer_probes \
+	    --expect-event net.rules --expect-event net.drop --expect-event net.peer_probes \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is

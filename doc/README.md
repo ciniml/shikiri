@@ -20,6 +20,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [19](19-n0-ipc-design.md) | N0: サービスのための IPC。N0a（サービスチャネル `listen:`/`svc:`、チャネル 32 本）と N0b（共有メモリ。切り出して渡す）を実装 |
 | [22](22-n2b-wifi.md) | N2b: Wi-Fi（ESP32-C6、SDIO、esp_hosted）。C6 の識別、esp_hosted の転送、`wifi` サービスで AP に接続、`net` の Wi-Fi のリンクで DHCP と外への TCP。データが通らなかった原因（GetMAC の引数の取り違え）と切り分け |
 | [23](23-n3-forwarding.md) | N3: リンク間の転送（経路表、ARP、TTL、ICMP のエラー）、待ち受けのアドレスとリンクの指定、`net` の中の試験用 LAN。t5emu で PC → Tab5 → 試験用 LAN を確認 |
+| [24](24-n4-filter.md) | N4: パケットのフィルタ（in/forward/out、規則、規定）と接続の追跡、`svc:netctl` と `netctl` アプリ、別のリンクの自分のアドレスへの配送。t5emu と実機で確認 |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |

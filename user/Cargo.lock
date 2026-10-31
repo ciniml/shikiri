@@ -161,6 +161,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "netctl"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
+]
+
+[[package]]
 name = "nettest"
 version = "0.1.0"
 dependencies = [

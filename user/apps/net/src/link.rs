@@ -6,11 +6,15 @@
 //!   host link to the PC (`netdev:host`, 10.55.0.2/24).
 //! - `EthNic`: an Ethernet link: the Wi-Fi station (`netdev:wlan0`) or the
 //!   test LAN (`test0`, a pair of rings to a peer inside `net`).
+//!
+//! Packets for the Tab5 pass the filter's IN hook here, and packets from
+//! its stack the OUT hook (doc/24).
 
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 use t5_rt::{Error, Handle, event, netdev, sleep_ms};
 
+use crate::filter::{self, ANY_LINK, Action, IN, OUT};
 use crate::fwd::{self, IFACE0};
 
 pub const MTU: usize = 1500;
@@ -86,9 +90,11 @@ impl RxToken for Rx {
 }
 
 /// Whether an IPv4 packet that reached a link with address `own` (address,
-/// prefix) is for another host: then it is forwarded. Broadcast, multicast
-/// and loopback stay; so does everything while the link has no address
-/// (DHCP's offer is sent to the address offered).
+/// prefix) is for another host: then it is forwarded. Broadcast, multicast,
+/// loopback and the Tab5's addresses on every link stay (each interface
+/// also has the other links' addresses, `Stack::sync_addrs`); so does
+/// everything while the link has no address (DHCP's offer is sent to the
+/// address offered).
 pub fn transit(ip: &[u8], own: Option<(u32, u8)>) -> bool {
     let Some((addr, prefix)) = own else { return false };
     if ip.len() < 20 || ip[0] >> 4 != 4 {
@@ -97,7 +103,7 @@ pub fn transit(ip: &[u8], own: Option<(u32, u8)>) -> bool {
     let dst = fwd::be32(&ip[16..20]);
     let host_bits = if prefix >= 32 { 0 } else { u32::MAX >> prefix };
     let subnet_broadcast = dst & !host_bits == addr & !host_bits && dst & host_bits == host_bits;
-    !(dst == addr || dst == u32::MAX || subnet_broadcast || dst >> 28 == 0xE || dst >> 24 == 127)
+    !(dst == addr || fwd::is_own(dst) || dst == u32::MAX || subnet_broadcast || dst >> 28 == 0xE || dst >> 24 == 127)
 }
 
 // ---- interface 0: loopback and the host link ----
@@ -133,6 +139,9 @@ impl TxToken for LinkTx<'_> {
         if len >= 20 && buf[16] != 127
             && let Some(h) = &links.host
         {
+            if filter::check(OUT, ANY_LINK, IFACE0 as u8, &buf[..len]) != Action::Pass {
+                return r;
+            }
             if h.write(&buf[..len]).is_ok() {
                 links.to_host += 1;
             }
@@ -157,10 +166,18 @@ impl Device for Links {
         loop {
             out.len = h.read(&mut out.frame[..MTU]).ok()?;
             self.from_host += 1;
-            if !transit(&out.frame[..out.len], Some((HOST_ADDR, HOST_PREFIX))) {
-                return Some((out, LinkTx(self)));
+            let ip = &out.frame[..out.len];
+            if transit(ip, Some((HOST_ADDR, HOST_PREFIX))) {
+                fwd::inbox().push(IFACE0 as u8, ip);
+                continue;
             }
-            fwd::inbox().push(IFACE0 as u8, &out.frame[..out.len]);
+            match filter::check(IN, IFACE0 as u8, ANY_LINK, ip) {
+                Action::Pass => return Some((out, LinkTx(self))),
+                Action::Drop => {}
+                Action::Reject => {
+                    fwd::rejects().push(IFACE0 as u8, ip);
+                }
+            }
         }
     }
 
@@ -251,6 +268,9 @@ impl TxToken for EthTx<'_> {
         let mut buf = [0u8; ETH_FRAME];
         let r = f(&mut buf[..len]);
         let nic = self.0;
+        if len > ETH_HDR && buf[12..14] == ETHERTYPE_IPV4 && filter::check(OUT, ANY_LINK, nic.link as u8, &buf[ETH_HDR..len]) != Action::Pass {
+            return r;
+        }
         if nic.port.write(&buf[..len]) {
             nic.tx += 1;
         } else {
@@ -281,11 +301,22 @@ impl Device for EthNic {
                     fwd::arp().learn(self.link, ip, f[22..28].try_into().unwrap());
                 }
             }
-            if f[..6] == self.mac {
+            let to_me = f[..6] == self.mac;
+            if to_me {
                 self.rx_unicast += 1;
-                if ethertype == ETHERTYPE_IPV4 && transit(&f[ETH_HDR..], self.own) {
+            }
+            if ethertype == ETHERTYPE_IPV4 && (to_me || f[0] & 1 != 0) {
+                if to_me && transit(&f[ETH_HDR..], self.own) {
                     fwd::inbox().push(self.link as u8, f);
                     continue;
+                }
+                match filter::check(IN, self.link as u8, ANY_LINK, &f[ETH_HDR..]) {
+                    Action::Pass => {}
+                    Action::Drop => continue,
+                    Action::Reject => {
+                        fwd::rejects().push(self.link as u8, f);
+                        continue;
+                    }
                 }
             }
             return Some((out, EthTx(self)));

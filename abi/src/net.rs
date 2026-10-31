@@ -103,3 +103,26 @@ pub fn request(op: u8, socket: u16, a: u32, b: u32) -> [u8; REQUEST_SIZE] {
     r[8..12].copy_from_slice(&b.to_le_bytes());
     r
 }
+
+/// The network service's control channel (N4, doc/24 §4): `svc:netctl`,
+/// for the filter's rules. One client at a time; needs `--permit
+/// svc:netctl`. A request is `u8 op` and, for LINE, one line of rule text
+/// (doc/24 §3); the reply is `u32 status | u32 v0 | u32 v1` as for `svc:net`.
+///
+/// | op | reply v0 |
+/// |---|---|
+/// | BEGIN | – (starts a new rule set) |
+/// | LINE | – |
+/// | COMMIT | rules in the set; `BAD_REQUEST` with v0 = the first bad line |
+/// | CLEAR | – (no rules, every policy pass) |
+/// | STATS | – (the service logs each rule's count) |
+///
+/// COMMIT puts the whole set in force between two packets.
+pub mod ctl {
+    pub const SERVICE: &str = "netctl";
+    pub const BEGIN: u8 = 1;
+    pub const LINE: u8 = 2;
+    pub const COMMIT: u8 = 3;
+    pub const CLEAR: u8 = 4;
+    pub const STATS: u8 = 5;
+}

@@ -10,17 +10,21 @@
 //! - with `run net 1`, the test LAN (`test0`, 192.168.50.1/24, whose peer
 //!   192.168.50.2 lives in this service too, `testlan`).
 //!
-//! Packets for other hosts are forwarded between the links (`fwd`). Clients
+//! Packets for other hosts are forwarded between the links (`fwd`); every
+//! packet passes the filter (`filter`), whose rules come over `svc:netctl`
+//! (`rules`). Clients
 //! on `svc:net` get a 64 KiB slice of shared memory for data and use TCP and
 //! UDP sockets, ping and DNS through `t5_abi::net` requests. A socket that
 //! listens on every link is one smoltcp socket per interface. No allocator:
 //! socket buffers are a static pool.
 //!
-//! Built with `--permit shm --permit listen:net --permit netdev:host
-//! --permit netdev:wlan0`.
+//! Built with `--permit shm --permit listen:net --permit listen:netctl
+//! --permit netdev:host --permit netdev:wlan0`.
 
+mod filter;
 mod fwd;
 mod link;
+mod rules;
 mod testlan;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
@@ -124,13 +128,15 @@ pub struct EthLink {
     pub router: Option<u32>,
     /// While it has no address: when to log the counters next.
     report_at: u64,
+    /// Its address changed: the interfaces' addresses are to be redone.
+    changed: bool,
 }
 
 impl EthLink {
     fn new(link: usize, port: Port, mac: [u8; 6]) -> EthLink {
         let mut dev = EthNic { link, port, mac, own: None, rx: 0, rx_unicast: 0, tx: 0, tx_dropped: 0 };
         let iface = Interface::new(Config::new(HardwareAddress::Ethernet(EthernetAddress(mac))), &mut dev, now());
-        EthLink { iface, dev, sockets: SocketSet::new(eth_storage(link)), dhcp: None, dns: None, router: None, report_at: time_ns() + 5_000_000_000 }
+        EthLink { iface, dev, sockets: SocketSet::new(eth_storage(link)), dhcp: None, dns: None, router: None, report_at: time_ns() + 5_000_000_000, changed: true }
     }
 
     fn set_addr(&mut self, addr: u32, prefix: u8, router: Option<u32>) {
@@ -148,6 +154,7 @@ impl EthLink {
         }
         self.dev.own = Some((addr, prefix));
         self.router = router;
+        self.changed = true;
     }
 
     /// Applies what DHCP says (address, default route, DNS servers).
@@ -183,6 +190,7 @@ impl EthLink {
                 self.iface.routes_mut().remove_default_ipv4_route();
                 self.dev.own = None;
                 self.router = None;
+                self.changed = true;
                 event!(Info, "net.dhcp_lost", link = name);
             }
             None => {}
@@ -289,6 +297,9 @@ impl Stack {
                 }
                 e.dhcp();
             }
+            if self.eth.iter().flatten().any(|e| e.changed) {
+                self.sync_addrs();
+            }
             if let Some(p) = &mut self.peer {
                 p.poll();
             }
@@ -299,6 +310,40 @@ impl Stack {
             }
         }
         self.sweep();
+    }
+
+    /// Gives each interface, besides its own addresses, the Tab5's
+    /// addresses on the other links (/32): a packet to any of them is
+    /// taken by the link it arrives on and answered there (doc/24 §5).
+    fn sync_addrs(&mut self) {
+        let own: [Option<(u32, u8)>; IFACES] = core::array::from_fn(|k| self.link_addr(k));
+        fwd::set_own(core::array::from_fn(|k| own[k].map(|(a, _)| a)));
+        let cidr = |a: u32, len: u8| IpCidr::new(Ipv4Address::from_bits(a).into(), len);
+        let others = move |k: usize| (0..IFACES).filter(move |&j| j != k).filter_map(move |j| own[j].map(|(a, _)| a));
+        let has_host = self.dev.host.is_some();
+        self.iface.update_ip_addrs(|a| {
+            a.clear();
+            let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+            if has_host {
+                let _ = a.push(cidr(HOST_ADDR, HOST_PREFIX));
+            }
+            for x in others(IFACE0) {
+                let _ = a.push(cidr(x, 32));
+            }
+        });
+        for e in self.eth.iter_mut().flatten() {
+            let k = e.dev.link;
+            e.changed = false;
+            e.iface.update_ip_addrs(|a| {
+                a.clear();
+                if let Some((p, len)) = own[k] {
+                    let _ = a.push(cidr(p, len));
+                    for x in others(k) {
+                        let _ = a.push(cidr(x, 32));
+                    }
+                }
+            });
+        }
     }
 
     /// The earliest time an interface wants to be polled again.
@@ -749,6 +794,42 @@ impl Stack {
     }
 }
 
+/// One `svc:netctl` request.
+fn control(staging: &mut rules::Staging, m: &[u8]) -> [u8; proto::REPLY_SIZE] {
+    match m.first().copied() {
+        Some(proto::ctl::BEGIN) => {
+            *staging = rules::Staging::new();
+            reply(status::OK, 0, 0)
+        }
+        Some(proto::ctl::LINE) => match core::str::from_utf8(&m[1..]) {
+            Ok(text) => {
+                staging.line(text);
+                reply(status::OK, 0, 0)
+            }
+            Err(_) => reply(status::BAD_REQUEST, staging.lines + 1, 0),
+        },
+        Some(proto::ctl::COMMIT) => match staging.error {
+            Some(line) => {
+                event!(Warn, "net.rules_rejected", line = line);
+                reply(status::BAD_REQUEST, line, 0)
+            }
+            None => {
+                filter::replace(&staging.set);
+                reply(status::OK, staging.set.len as u32, 0)
+            }
+        },
+        Some(proto::ctl::CLEAR) => {
+            filter::replace(&filter::Ruleset::OPEN);
+            reply(status::OK, 0, 0)
+        }
+        Some(proto::ctl::STATS) => {
+            filter::log_stats();
+            reply(status::OK, 0, 0)
+        }
+        _ => reply(status::BAD_REQUEST, 0, 0),
+    }
+}
+
 fn reply(status: u32, v0: u32, v1: u32) -> [u8; proto::REPLY_SIZE] {
     let mut r = [0u8; proto::REPLY_SIZE];
     r[0..4].copy_from_slice(&status.to_le_bytes());
@@ -777,6 +858,9 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let pool_shm = Shm::alloc(CLIENTS * proto::SLICE).map_err(|_| 1u32)?;
     let pool = pool_shm.map().map_err(|_| 2u32)?;
     let l = Listener::open(proto::SERVICE).map_err(|_| 3u32)?;
+    let ctl_listener = Listener::open(proto::ctl::SERVICE).ok();
+    let mut ctl: Option<Channel> = None;
+    let mut staging = rules::Staging::new();
 
     let host = Handle::open(netdev::HOST, rights::READ | rights::WRITE | rights::WAIT).ok();
     let mut dev = Links { host, to_host: 0, from_host: 0 };
@@ -825,11 +909,24 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let mut msg = [0u8; chan::MSG_MAX];
     loop {
         stack.poll();
-        // The listener, the links (frames arriving), the clients.
-        let mut hs = [0u32; 3 + CLIENTS];
-        let mut who = [usize::MAX; 3 + CLIENTS];
+        // The listeners, the links (frames arriving), the control client,
+        // the clients.
+        let mut hs = [0u32; 6 + CLIENTS];
+        let mut who = [usize::MAX; 6 + CLIENTS];
         hs[0] = l.0.raw();
         let mut n = 1;
+        let mut ctl_at = (usize::MAX, usize::MAX);
+        if let Some(cl) = &ctl_listener {
+            hs[n] = cl.0.raw();
+            ctl_at.0 = n;
+            n += 1;
+        }
+        if let Some(c) = &ctl {
+            hs[n] = c.0.raw();
+            ctl_at.1 = n;
+            n += 1;
+        }
+        let first_link = n;
         let wifi = stack.eth[WLAN - 1].as_ref().and_then(|w| w.dev.port.handle());
         for h in [stack.dev.host.as_ref(), wifi].into_iter().flatten() {
             hs[n] = h.raw();
@@ -850,7 +947,27 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             Err(Error::TimedOut) => continue,
             Err(_) => return Err(4),
         };
-        if ev.index > 0 && ev.index < links {
+        if ev.index == ctl_at.0 {
+            if let Some(c) = ctl_listener.as_ref().and_then(|cl| cl.accept().ok())
+                && ctl.is_none()
+            {
+                ctl = Some(c);
+            }
+            continue;
+        }
+        if ev.index == ctl_at.1 {
+            if ev.kind == chan::PEER_CLOSED {
+                ctl = None;
+                continue;
+            }
+            let c = ctl.as_ref().unwrap();
+            while let Ok(len) = c.0.read(&mut msg) {
+                let r = control(&mut staging, &msg[..len]);
+                let _ = c.send(&r);
+            }
+            continue;
+        }
+        if ev.index >= first_link && ev.index < links {
             continue; // the next poll takes the frames
         }
         if ev.index == 0 {

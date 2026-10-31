@@ -3,12 +3,16 @@
 //! is no second real network (t5emu, or the Tab5 with only the host link).
 //! `net` is 192.168.50.1/24 on it; the peer is 192.168.50.2/24 with its
 //! default route through `net`, answers pings, and echoes TCP on port 7777.
+//! It also starts traffic of its own, for the filter (doc/24 §6): every
+//! `PROBE_NS` a ping, in turn to the Tab5 (10.55.0.2) and to the PC
+//! (10.55.0.1), counting the replies (`net.peer_probes`).
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, TxToken};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{icmp, tcp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Address};
+use t5_rt::{event, time_ns};
 
 use crate::link::{ETH_FRAME, Rx, from_peer, to_peer};
 use crate::now;
@@ -21,6 +25,9 @@ pub const NET_MAC: [u8; 6] = [0x02, 0x74, 0x35, 0, 0, 1];
 const PEER_MAC: [u8; 6] = [0x02, 0x74, 0x35, 0, 0, 2];
 pub const ECHO_PORT: u16 = 7777;
 const ECHO_BUF: usize = 16 << 10;
+const PROBE_NS: u64 = 2_000_000_000;
+const PROBE_IDENT: u16 = 0x5050;
+const PROBE_TARGETS: [IpAddress; 2] = [IpAddress::v4(10, 55, 0, 2), IpAddress::v4(10, 55, 0, 1)];
 
 /// The peer's side of the rings.
 struct PeerDev;
@@ -58,7 +65,11 @@ impl Device for PeerDev {
     }
 }
 
-static mut STORAGE: [SocketStorage<'static>; 1] = [SocketStorage::EMPTY; 1];
+static mut STORAGE: [SocketStorage<'static>; 2] = [SocketStorage::EMPTY; 2];
+static mut PROBE_RX: [u8; 512] = [0; 512];
+static mut PROBE_TX: [u8; 512] = [0; 512];
+static mut PROBE_RX_META: [icmp::PacketMetadata; 4] = [icmp::PacketMetadata::EMPTY; 4];
+static mut PROBE_TX_META: [icmp::PacketMetadata; 4] = [icmp::PacketMetadata::EMPTY; 4];
 static mut ECHO_RX: [u8; ECHO_BUF] = [0; ECHO_BUF];
 static mut ECHO_TX: [u8; ECHO_BUF] = [0; ECHO_BUF];
 
@@ -67,6 +78,11 @@ pub struct Peer {
     dev: PeerDev,
     sockets: SocketSet<'static>,
     echo: SocketHandle,
+    probe: SocketHandle,
+    probe_at: u64,
+    /// Pings sent and answered, per target.
+    sent: [u32; 2],
+    answered: [u32; 2],
 }
 
 impl Peer {
@@ -80,12 +96,47 @@ impl Peer {
         let mut sockets = SocketSet::new(unsafe { &mut (&mut *core::ptr::addr_of_mut!(STORAGE))[..] });
         let (rx, tx) = unsafe { (&mut (&mut *core::ptr::addr_of_mut!(ECHO_RX))[..], &mut (&mut *core::ptr::addr_of_mut!(ECHO_TX))[..]) };
         let echo = sockets.add(tcp::Socket::new(tcp::SocketBuffer::new(rx), tcp::SocketBuffer::new(tx)));
-        Peer { iface, dev, sockets, echo }
+        let probe = unsafe {
+            let rx = icmp::PacketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(PROBE_RX_META))[..], &mut (&mut *core::ptr::addr_of_mut!(PROBE_RX))[..]);
+            let tx = icmp::PacketBuffer::new(&mut (&mut *core::ptr::addr_of_mut!(PROBE_TX_META))[..], &mut (&mut *core::ptr::addr_of_mut!(PROBE_TX))[..]);
+            sockets.add(icmp::Socket::new(rx, tx))
+        };
+        let _ = sockets.get_mut::<icmp::Socket>(probe).bind(icmp::Endpoint::Ident(PROBE_IDENT));
+        Peer { iface, dev, sockets, echo, probe, probe_at: time_ns() + PROBE_NS, sent: [0; 2], answered: [0; 2] }
     }
 
-    /// Runs the peer: its stack, and the echo server (one connection at a
-    /// time, listening again when it ends).
+    /// Pings the next target when it is time; counts the replies.
+    fn probe(&mut self) {
+        let s = self.sockets.get_mut::<icmp::Socket>(self.probe);
+        while let Ok((buf, from)) = s.recv() {
+            let Ok(p) = Icmpv4Packet::new_checked(buf) else { continue };
+            if let Ok(Icmpv4Repr::EchoReply { ident: PROBE_IDENT, .. }) = Icmpv4Repr::parse(&p, &Default::default())
+                && let Some(t) = PROBE_TARGETS.iter().position(|a| *a == from)
+            {
+                self.answered[t] += 1;
+            }
+        }
+        let now = time_ns();
+        if now < self.probe_at {
+            return;
+        }
+        self.probe_at = now + PROBE_NS;
+        let n = self.sent[0] + self.sent[1];
+        let t = (n % 2) as usize;
+        let repr = Icmpv4Repr::EchoRequest { ident: PROBE_IDENT, seq_no: n as u16, data: b"test0 peer" };
+        if let Ok(buf) = s.send(repr.buffer_len(), PROBE_TARGETS[t]) {
+            repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &Default::default());
+            self.sent[t] += 1;
+        }
+        if n % 10 == 9 {
+            event!(Info, "net.peer_probes", sent_tab5 = self.sent[0], answered_tab5 = self.answered[0], sent_pc = self.sent[1], answered_pc = self.answered[1]);
+        }
+    }
+
+    /// Runs the peer: its stack, its pings, and the echo server (one
+    /// connection at a time, listening again when it ends).
     pub fn poll(&mut self) {
+        self.probe();
         for _ in 0..16 {
             let moved = self.iface.poll(now(), &mut self.dev, &mut self.sockets);
             let s = self.sockets.get_mut::<tcp::Socket>(self.echo);

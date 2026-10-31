@@ -1,0 +1,165 @@
+//! The rule text (doc/24 §3), one rule or policy per line:
+//!
+//! ```text
+//! # comment
+//! policy in drop
+//! pass in on host
+//! pass in state established,related
+//! pass forward on host out test0
+//! reject in on wlan0 proto tcp port 22 log
+//! drop forward from 192.168.50.0/24 to any
+//! ```
+//!
+//! `ACTION HOOK [on LINK] [out LINK] [proto tcp|udp|icmp] [from CIDR]
+//! [to CIDR] [port N[-M]] [state S[,S]...] [log]`, ACTION one of pass, drop,
+//! reject and HOOK one of in, forward, out. On `out`, `on` names the link
+//! the packet leaves by. `policy HOOK pass|drop` sets what happens when no
+//! rule matches; `policy HOOK drop log` also logs what it drops. Links:
+//! host, wlan0, test0. States: new, established,
+//! related, invalid. CIDR: `any` or A.B.C.D[/LEN]; `port` is the
+//! destination port.
+
+use crate::filter::{self, Action, OUT, Rule, Ruleset, st};
+
+/// What one line holds.
+pub enum Line {
+    Empty,
+    Rule(Rule),
+    Policy(u8, Action, bool),
+}
+
+fn hook(s: &str) -> Option<u8> {
+    filter::HOOK_NAMES.iter().position(|h| *h == s).map(|h| h as u8)
+}
+
+fn action(s: &str) -> Option<Action> {
+    match s {
+        "pass" => Some(Action::Pass),
+        "drop" => Some(Action::Drop),
+        "reject" => Some(Action::Reject),
+        _ => None,
+    }
+}
+
+fn number<T: core::str::FromStr>(s: &str) -> Option<T> {
+    s.parse().ok()
+}
+
+fn ipv4(s: &str) -> Option<u32> {
+    let mut v = 0u32;
+    let mut parts = 0;
+    for p in s.split('.') {
+        v = v << 8 | number::<u8>(p)? as u32;
+        parts += 1;
+    }
+    (parts == 4).then_some(v)
+}
+
+/// (address, prefix length).
+fn cidr(s: &str) -> Option<(u32, u8)> {
+    if s == "any" {
+        return Some((0, 0));
+    }
+    let (a, len) = match s.split_once('/') {
+        Some((a, l)) => (a, number::<u8>(l).filter(|&l| l <= 32)?),
+        None => (s, 32),
+    };
+    Some((ipv4(a)?, len))
+}
+
+fn states(s: &str) -> Option<u8> {
+    let mut m = 0;
+    for p in s.split(',') {
+        m |= match p {
+            "new" => st::NEW,
+            "established" => st::ESTABLISHED,
+            "related" => st::RELATED,
+            "invalid" => st::INVALID,
+            _ => return None,
+        };
+    }
+    Some(m)
+}
+
+pub fn parse_line(line: &str) -> Option<Line> {
+    let line = line.split('#').next().unwrap_or("");
+    let mut w = line.split_ascii_whitespace();
+    let Some(first) = w.next() else { return Some(Line::Empty) };
+    if first == "policy" {
+        let h = hook(w.next()?)?;
+        let a = action(w.next()?).filter(|&a| a != Action::Reject)?;
+        let log = match w.next() {
+            None => false,
+            Some("log") => true,
+            Some(_) => return None,
+        };
+        return w.next().is_none().then_some(Line::Policy(h, a, log));
+    }
+    let mut r = Rule::new(action(first)?, hook(w.next()?)?);
+    while let Some(word) = w.next() {
+        match word {
+            "on" => {
+                let l = filter::link_named(w.next()?)?;
+                if r.hook == OUT { r.out_link = l } else { r.in_link = l }
+            }
+            "out" => r.out_link = filter::link_named(w.next()?)?,
+            "proto" => {
+                r.proto = match w.next()? {
+                    "tcp" => filter::PROTO_TCP,
+                    "udp" => filter::PROTO_UDP,
+                    "icmp" => filter::PROTO_ICMP,
+                    _ => return None,
+                }
+            }
+            "from" => (r.src, r.src_len) = cidr(w.next()?)?,
+            "to" => (r.dst, r.dst_len) = cidr(w.next()?)?,
+            "port" => {
+                let p = w.next()?;
+                (r.port_lo, r.port_hi) = match p.split_once('-') {
+                    Some((lo, hi)) => (number(lo)?, number(hi)?),
+                    None => (number(p)?, number(p)?),
+                };
+                if r.port_lo > r.port_hi {
+                    return None;
+                }
+            }
+            "state" => r.states = states(w.next()?)?,
+            "log" => r.log = true,
+            _ => return None,
+        }
+    }
+    Some(Line::Rule(r))
+}
+
+/// A rule set being sent line by line (`svc:netctl`).
+pub struct Staging {
+    pub set: Ruleset,
+    pub lines: u32,
+    /// The first line that could not be read, or the set is full.
+    pub error: Option<u32>,
+}
+
+impl Staging {
+    pub const fn new() -> Staging {
+        Staging { set: Ruleset::OPEN, lines: 0, error: None }
+    }
+
+    pub fn line(&mut self, text: &str) {
+        self.lines += 1;
+        if self.error.is_some() {
+            return;
+        }
+        match parse_line(text) {
+            Some(Line::Empty) => {}
+            Some(Line::Policy(h, a, log)) => {
+                self.set.policy[h as usize] = a;
+                self.set.policy_log[h as usize] = log;
+            }
+            Some(Line::Rule(r)) if self.set.len < filter::MAX_RULES => {
+                self.set.rules[self.set.len] = r;
+                self.set.len += 1;
+            }
+            _ => self.error = Some(self.lines),
+        }
+    }
+}

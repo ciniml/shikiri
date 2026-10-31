@@ -9,6 +9,7 @@
 use t5_rt::{event, time_ns};
 
 use crate::Stack;
+use crate::filter::{self, Action};
 use crate::link::{ETH_FRAME, ETH_HDR, HOST_ADDR, HOST_PREFIX, MTU, Ring};
 
 /// Interfaces (and links): 0 is loopback with the host link, then the
@@ -20,6 +21,7 @@ pub const IFACES: usize = 3;
 pub const LINK_NAMES: [&str; IFACES] = ["host", "wlan0", "test0"];
 
 const INBOX: usize = 8;
+const REJECTS: usize = 4;
 const ARP_ENTRIES: usize = 32;
 const ARP_TTL_NS: u64 = 300_000_000_000;
 /// Packets waiting for their next hop's MAC address, and for how long.
@@ -31,6 +33,8 @@ const STATS_NS: u64 = 30_000_000_000;
 const PROTO_ICMP: u8 = 1;
 const ICMP_DEST_UNREACHABLE: u8 = 3;
 const ICMP_TIME_EXCEEDED: u8 = 11;
+/// Destination Unreachable's code for a filter's reject.
+const ADMIN_PROHIBITED: u8 = 13;
 
 pub fn be32(b: &[u8]) -> u32 {
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
@@ -54,6 +58,26 @@ static mut INBOX_RING: Ring<INBOX> = Ring::new();
 /// keep their header).
 pub fn inbox() -> &'static mut Ring<INBOX> {
     unsafe { &mut *core::ptr::addr_of_mut!(INBOX_RING) }
+}
+
+static mut OWN: [Option<u32>; IFACES] = [None; IFACES];
+
+/// Records the links' own addresses (`Stack::sync_addrs`).
+pub fn set_own(own: [Option<u32>; IFACES]) {
+    unsafe { *core::ptr::addr_of_mut!(OWN) = own };
+}
+
+/// Whether `a` is one of the Tab5's addresses, on any link.
+pub fn is_own(a: u32) -> bool {
+    unsafe { (*core::ptr::addr_of!(OWN)).contains(&Some(a)) }
+}
+
+static mut REJECT_RING: Ring<REJECTS> = Ring::new();
+
+/// Packets the filter rejected (IN): answered with ICMP Destination
+/// Unreachable, administratively prohibited.
+pub fn rejects() -> &'static mut Ring<REJECTS> {
+    unsafe { &mut *core::ptr::addr_of_mut!(REJECT_RING) }
 }
 
 #[derive(Clone, Copy)]
@@ -186,6 +210,13 @@ impl Stack {
                 self.forward_one(link, &mut buf[off..len]);
             }
         }
+        while let Some((link, len)) = rejects().pop(&mut buf) {
+            let link = link as usize;
+            let off = if link == IFACE0 { 0 } else { ETH_HDR };
+            if len >= off + 20 {
+                self.icmp_error(link, ICMP_DEST_UNREACHABLE, ADMIN_PROHIBITED, &buf[off..len]);
+            }
+        }
         self.flush_pending();
         self.log_stats();
     }
@@ -198,12 +229,20 @@ impl Stack {
             return;
         }
         let p = &mut p[..total];
+        let route = self.route(be32(&p[16..20]));
+        if let Some(r) = route {
+            match filter::check(filter::FORWARD, from as u8, r.link as u8, p) {
+                Action::Pass => {}
+                Action::Drop => return,
+                Action::Reject => return self.icmp_error(from, ICMP_DEST_UNREACHABLE, ADMIN_PROHIBITED, p),
+            }
+        }
         if p[8] <= 1 {
             self.fwd.stats.ttl_expired += 1;
             self.icmp_error(from, ICMP_TIME_EXCEEDED, 0, p);
             return;
         }
-        let Some(route) = self.route(be32(&p[16..20])) else {
+        let Some(route) = route else {
             self.fwd.stats.no_route += 1;
             // Code 0: network unreachable.
             self.icmp_error(from, ICMP_DEST_UNREACHABLE, 0, p);
