@@ -12,6 +12,10 @@ _start:
     csrw mscratch, zero     # 0 = the kernel is running
     # The kernel has no gp-relative data; make stray uses obvious.
     li gp, 0
+    # Other harts (QEMU starts them all here) wait until core 0 lets them
+    # go (doc/33 §2). On the ESP32-P4, Core1 starts at _start_secondary.
+    csrr t0, mhartid
+    bnez t0, 6f
     la sp, __stack_top
     la t0, __bss_start
     la t1, __bss_end
@@ -29,8 +33,25 @@ _start:
 5:  call {kmain}
 3:  wfi
     j 3b
+6:  la t0, {go}
+7:  lw t1, 0(t0)
+    beqz t1, 7b
+    fence
+    j _start_secondary
+
+    .global _start_secondary
+_start_secondary:
+    csrci mstatus, 8
+    csrw mscratch, zero
+    li gp, 0
+    la sp, __stack1_top
+    call {kmain_secondary}
+8:  wfi
+    j 8b
     "#,
     kmain = sym crate::kmain,
+    kmain_secondary = sym crate::smp::kmain_secondary,
+    go = sym crate::smp::SECONDARY_GO,
     paint = const STACK_PAINT,
 );
 

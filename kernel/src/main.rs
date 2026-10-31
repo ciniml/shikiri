@@ -26,6 +26,7 @@ mod process;
 mod sched;
 mod screen;
 mod shm;
+mod smp;
 mod store;
 mod time;
 
@@ -134,6 +135,7 @@ pub extern "C" fn kmain() -> ! {
         panic!("PMP entry {i} is locked; rebuild the bootloader with BOOTLOADER_REGION_PROTECTION_ENABLE=n");
     }
     pmp::reset();
+    smp::start();
 
     let window = Current::map_flash();
     let store = window.map(|window| {

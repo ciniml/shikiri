@@ -30,7 +30,8 @@ APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS)) $(XIP_TARGET)/xipcheck
 SCHEMAS    := $(BUILD)/t5log.schemas
 
 QEMU       ?= qemu-system-riscv32
-QEMU_FLAGS := -M virt -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
+# Two harts, as the Tab5's two cores (doc/33).
+QEMU_FLAGS := -M virt -smp 2 -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios none \
               -no-reboot
 # The app store in place of flash: RAM at 0x8400_0000 + flash offset
 # (platform/virt.rs FLASH_IMAGE).

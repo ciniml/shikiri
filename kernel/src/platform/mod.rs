@@ -31,6 +31,12 @@ pub trait Platform {
     /// Early hardware setup: watchdogs, console, the timer and its interrupt.
     /// Interrupts stay globally disabled in M-mode (MIE=0).
     fn init();
+    /// Starts the second core at `entry` (doc/33); false if there is none.
+    fn start_secondary(_entry: usize) -> bool {
+        false
+    }
+    /// The second core's own setup (its interrupt controller), on it.
+    fn init_secondary() {}
     /// Raw byte output for log frames (doc/12 §2.4). Never blocks for long.
     /// Returns false if some bytes were dropped (no reader).
     fn console_write(bytes: &[u8]) -> bool;

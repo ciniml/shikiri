@@ -113,6 +113,13 @@ const ROM_UPDATE_CPU_FREQUENCY: u32 = 0x4FC0_0044;
 const FLASH_WRITABLE: [core::ops::Range<u32>; 2] = [0xD000..0xF000, 0x21_0000..0x100_0000];
 /// esp_rom_software_reset_system (esp32p4.rom.ld:52).
 const ROM_SOFTWARE_RESET: u32 = 0x4FC0_0094;
+/// ets_set_appcpu_boot_addr (esp32p4.rom.ld:57) and Core1's clock and reset
+/// (hp_sys_clkrst_reg.h:147,179,3064,3124).
+const ROM_SET_APPCPU_BOOT_ADDR: u32 = 0x4FC0_00A8;
+const HP_SYS_CLKRST_SOC_CLK_CTRL0: u32 = 0x500E_6014;
+const CORE1_CPU_CLK_EN: u32 = 1 << 4;
+const HP_SYS_CLKRST_HP_RST_EN0: u32 = 0x500E_60C0;
+const RST_EN_CORE1_GLOBAL: u32 = 1 << 8;
 /// Typical times of a 4 KiB erase and a page program on a 128 Mbit NOR
 /// flash (W25Q128JV datasheet: tSE 45 ms, tPP 0.4 ms). The Tab5's chip is
 /// not known yet; the kernel measures it (flashtest).
@@ -154,6 +161,8 @@ pub struct Cpu {
     pub in_trap: bool,
     pub instret: u64,
     pub mhcr: u32,
+    /// mhartid: 0 or 1 (doc/33).
+    pub hart: u32,
 }
 
 impl Cpu {
@@ -181,6 +190,7 @@ impl Cpu {
             in_trap: false,
             instret: 0,
             mhcr: 0,
+            hart: 0,
         }
     }
 
@@ -240,8 +250,26 @@ impl Cpu {
     }
 }
 
-pub struct Machine {
+/// The core that is not running at the moment (doc/33 §3): the machine
+/// runs one core at a time, `QUANTUM` instructions each, swapping its state
+/// and its CLIC in.
+pub struct Core {
     pub cpu: Cpu,
+    pub clic: crate::periph::Clic,
+    /// In `wfi` with nothing pending: skipped until something is.
+    pub waiting: bool,
+}
+
+/// Instructions a core runs before the other gets its turn.
+const QUANTUM: u32 = 1024;
+
+pub struct Machine {
+    /// The core running now (core 0 until core 1 starts).
+    pub cpu: Cpu,
+    /// The other core, once core 1 has been started.
+    pub other: Option<Box<Core>>,
+    /// The running core is in `wfi` with nothing pending.
+    pub waiting: bool,
     pub bus: Bus,
     /// Print every trap to stderr.
     pub trace_traps: bool,
@@ -264,10 +292,67 @@ impl Machine {
     /// The CPU state after a reset (the bus is reset separately).
     pub fn reset_cpu(&mut self, entry: u32) {
         self.cpu = Cpu::new(entry);
+        self.other = None;
+        self.waiting = false;
+        self.bus.periph.core = 0;
+        self.bus.periph.clic = Default::default();
+    }
+
+    /// Lets the other core run (no-op while there is only one).
+    fn switch_core(&mut self) {
+        let Some(o) = self.other.as_mut() else { return };
+        core::mem::swap(&mut self.cpu, &mut o.cpu);
+        core::mem::swap(&mut self.bus.periph.clic, &mut o.clic);
+        core::mem::swap(&mut self.waiting, &mut o.waiting);
+        self.bus.periph.core = self.cpu.hart as usize;
+    }
+
+    /// Whether the running core has an interrupt pending that ends its
+    /// `wfi` (any enabled pending line, whatever MIE says).
+    fn wake_pending(&mut self) -> bool {
+        let ticks = self.bus.ticks();
+        self.bus.periph.route_interrupts(ticks);
+        self.best_pending(None).is_some()
+    }
+
+    /// Both cores wait: skips to the first time either could wake.
+    fn skip_to_wake(&mut self) -> Result<(), Stop> {
+        let ticks = self.bus.ticks();
+        let mine = self.bus.periph.next_wake(ticks);
+        self.switch_core();
+        let theirs = self.bus.periph.next_wake(ticks);
+        self.switch_core();
+        match mine.into_iter().chain(theirs).min() {
+            Some(t) => {
+                let at = self.bus.cycles_for_ticks(t);
+                self.bus.cycles = self.bus.cycles.max(at);
+                Ok(())
+            }
+            None if self.bus.periph.lp_wdt.enabled() => Err(Stop::Watchdog),
+            None => Err(Stop::Halted { pc: self.cpu.pc }),
+        }
+    }
+
+    /// One turn of the core running now: wakes it if it may, else gives
+    /// the turn away (or skips time when both wait).
+    fn dual_turn(&mut self) -> Result<bool, Stop> {
+        if !self.waiting {
+            return Ok(true);
+        }
+        if self.wake_pending() {
+            self.waiting = false;
+            return Ok(true);
+        }
+        let other_waits = self.other.as_ref().is_some_and(|o| o.waiting);
+        if other_waits {
+            self.skip_to_wake()?;
+        }
+        self.switch_core();
+        Ok(false)
     }
 
     pub fn new(bus: Bus, entry: u32) -> Machine {
-        Machine { cpu: Cpu::new(entry), bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_down_pending: Default::default(), rtt_poll_interval: 4096 }
+        Machine { cpu: Cpu::new(entry), other: None, waiting: false, bus, trace_traps: false, rtt_cb: None, rtt_output: Vec::new(), rtt_down_pending: Default::default(), rtt_poll_interval: 4096 }
     }
 
     /// Runs until something stops the emulator or `limit_cycles` is reached.
@@ -275,7 +360,25 @@ impl Machine {
     /// or `hook` (called every 4096 instructions) returns false.
     pub fn run(&mut self, limit_cycles: u64, hook: &mut dyn FnMut(&mut Machine) -> bool) -> Stop {
         let mut wdt_check = 0u32;
+        let mut turn = 0u32;
         loop {
+            if self.other.is_some() {
+                match self.dual_turn() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        turn = 0;
+                        continue;
+                    }
+                    Err(s) => return s,
+                }
+                turn += 1;
+                if turn >= QUANTUM {
+                    turn = 0;
+                    if !self.other.as_ref().is_some_and(|o| o.waiting) || self.waiting {
+                        self.switch_core();
+                    }
+                }
+            }
             if let Err(s) = self.step() {
                 return s;
             }
@@ -470,6 +573,11 @@ impl Machine {
         if self.best_pending(None).is_some() {
             return Ok(());
         }
+        // Two cores: this one waits, the run loop gives the other its turn.
+        if self.other.is_some() {
+            self.waiting = true;
+            return Ok(());
+        }
         let ticks = self.bus.ticks();
         match self.bus.periph.next_wake(ticks) {
             Some(t) => {
@@ -553,6 +661,18 @@ impl Machine {
                 self.bus.l2_suspended = false;
             }
             ROM_SOFTWARE_RESET => return Err(Ex::Stop(Stop::SoftwareReset)),
+            // Core 1 starts at a0 once its clock is on and its reset off
+            // (doc/32 §1, doc/33).
+            ROM_SET_APPCPU_BOOT_ADDR => {
+                let p = &self.bus.periph;
+                let clk = p.peek(HP_SYS_CLKRST_SOC_CLK_CTRL0) & CORE1_CPU_CLK_EN != 0;
+                let out_of_reset = p.peek(HP_SYS_CLKRST_HP_RST_EN0) & RST_EN_CORE1_GLOBAL == 0;
+                if a0 != 0 && clk && out_of_reset && self.other.is_none() {
+                    let mut cpu = Cpu::new(a0);
+                    cpu.hart = 1;
+                    self.other = Some(Box::new(Core { cpu, clic: Default::default(), waiting: false }));
+                }
+            }
             _ => return Err(Ex::Stop(Stop::UnknownRom { pc })),
         }
         // Call overhead, plus roughly one cycle per cache line for the
@@ -603,7 +723,18 @@ impl Machine {
         if self.cpu.reservation == Some(addr & !3) {
             self.cpu.reservation = None;
         }
+        self.break_other_reservation(addr);
         Ok(())
+    }
+
+    /// A store by this core ends the other core's LR reservation on the
+    /// same word.
+    fn break_other_reservation(&mut self, addr: u32) {
+        if let Some(o) = self.other.as_mut()
+            && o.cpu.reservation == Some(addr & !3)
+        {
+            o.cpu.reservation = None;
+        }
     }
 
     // ---- execution -----------------------------------------------------------
@@ -883,7 +1014,8 @@ impl Machine {
             0x7C1 => c.mhcr,
             0x3A0..=0x3A3 => c.pmp.read_cfg((csr - 0x3A0) as usize),
             0x3B0..=0x3BF => c.pmp.read_addr((csr - 0x3B0) as usize),
-            0xF11..=0xF14 => 0,
+            0xF14 => c.hart,
+            0xF11..=0xF13 => 0,
             _ => return None,
         })
     }

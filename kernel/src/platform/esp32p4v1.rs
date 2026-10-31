@@ -31,6 +31,13 @@ const USJ_IRQ: usize = 3 + CLIC_EXT_INTR_NUM_OFFSET;
 /// ETS_SDIO_HOST_INTR_SOURCE: the SDMMC host, whose only enabled interrupt
 /// is the C6's SDIO card interrupt (doc/22 §8), routed to CPU line 4.
 const SDIO_SOURCE: usize = 23;
+// Core1's clock and reset (hp_sys_clkrst_reg.h:147,179,3064,3124) and the
+// ROM call that tells it where to start (esp32p4.rom.ld:57; doc/32 §1).
+const HP_SYS_CLKRST_SOC_CLK_CTRL0: usize = 0x500E_6014;
+const CORE1_CPU_CLK_EN: u32 = 1 << 4;
+const HP_SYS_CLKRST_HP_RST_EN0: usize = 0x500E_60C0;
+const RST_EN_CORE1_GLOBAL: u32 = 1 << 8;
+const ROM_SET_APPCPU_BOOT_ADDR: usize = 0x4FC0_00A8;
 const SDIO_IRQ: usize = 4 + CLIC_EXT_INTR_NUM_OFFSET;
 /// How long to wait for room in the FIFO before deciding that nobody reads
 /// the CDC port. Longer than the host's 1 ms USB polling interval: with a
@@ -400,6 +407,21 @@ impl Platform for Esp32p4v1 {
     const SERVE: bool = true;
     const TIMER_HZ: u64 = 16_000_000;
     const TIMER_IRQ: usize = TIMER_CLIC_INDEX;
+
+    fn start_secondary(entry: usize) -> bool {
+        unsafe {
+            wr(HP_SYS_CLKRST_SOC_CLK_CTRL0, rd(HP_SYS_CLKRST_SOC_CLK_CTRL0) | CORE1_CPU_CLK_EN);
+            wr(HP_SYS_CLKRST_HP_RST_EN0, rd(HP_SYS_CLKRST_HP_RST_EN0) & !RST_EN_CORE1_GLOBAL);
+            let set_boot: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_SET_APPCPU_BOOT_ADDR);
+            set_boot(entry as u32);
+        }
+        true
+    }
+
+    fn init_secondary() {
+        // Core1's own CLIC: let every enabled level through, as on core 0.
+        unsafe { wr(CLIC_INT_THRESH, 0) };
+    }
 
     fn init() {
         unsafe {

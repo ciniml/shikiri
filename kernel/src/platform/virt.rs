@@ -34,6 +34,13 @@ impl Platform for Virt {
         crate::arch::riscv32::csr::write_csr!("mie", crate::arch::riscv32::csr::mie::MTIE);
     }
 
+    /// Hart 1 waits in `_start` (QEMU starts every hart there); with
+    /// `-smp 1` there is none and `smp::start` times out.
+    fn start_secondary(_entry: usize) -> bool {
+        crate::smp::SECONDARY_GO.store(1, core::sync::atomic::Ordering::Release);
+        true
+    }
+
     fn now() -> u64 {
         // On RV32 the halves are read separately; retry if hi changed.
         loop {

@@ -6,6 +6,7 @@
 pub const USJ_BASE: u32 = 0x500D_2000;
 pub const SYSTIMER_BASE: u32 = 0x500E_2000;
 pub const INTMTX_BASE: u32 = 0x500D_6000;
+pub const INTMTX1_BASE: u32 = 0x500D_6800;
 pub const LP_WDT_BASE: u32 = 0x5011_6000;
 pub const CLIC_BASE: u32 = 0x2080_0000;
 pub const CLIC_CTRL_BASE: u32 = 0x2080_1000;
@@ -257,7 +258,8 @@ impl Systimer {
     }
 }
 
-/// Core 0 interrupt matrix: one map register per source (interrupt_core0_reg.h).
+/// A core's interrupt matrix: one map register per source
+/// (interrupt_core0_reg.h; core 1's at +0x800, reg_base.h:197-198).
 pub struct Intmtx {
     pub map: [u32; 128],
 }
@@ -467,7 +469,12 @@ pub struct Peripherals {
     pub usj: Usj,
     pub systimer: Systimer,
     pub intmtx: Intmtx,
+    /// Core 1's interrupt matrix (doc/33).
+    pub intmtx1: Intmtx,
+    /// The CLIC of the core running now (the machine swaps them).
     pub clic: Clic,
+    /// The core running now: which interrupt matrix routes into `clic`.
+    pub core: usize,
     pub lp_wdt: LpWdt,
     /// HPCORE0 reset cause reported by LP_CLKRST.
     pub reset_cause: u32,
@@ -482,6 +489,7 @@ impl Peripherals {
             a if (USJ_BASE..USJ_BASE + 0x1000).contains(&a) => self.usj.read(a - USJ_BASE),
             a if (SYSTIMER_BASE..SYSTIMER_BASE + 0x1000).contains(&a) => self.systimer.read(a - SYSTIMER_BASE, ticks),
             a if (INTMTX_BASE..INTMTX_BASE + 0x200).contains(&a) => self.intmtx.map[((a - INTMTX_BASE) / 4) as usize],
+            a if (INTMTX1_BASE..INTMTX1_BASE + 0x200).contains(&a) => self.intmtx1.map[((a - INTMTX1_BASE) / 4) as usize],
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.read(a - LP_WDT_BASE),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.read(a),
             a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.read(a - I2C1_BASE),
@@ -500,6 +508,9 @@ impl Peripherals {
         match addr {
             a if (USJ_BASE..USJ_BASE + 0x1000).contains(&a) => self.usj.write(a - USJ_BASE, v),
             a if (SYSTIMER_BASE..SYSTIMER_BASE + 0x1000).contains(&a) => self.systimer.write(a - SYSTIMER_BASE, v, ticks),
+            a if (INTMTX1_BASE..INTMTX1_BASE + 0x200).contains(&a) => {
+                self.intmtx1.map[((a - INTMTX1_BASE) / 4) as usize] = v & 0x3F;
+            }
             a if (INTMTX_BASE..INTMTX_BASE + 0x200).contains(&a) => {
                 self.intmtx.map[((a - INTMTX_BASE) / 4) as usize] = v & 0x3F
             }
@@ -528,24 +539,25 @@ impl Peripherals {
     /// Recomputes the CLIC input lines from the interrupt sources.
     pub fn route_interrupts(&mut self, ticks: u64) {
         self.systimer.update(ticks);
+        let map = *self.map_of(self.core);
         let mut lines = [false; CLIC_LINES];
         let st = self.systimer.int_st();
         for t in 0..3 {
             if st & (1 << t) != 0 {
-                let idx = self.intmtx.map[SRC_SYSTIMER_TARGET0 + t] as usize;
+                let idx = map[SRC_SYSTIMER_TARGET0 + t] as usize;
                 if idx < CLIC_LINES {
                     lines[idx] = true;
                 }
             }
         }
         if self.dsi.irq(ticks) {
-            let idx = self.intmtx.map[SRC_GDMA] as usize;
+            let idx = map[SRC_GDMA] as usize;
             if idx < CLIC_LINES {
                 lines[idx] = true;
             }
         }
         if self.usj.int_st() != 0 {
-            let idx = self.intmtx.map[SRC_USJ] as usize;
+            let idx = map[SRC_USJ] as usize;
             if idx < CLIC_LINES {
                 lines[idx] = true;
             }
@@ -556,16 +568,27 @@ impl Peripherals {
     /// The earliest tick at which an enabled CLIC line will become pending.
     /// Used by `wfi` to skip ahead.
     pub fn next_wake(&self, ticks: u64) -> Option<u64> {
+        let map = self.map_of(self.core);
         (0..3)
             .filter(|&t| {
-                let idx = self.intmtx.map[SRC_SYSTIMER_TARGET0 + t] as usize;
+                let idx = map[SRC_SYSTIMER_TARGET0 + t] as usize;
                 idx < CLIC_LINES && self.clic.ie[idx]
             })
             .filter_map(|t| self.systimer.next_event(t, ticks))
             .chain(self.dsi.next_event().filter(|_| {
-                let idx = self.intmtx.map[SRC_GDMA] as usize;
+                let idx = map[SRC_GDMA] as usize;
                 idx < CLIC_LINES && self.clic.ie[idx]
             }))
             .min()
+    }
+
+    /// The interrupt matrix of core `core`.
+    fn map_of(&self, core: usize) -> &[u32; 128] {
+        if core == 0 { &self.intmtx.map } else { &self.intmtx1.map }
+    }
+
+    /// A register value nothing models (writes are kept).
+    pub fn peek(&self, addr: u32) -> u32 {
+        self.other.get(&addr).copied().unwrap_or_else(|| initial_value(addr))
     }
 }

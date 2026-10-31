@@ -29,5 +29,6 @@ REGION_ALIAS("REGION_LOG", LP_SRAM);
 REGION_ALIAS("REGION_BSS", RAM_HI);
 /* The scheduler (8 process slots) lives on it (doc/30 §4). */
 KERNEL_STACK = 128K;
+KERNEL_STACK1 = 64K;
 
 INCLUDE kernel-common.ld
