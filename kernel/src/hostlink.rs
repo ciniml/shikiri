@@ -34,6 +34,13 @@ struct Link {
     open: bool,
     received: u32,
     dropped: u32,
+    /// Bytes read from the line, and frames that were not packets.
+    bytes: u32,
+    other: u32,
+    /// Scratch for decoding and encoding (static: the kernel stack is small).
+    decoded: [u8; MTU + 1],
+    plain: [u8; MTU + 1],
+    out: [u8; FRAME_MAX],
 }
 
 static mut LINK: Link = Link {
@@ -47,6 +54,11 @@ static mut LINK: Link = Link {
     open: false,
     received: 0,
     dropped: 0,
+    bytes: 0,
+    other: 0,
+    decoded: [0; MTU + 1],
+    plain: [0; MTU + 1],
+    out: [0; FRAME_MAX],
 };
 
 fn link() -> &'static mut Link {
@@ -67,6 +79,10 @@ pub fn poll() {
         if n == 0 {
             break;
         }
+        if l.bytes == 0 {
+            event!(Info, "hostlink.first_bytes", n = n as u32, b0 = buf[0]);
+        }
+        l.bytes = l.bytes.wrapping_add(n as u32);
         for &b in &buf[..n] {
             if b != 0 {
                 if l.raw_len < FRAME_MAX {
@@ -88,14 +104,16 @@ pub fn poll() {
 }
 
 fn frame_in(l: &mut Link) {
-    let mut decoded = [0u8; MTU + 1];
-    let Some(n) = wire::cobs_decode(&l.raw[..l.raw_len], &mut decoded) else {
+    let Some(n) = wire::cobs_decode(&l.raw[..l.raw_len], &mut l.decoded) else {
         l.dropped += 1;
         return;
     };
-    if n < 2 || decoded[0] != PACKET {
-        return; // not ours (nothing else is sent to the Tab5 on this line yet)
+    if n < 2 || l.decoded[0] != PACKET {
+        // Not ours (nothing else is sent to the Tab5 on this line yet).
+        l.other += 1;
+        return;
     }
+    let decoded = &l.decoded;
     if l.count == QUEUE {
         l.dropped += 1;
         return;
@@ -105,6 +123,9 @@ fn frame_in(l: &mut Link) {
     l.lens[i] = n - 1;
     l.count += 1;
     l.received += 1;
+    if l.received == 1 {
+        event!(Info, "hostlink.first_packet", len = (n - 1) as u32);
+    }
 }
 
 /// The handle on `netdev:host`; one at a time.
@@ -145,12 +166,11 @@ impl NetDev {
         if packet.is_empty() || packet.len() > MTU {
             return Err(Error::Size);
         }
-        let mut plain = [0u8; MTU + 1];
-        plain[0] = PACKET;
-        plain[1..=packet.len()].copy_from_slice(packet);
-        let mut frame = [0u8; FRAME_MAX];
-        let n = wire::cobs_encode(&plain[..=packet.len()], &mut frame).ok_or(Error::Size)?;
-        if Current::console_write(&frame[..n]) { Ok(packet.len()) } else { Err(Error::Busy) }
+        let l = link();
+        l.plain[0] = PACKET;
+        l.plain[1..=packet.len()].copy_from_slice(packet);
+        let n = wire::cobs_encode(&l.plain[..=packet.len()], &mut l.out).ok_or(Error::Size)?;
+        if Current::console_write(&l.out[..n]) { Ok(packet.len()) } else { Err(Error::Busy) }
     }
 
     /// The `wait` event: READABLE with the packets waiting.
@@ -164,6 +184,6 @@ impl Drop for NetDev {
     fn drop(&mut self) {
         let l = link();
         l.open = false;
-        event!(Info, "hostlink.closed", received = l.received, dropped = l.dropped);
+        event!(Info, "hostlink.closed", received = l.received, dropped = l.dropped, bytes = l.bytes, other = l.other);
     }
 }

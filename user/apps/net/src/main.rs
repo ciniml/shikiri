@@ -142,8 +142,12 @@ impl TxToken for LinkTx<'_> {
         if len >= 20 && buf[16] != 127
             && let Some(h) = &links.host
         {
-            if h.write(&buf[..len]).is_ok() {
+            let ok = h.write(&buf[..len]).is_ok();
+            if ok {
                 links.to_host += 1;
+            }
+            if links.to_host < 4 || !ok {
+                event!(Debug, "net.host_tx", len = len as u32, ok = ok, sent = links.to_host);
             }
             return r;
         }
@@ -166,6 +170,10 @@ impl Device for Links {
         let mut out = LinkRx { frame: [0; MTU], len: 0 };
         out.len = h.read(&mut out.frame).ok()?;
         self.from_host += 1;
+        if self.from_host <= 8 {
+            let f = &out.frame;
+            event!(Debug, "net.host_rx", len = out.len as u32, ver = f[0] >> 4, proto = f[9], dst = u32::from_be_bytes([f[16], f[17], f[18], f[19]]));
+        }
         Some((out, LinkTx(self)))
     }
 
