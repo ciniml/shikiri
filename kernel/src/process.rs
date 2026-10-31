@@ -31,6 +31,10 @@ pub struct Process {
     pub pending: Option<(u64, u16)>,
     /// The `shm` handle whose window is mapped, if any.
     shm_mapped: Option<usize>,
+    /// Time (ticks) in its slices, the kernel's work on its system calls
+    /// included, and the total at the last `ps` (doc/31).
+    pub cpu: u64,
+    pub cpu_mark: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +92,8 @@ impl Process {
             xip_extents: None,
             pending: None,
             shm_mapped: None,
+            cpu: 0,
+            cpu_mark: 0,
         }
     }
 

@@ -27,6 +27,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [28](28-resources.md) | リソースの使用量: 内蔵 RAM（約 808 KiB、空き約 51%。カーネルの区画は 99%）、PSRAM、フラッシュ。`net` の初期値つきデータを .bss に移してイメージを 351→243 KB に |
 | [29](29-dns-relay.md) | DNS の中継: DHCP サーバが Tab5 自身を DNS サーバとして渡し、下流の問い合わせを上流の DNS サーバへ中継。実機で試験用 LAN の相手が名前を解決 |
 | [30](30-kernel-memory-autostart.md) | カーネルの .bss を L2MEM 上側へ、スタック 128 KiB、XIP のスロットを先頭アドレス基準に、プロセス 8 個、起動時の自動起動（wifi、fs、net、netctl）と SD の規則ファイル |
+| [31](31-cpu-usage.md) | CPU 使用率: スケジューラでプロセスの時間と待ちの時間を数え、`ps` で窓の千分率を出す。実機で何もしないとき待ち 99.2%、Wi-Fi の TCP echo（片道 8 Mbps）で net 50%・カーネル 20% |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |

@@ -375,17 +375,45 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             Ok(store.entries().count() as u32)
         }
         Command::Ps => {
+            // CPU use since the last `ps` (doc/31), in per mille.
+            let now = Current::now();
+            let window = (now - s.cpu_mark.0).max(1);
+            let pm = |t: u64| (t * 1000 / window) as u32;
+            let mut procs = 0u64;
             let mut n = 0;
-            for p in s.slots.iter().flatten() {
+            for p in s.slots.iter_mut().flatten() {
+                let used = p.cpu - p.cpu_mark;
+                p.cpu_mark = p.cpu;
+                procs += used;
                 let state = match p.state {
                     process::State::Ready => "ready",
                     process::State::Sleeping { .. } => "sleeping",
                     process::State::Waiting { .. } => "waiting",
                     process::State::Exited(_) => "exited",
                 };
-                event!(Info, "proc.info", pid = p.pid, name = p.name, state = state, handles = p.handles.count() as u32);
+                event!(
+                    Info,
+                    "proc.info",
+                    pid = p.pid,
+                    name = p.name,
+                    state = state,
+                    handles = p.handles.count() as u32,
+                    cpu_ms = (time::ticks_to_ns(p.cpu) / 1_000_000) as u32,
+                    cpu_pm = pm(used)
+                );
                 n += 1;
             }
+            let idle = s.stats.idle_ticks - s.cpu_mark.1;
+            s.cpu_mark = (now, s.stats.idle_ticks);
+            event!(
+                Info,
+                "kernel.cpu",
+                window_ms = (time::ticks_to_ns(window) / 1_000_000) as u32,
+                idle_pm = pm(idle),
+                procs_pm = pm(procs),
+                kernel_pm = 1000u32.saturating_sub(pm(idle) + pm(procs)),
+                idle_total_ms = (time::ticks_to_ns(s.stats.idle_ticks) / 1_000_000) as u32
+            );
             let (size, used) = rv::stack_usage();
             event!(Info, "kernel.stack", size = size, used = used);
             Ok(n)

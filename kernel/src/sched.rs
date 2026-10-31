@@ -29,6 +29,8 @@ pub struct Stats {
     pub fpu_switches: u32,
     pub fpu_saves: u32,
     pub idle_waits: u32,
+    /// Time (ticks) asleep in `wait_for_interrupt` (doc/31).
+    pub idle_ticks: u64,
 }
 
 /// Owner of the FPU registers (see `arch::riscv32::fpu`).
@@ -70,6 +72,9 @@ pub struct Scheduler {
     fpu: Fpu,
     pub stats: Stats,
     next: usize,
+    /// At the last `ps`: the time and the idle total (ticks), so `ps` gives
+    /// the use since then (doc/31).
+    pub cpu_mark: (u64, u64),
 }
 
 /// How often `run(None, ..)` calls `poll` while processes keep the CPU busy
@@ -83,6 +88,7 @@ impl Scheduler {
             fpu: Fpu { owner: None, dirty: false, saved: [FpState::default(); MAX_PROCS] },
             stats: Stats::default(),
             next: 0,
+            cpu_mark: (Current::now(), 0),
         }
     }
 
@@ -173,7 +179,9 @@ impl Scheduler {
                 // Everyone is asleep (or nothing runs). Wake at least every
                 // second to feed the watchdog.
                 Current::set_alarm(wake.min(now + time::ms_to_ticks(1000)));
+                let asleep = Current::now();
                 Current::wait_for_interrupt();
+                self.stats.idle_ticks += Current::now() - asleep;
                 Current::clear_alarm();
                 self.stats.idle_waits += 1;
                 continue;
@@ -182,7 +190,9 @@ impl Scheduler {
 
             Current::set_alarm(wake.min(now + time::ms_to_ticks(SLICE_MS)));
             let p = self.slots[i].as_mut().unwrap();
+            let start = Current::now();
             run_slice(p, i, &mut self.fpu, &mut self.stats);
+            p.cpu += Current::now() - start;
             Current::clear_alarm();
             if let Some(exit) = p.exit() {
                 self.fpu.release(i);
