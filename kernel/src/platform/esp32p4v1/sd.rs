@@ -77,6 +77,7 @@ const L2MEM_NON_CACHE: usize = 0x4000_0000;
 const CLK_EDGE_SEL: usize = HOST + 0x800;
 
 const CTRL_RESETS: u32 = 0b111; // controller, FIFO, DMA
+const CTRL_INT_ENABLE: u32 = 1 << 4;
 const CTRL_FIFO_RESET: u32 = 1 << 1;
 const CMD_START: u32 = 1 << 31;
 
@@ -92,8 +93,45 @@ const HTO: u32 = 1 << 10;
 const HLE: u32 = 1 << 12;
 const SBE: u32 = 1 << 13;
 const EBE: u32 = 1 << 15;
+/// The transfer's bits (0-15); 16 + n is slot n's SDIO card interrupt,
+/// which commands leave alone.
+const TRANSFER_INTS: u32 = 0xFFFF;
 const CMD_ERRORS: u32 = RTO | RCRC | RE | HLE;
 const DATA_ERRORS: u32 = DRTO | DCRC | HTO | SBE | EBE;
+
+/// RINTSTS and INTMASK bit of slot `slot`'s SDIO card interrupt: set on a
+/// falling edge of its DAT1, the only interrupt the host raises (ESP-IDF
+/// sdmmc_host.c:1043-1048).
+const fn card_int(slot: u32) -> u32 {
+    1 << (16 + slot)
+}
+
+/// Whether slot `slot`'s card interrupt came; clears it.
+pub(super) fn card_int_take(slot: u32) -> bool {
+    unsafe {
+        let came = rd(RINTSTS) & card_int(slot) != 0;
+        if came {
+            wr(RINTSTS, card_int(slot));
+        }
+        came
+    }
+}
+
+/// Whether slot `slot`'s card interrupt came (not cleared).
+pub(super) fn card_int_came(slot: u32) -> bool {
+    unsafe { rd(RINTSTS) & card_int(slot) != 0 }
+}
+
+/// Lets slot `slot`'s card interrupt reach the CPU (`on`) or not.
+pub(super) fn card_int_enable(slot: u32, on: bool) {
+    unsafe {
+        let mask = rd(INTMASK) & !card_int(slot);
+        wr(INTMASK, if on { mask | card_int(slot) } else { mask });
+        if on {
+            wr(CTRL, rd(CTRL) | CTRL_INT_ENABLE);
+        }
+    }
+}
 
 // Pins: CLK 43, CMD 44, D0-D3 39-42, IO_MUX function 0 (m7-sdcard.md §2.3).
 const DATA_PINS: [usize; 3] = [39, 40, 41];
@@ -219,7 +257,7 @@ pub(super) fn host_up() -> Result<(), &'static str> {
     }
     unsafe {
         wr(INTMASK, 0);
-        wr(RINTSTS, 0xFFFF_FFFF);
+        wr(RINTSTS, TRANSFER_INTS);
         wr(IDSTS, 0x3FF);
         wr(CTYPE, 0); // one data line on every slot
         wr(CLKENA, 0);
@@ -336,7 +374,7 @@ pub(super) fn command_on(slot: u32, block: usize, cmd: u32, arg: u32, data: Data
         return Err("transfer too long");
     }
     unsafe {
-        wr(RINTSTS, 0xFFFF_FFFF);
+        wr(RINTSTS, TRANSFER_INTS);
         if len > 0 {
             wr(CTRL, rd(CTRL) | CTRL_FIFO_RESET);
             let _ = wait(10_000, || rd(CTRL) & CTRL_FIFO_RESET == 0);
@@ -381,7 +419,7 @@ pub(super) fn command_on(slot: u32, block: usize, cmd: u32, arg: u32, data: Data
             }
         }
     }
-    unsafe { wr(RINTSTS, 0xFFFF_FFFF) };
+    unsafe { wr(RINTSTS, TRANSFER_INTS) };
     Ok(resp)
 }
 

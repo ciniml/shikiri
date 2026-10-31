@@ -165,7 +165,7 @@ impl Scheduler {
                 if limit.is_some() && self.slots.iter().flatten().all(|p| p.exit().is_some()) {
                     break;
                 }
-                if crate::hostlink::pending() {
+                if crate::hostlink::pending() || crate::wlan::pending() {
                     continue;
                 }
                 // Everyone is asleep (or nothing runs). Wake at least every

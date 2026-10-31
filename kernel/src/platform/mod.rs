@@ -166,6 +166,15 @@ pub trait Platform {
     fn wlan_poll(_sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
         Ok(())
     }
+    /// Whether the Wi-Fi chip has signalled something not yet read (the
+    /// scheduler does not sleep then).
+    fn wlan_pending() -> bool {
+        false
+    }
+    /// (card interrupts taken, re-arms that found the line still low).
+    fn wlan_irq_stats() -> (u32, u32) {
+        (0, 0)
+    }
     /// Sends one payload to the Wi-Fi chip; `Err("busy")` when it has no room.
     fn wlan_send(_if_type: u8, _payload: &[u8]) -> Result<(), &'static str> {
         Err("no Wi-Fi")

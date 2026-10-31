@@ -27,6 +27,9 @@ const REQ_WIFI_INIT: u32 = 278;
 const REQ_WIFI_START: u32 = 280;
 const REQ_WIFI_CONNECT: u32 = 282;
 const REQ_WIFI_SET_CONFIG: u32 = 284;
+const REQ_WIFI_SET_PS: u32 = 270;
+/// wifi_ps_type_t: WIFI_PS_NONE.
+const PS_NONE: u64 = 0;
 const RESP_OFFSET: u32 = 256;
 const EVENT_ESP_INIT: u32 = 769;
 const EVENT_HEARTBEAT: u32 = 770;
@@ -404,6 +407,11 @@ fn run() -> Result<(), u32> {
     })?;
     event!(Info, "wifi.configured", ssid = core::str::from_utf8(SSID).unwrap_or("?"));
     rpc.call(REQ_WIFI_START, 1, |_| {})?;
+    // No modem sleep: with it the AP holds frames for the Tab5 until the
+    // next beacon it listens to (25-210 ms pings from the LAN, doc/22 §7.5).
+    if rpc.call(REQ_WIFI_SET_PS, 1, |p| p.uint(1, PS_NONE)).is_err() {
+        event!(Warn, "wifi.power_save_left_on");
+    }
     // Connect once the station has started, as ESP-IDF's host does (TCC:
     // "wifi station started", then esp_wifi_remote_connect). Connecting at
     // once failed twice before joining (reasons 202, 205).

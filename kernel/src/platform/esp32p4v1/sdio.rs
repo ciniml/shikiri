@@ -12,7 +12,7 @@ use t5_abi::event;
 use super::i2c::{func_in_sel, func_out_sel, io_mux_reg};
 use super::psram::delay_us;
 use super::sd::{self, Data};
-use super::{Esp32p4v1, Platform, tab5, wr};
+use super::{Esp32p4v1, Platform, rd, tab5, wr};
 
 const SLOT: u32 = 1;
 const CLK_PIN: usize = 12;
@@ -36,6 +36,12 @@ const IO_MUX_MATRIX: u32 = (1 << 12) | (3 << 10) | (1 << 9) | (1 << 8);
 const GPIO_OUT_W1TS: usize = 0x500E_0008;
 const GPIO_OUT_W1TC: usize = 0x500E_000C;
 const GPIO_ENABLE_W1TS: usize = 0x500E_0024;
+const GPIO_IN: usize = 0x500E_003C;
+/// DAT1, which the card pulls low to interrupt (4-bit mode).
+const D1_PIN: usize = DATA_PINS[1];
+/// Without an interrupt, the C6 is still asked this often (a missed
+/// edge costs at most this long).
+const FALLBACK_MS: u64 = 20;
 
 // Command register values for slot 0 (the slot is added by `command_on`):
 // start, use_hold_reg, wait_prvdata_complete, response expected, CRC check.
@@ -262,6 +268,14 @@ struct Link {
     have: usize,
     tx: [u8; TX_MAX],
     dropped: u32,
+    /// When to ask the C6 even without its interrupt (ticks).
+    next_poll: u64,
+    /// DAT1 was still low when the interrupt was armed: no edge will come,
+    /// so the next poll asks at once.
+    again: bool,
+    /// Card interrupts taken, and arms that found DAT1 low.
+    irqs: u32,
+    d1_low: u32,
 }
 
 /// Room for a 4 KiB read (the DMA bounce buffer's size) on top of a
@@ -286,6 +300,10 @@ static mut LINK: Link = Link {
     have: 0,
     tx: [0; TX_MAX],
     dropped: 0,
+    next_poll: 0,
+    again: false,
+    irqs: 0,
+    d1_low: 0,
 };
 
 fn link() -> &'static mut Link {
@@ -379,17 +397,54 @@ pub fn up() -> Result<u32, &'static str> {
     // Open the data path (sdio_drv.c:395-405,1146).
     rw_direct(1, SLC_HOST_TO_SLAVE, Some(1 << ESP_OPEN_DATA_PATH))?;
     l.up = true;
+    l.again = true;
     Ok(rca)
 }
 
-/// Reads what the C6 has sent (sdio_drv.c:1096-1290, polled instead of
-/// waiting for the card interrupt) and passes each payload to `sink` with
-/// its interface type. The INIT event is logged here.
+fn d1_low() -> bool {
+    unsafe { rd(GPIO_IN) & (1 << D1_PIN) == 0 }
+}
+
+/// From the interrupt handler: the card interrupt came. It stays masked
+/// until `poll` has asked the C6 (the line stays low until then).
+pub fn on_irq() {
+    sd::card_int_enable(SLOT, false);
+    link().irqs += 1;
+}
+
+/// Whether the C6 has something to say: the scheduler does not sleep then.
+pub fn pending() -> bool {
+    let l = link();
+    l.up && (l.again || sd::card_int_came(SLOT))
+}
+
+/// Reads what the C6 has sent (sdio_drv.c:1096-1290) when its card
+/// interrupt came, or every `FALLBACK_MS` in case an edge was missed, and
+/// passes each payload to `sink` with its interface type. The INIT event is
+/// logged here.
 pub fn poll(sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
     let l = link();
     if !l.up {
         return Ok(());
     }
+    let now = Esp32p4v1::now();
+    let signalled = sd::card_int_take(SLOT);
+    if !signalled && !l.again && now < l.next_poll {
+        return Ok(());
+    }
+    l.next_poll = now + crate::time::ms_to_ticks(FALLBACK_MS);
+    let r = drain(l, sink);
+    // Re-arm. The interrupt is an edge: if DAT1 is already low (the C6
+    // raised another one meanwhile), none will come, so ask again at once.
+    l.again = d1_low();
+    if l.again {
+        l.d1_low += 1;
+    }
+    sd::card_int_enable(SLOT, true);
+    r
+}
+
+fn drain(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
     let ints = read_reg(SLC_INT_RAW)?;
     if ints & INT_USED == 0 {
         return Ok(());
@@ -508,6 +563,12 @@ pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
     l.tx_count = (l.tx_count + 1) % TX_BUFFER_MAX;
     l.tx_free -= 1;
     Ok(())
+}
+
+/// Counters for `wlan` statistics: (card interrupts, re-arms with DAT1 low).
+pub fn irq_stats() -> (u32, u32) {
+    let l = link();
+    (l.irqs, l.d1_low)
 }
 
 /// `wlanprobe`: starts the transport and logs what the C6 sends for 2 s.

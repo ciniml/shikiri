@@ -28,6 +28,10 @@ const USJ_OUT_RECV_PKT_INT: u32 = 1 << 2;
 /// ETS_USB_SERIAL_JTAG_INTR_SOURCE (interrupts.h), routed to CPU line 3.
 const USJ_SOURCE: usize = 22;
 const USJ_IRQ: usize = 3 + CLIC_EXT_INTR_NUM_OFFSET;
+/// ETS_SDIO_HOST_INTR_SOURCE: the SDMMC host, whose only enabled interrupt
+/// is the C6's SDIO card interrupt (doc/22 §8), routed to CPU line 4.
+const SDIO_SOURCE: usize = 23;
+const SDIO_IRQ: usize = 4 + CLIC_EXT_INTR_NUM_OFFSET;
 /// How long to wait for room in the FIFO before deciding that nobody reads
 /// the CDC port. Longer than the host's 1 ms USB polling interval: with a
 /// poll-count limit (50,000) bursts were dropped while a host was reading
@@ -420,6 +424,9 @@ impl Platform for Esp32p4v1 {
             wr(USJ_INT_CLR, USJ_OUT_RECV_PKT_INT);
             wr(INTMTX_CORE0_BASE + 4 * USJ_SOURCE, USJ_IRQ as u32);
             wr(CLIC_CTRL_BASE + 4 * USJ_IRQ, CLIC_TIMER_CTRL);
+            // The SDMMC host: routed now, unmasked in the host by `sdio`.
+            wr(INTMTX_CORE0_BASE + 4 * SDIO_SOURCE, SDIO_IRQ as u32);
+            wr(CLIC_CTRL_BASE + 4 * SDIO_IRQ, CLIC_TIMER_CTRL);
             wr(CLIC_INT_THRESH, 0);
         }
     }
@@ -745,6 +752,11 @@ impl Platform for Esp32p4v1 {
             unsafe { wr(USJ_INT_CLR, USJ_OUT_RECV_PKT_INT) };
             return true;
         }
+        if code == SDIO_IRQ {
+            // Woken by the C6; the scheduler loop reads from it.
+            sdio::on_irq();
+            return true;
+        }
         false
     }
 
@@ -762,6 +774,14 @@ impl Platform for Esp32p4v1 {
 
     fn wlan_send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
         sdio::send(if_type, payload)
+    }
+
+    fn wlan_pending() -> bool {
+        sdio::pending()
+    }
+
+    fn wlan_irq_stats() -> (u32, u32) {
+        sdio::irq_stats()
     }
 
     fn sd_info() -> Result<u32, &'static str> {

@@ -18,6 +18,8 @@ const IF_SERIAL: u8 = 3;
 // Sized by the kernel RAM that is left (internal SRAM; doc/22 §6).
 const CTL_QUEUE: usize = 3;
 const STA_QUEUE: usize = 5;
+/// How often the counters are logged.
+const STATS_MS: u64 = 30_000;
 
 /// Received payloads waiting for `read`.
 struct Queue<const N: usize, const S: usize> {
@@ -75,6 +77,8 @@ struct Wlan {
     errors: u32,
     sta_rx: u32,
     sta_tx: u32,
+    /// When to log the counters next (ticks).
+    stats_at: u64,
 }
 
 static mut WLAN: Wlan = Wlan {
@@ -88,10 +92,17 @@ static mut WLAN: Wlan = Wlan {
     errors: 0,
     sta_rx: 0,
     sta_tx: 0,
+    stats_at: 0,
 };
 
 fn w() -> &'static mut Wlan {
     unsafe { &mut *core::ptr::addr_of_mut!(WLAN) }
+}
+
+/// Whether the chip has signalled something the next `poll` reads.
+pub fn pending() -> bool {
+    let w = w();
+    w.up && (w.ctl_open || w.dev_open) && Current::wlan_pending()
 }
 
 /// Reads what the chip has sent (from the scheduler loop).
@@ -117,6 +128,14 @@ pub fn poll() {
     });
     w.other += other;
     w.sta_rx += sta_rx;
+    let now = Current::now();
+    if now >= w.stats_at {
+        if w.stats_at != 0 {
+            let (irqs, d1_low) = Current::wlan_irq_stats();
+            event!(Debug, "wlan.stats", irqs = irqs, d1_low = d1_low, sta_rx = w.sta_rx, sta_tx = w.sta_tx, errors = w.errors);
+        }
+        w.stats_at = now + crate::time::ms_to_ticks(STATS_MS);
+    }
     if let Err(e) = r {
         w.errors += 1;
         // Rate-limited: the first errors and then every 1000th.
