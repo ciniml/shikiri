@@ -71,6 +71,11 @@ const CCCR_INT_ENABLE: u32 = 0x04;
 const CCCR_IO_ABORT: u32 = 0x06;
 const CCCR_BUS_IF: u32 = 0x07;
 const CCCR_FN0_BLOCK_SIZE: u32 = 0x10;
+/// Bus Speed Select: SHS (bit 0, the card supports High Speed), EHS (bit
+/// 1, use it).
+const CCCR_BUS_SPEED: u32 = 0x13;
+const SHS: u8 = 1 << 0;
+const EHS: u8 = 1 << 1;
 const FBR1_BLOCK_SIZE: u32 = 0x110;
 const CCCR_LEN: usize = 0x14;
 const FUNC1: u8 = 1 << 1;
@@ -370,7 +375,8 @@ pub fn up() -> Result<u32, &'static str> {
 
     // As esp_hosted's card init (port_esp_hosted_host_sdio.c:150-218):
     // interrupts of function 1 and the master enable, 512-byte blocks, then
-    // 4 lines at 20 MHz (TCC's clock: 40 MHz failed there).
+    // 4 lines at 20 MHz (TCC's clock: 40 MHz failed there), then High Speed
+    // if the card takes it.
     let ie = rw_direct(0, CCCR_INT_ENABLE, None)?;
     rw_direct(0, CCCR_INT_ENABLE, Some(ie | 1 | FUNC1))?;
     set_block_size(CCCR_FN0_BLOCK_SIZE)?;
@@ -379,6 +385,7 @@ pub fn up() -> Result<u32, &'static str> {
     rw_direct(0, CCCR_BUS_IF, Some((bus & !3) | 2))?;
     sd::set_wide(SLOT, true);
     sd::set_card_clock(SLOT, 1, 20_000)?;
+    high_speed()?;
     let token = read_reg(SLC_TOKEN_RDATA)?;
     event!(
         Info,
@@ -418,6 +425,26 @@ pub fn pending() -> bool {
     l.up && (l.again || sd::card_int_came(SLOT))
 }
 
+/// High Speed (40 MHz) if the card has it (SDIO spec 6.9, CCCR 0x13), as
+/// the SD card (doc/31 §4). Back to 20 MHz if registers cannot be read at
+/// 40 MHz.
+fn high_speed() -> Result<(), &'static str> {
+    let speed = rw_direct(0, CCCR_BUS_SPEED, None)?;
+    if speed & SHS == 0 {
+        event!(Info, "wlan.speed", khz = 20_000u32, cccr_speed = speed);
+        return Ok(());
+    }
+    rw_direct(0, CCCR_BUS_SPEED, Some(speed | EHS))?;
+    sd::set_card_clock(SLOT, 0, 40_000)?;
+    let ok = (0..8).all(|_| read_reg(SLC_TOKEN_RDATA).is_ok());
+    if !ok {
+        sd::set_card_clock(SLOT, 1, 20_000)?;
+        rw_direct(0, CCCR_BUS_SPEED, Some(speed & !EHS))?;
+    }
+    event!(Info, "wlan.speed", khz = if ok { 40_000u32 } else { 20_000 }, cccr_speed = speed);
+    Ok(())
+}
+
 /// Reads what the C6 has sent (sdio_drv.c:1096-1290) when its card
 /// interrupt came, or every `FALLBACK_MS` in case an edge was missed, and
 /// passes each payload to `sink` with its interface type. The INIT event is
@@ -445,21 +472,24 @@ pub fn poll(sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
 }
 
 fn drain(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
-    let ints = read_reg(SLC_INT_RAW)?;
-    if ints & INT_USED == 0 {
-        return Ok(());
+    // INT_RAW (0x50) to PACKET_LEN (0x60) in one transfer (doc/31 §4).
+    // Whatever the interrupt bits say, the length decides whether there is
+    // data: a packet that comes between this read and the clear below is
+    // read next time.
+    let mut regs = [0u8; (SLC_PACKET_LEN - SLC_INT_RAW + 4) as usize];
+    rw_extended(SLC_INT_RAW, Data::Read(&mut regs))?;
+    let word = |o: usize| u32::from_le_bytes([regs[o], regs[o + 1], regs[o + 2], regs[o + 3]]);
+    let ints = word(0);
+    let total = word((SLC_PACKET_LEN - SLC_INT_RAW) as usize) & LEN_MASK;
+    if ints & INT_USED != 0 {
+        write_reg(SLC_INT_CLR, ints & INT_USED)?;
+        if ints & (1 << 7) != 0 {
+            l.throttled = true;
+        }
+        if ints & (1 << 6) != 0 {
+            l.throttled = false;
+        }
     }
-    write_reg(SLC_INT_CLR, ints & INT_USED)?;
-    if ints & (1 << 7) != 0 {
-        l.throttled = true;
-    }
-    if ints & (1 << 6) != 0 {
-        l.throttled = false;
-    }
-    if ints & INT_NEW_PACKET == 0 {
-        return Ok(());
-    }
-    let total = read_reg(SLC_PACKET_LEN)? & LEN_MASK;
     let mut left = (total + RX_BYTE_MAX - l.rx_count) % RX_BYTE_MAX;
     while left > 0 {
         // Whole blocks except for the last piece, which is rounded up (the
@@ -565,10 +595,12 @@ pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Counters for `wlan` statistics: (card interrupts, re-arms with DAT1 low).
-pub fn irq_stats() -> (u32, u32) {
+/// Counters for `wlan` statistics: (card interrupts, re-arms with DAT1 low,
+/// ms in SDIO commands, SDIO commands).
+pub fn irq_stats() -> (u32, u32, u32, u32) {
     let l = link();
-    (l.irqs, l.d1_low)
+    let (ticks, cmds) = sd::busy(SLOT);
+    (l.irqs, l.d1_low, (ticks / 16_000) as u32, cmds)
 }
 
 /// `wlanprobe`: starts the transport and logs what the C6 sends for 2 s.

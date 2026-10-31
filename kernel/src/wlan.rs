@@ -131,8 +131,8 @@ pub fn poll() {
     let now = Current::now();
     if now >= w.stats_at {
         if w.stats_at != 0 {
-            let (irqs, d1_low) = Current::wlan_irq_stats();
-            event!(Debug, "wlan.stats", irqs = irqs, d1_low = d1_low, sta_rx = w.sta_rx, sta_tx = w.sta_tx, errors = w.errors);
+            let (irqs, d1_low, bus_ms, bus_cmds) = Current::wlan_irq_stats();
+            event!(Debug, "wlan.stats", irqs = irqs, d1_low = d1_low, sta_rx = w.sta_rx, sta_tx = w.sta_tx, errors = w.errors, bus_ms = bus_ms, bus_cmds = bus_cmds);
         }
         w.stats_at = now + crate::time::ms_to_ticks(STATS_MS);
     }

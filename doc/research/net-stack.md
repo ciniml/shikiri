@@ -81,6 +81,7 @@
 - **USB-A** は HS の OTG だが、ホスト用のコネクタで、VBUS はエクスパンダ #2 の bit3（doc/06 §1.8）。デバイスとして使うには A-A ケーブルが要り、VBUS がぶつかる。使わない（判断）。
 - 作業量（推測）: DWC2 のデバイスモード（EP0 の列挙、バルク IN/OUT、FIFO の割り当て）で 800〜1200 行。CDC-NCM のクラスは 300〜500 行。Linux と macOS は NCM を標準で扱う。Windows 10 以降も NCM のドライバを持つ（推測）。RNDIS は使わない（Microsoft が非推奨にしている。推測）。
 - FS なので 12 Mbps が上限。USJ のホストリンク（§1.4）より速いが、デバッグの経路と引き換えになる。**後回し**（判断）。
+- 利用者の判断（2026-11-01）: CDC-NCM は後回しにする。USB-C を NCM にすると USJ のコンソールと JTAG（RTT、インストール、kupdate）が使えなくなり、ログを UART0 へ逃がす準備が要るため（doc/31 の後の相談）。
 
 ### 1.3 (c) Ethernet（EMAC）
 - P4 は EMAC を持つ（0x5009_8000。`R1/reg_base.h:57`、RMII の信号は `IDF/soc/esp32p4/include/soc/gpio_sig_map.h:208-337`）。

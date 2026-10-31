@@ -788,7 +788,7 @@ impl Platform for Esp32p4v1 {
         sdio::pending()
     }
 
-    fn wlan_irq_stats() -> (u32, u32) {
+    fn wlan_irq_stats() -> (u32, u32, u32, u32) {
         sdio::irq_stats()
     }
 

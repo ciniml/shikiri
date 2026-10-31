@@ -171,9 +171,10 @@ pub trait Platform {
     fn wlan_pending() -> bool {
         false
     }
-    /// (card interrupts taken, re-arms that found the line still low).
-    fn wlan_irq_stats() -> (u32, u32) {
-        (0, 0)
+    /// (card interrupts taken, re-arms that found the line still low, ms
+    /// in bus commands, bus commands).
+    fn wlan_irq_stats() -> (u32, u32, u32, u32) {
+        (0, 0, 0, 0)
     }
     /// Sends one payload to the Wi-Fi chip; `Err("busy")` when it has no room.
     fn wlan_send(_if_type: u8, _payload: &[u8]) -> Result<(), &'static str> {

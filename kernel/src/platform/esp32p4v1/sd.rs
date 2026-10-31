@@ -365,7 +365,26 @@ fn command(cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
 /// Issues `cmd` (its register value for slot 0) to `slot` with `arg` and
 /// its data phase (blocks of at most `block` bytes). Returns the four
 /// response words (RESP0 = bits 31:0).
+/// Per slot: time (ticks) spent in commands and how many (doc/31 §4).
+static mut BUSY: [(u64, u32); 2] = [(0, 0); 2];
+
+/// (ticks in commands, commands) of slot `slot` since boot.
+pub(super) fn busy(slot: u32) -> (u64, u32) {
+    unsafe { (*core::ptr::addr_of!(BUSY))[slot as usize & 1] }
+}
+
 pub(super) fn command_on(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
+    let start = Esp32p4v1::now();
+    let r = command_timed(slot, block, cmd, arg, data);
+    unsafe {
+        let b = &mut (*core::ptr::addr_of_mut!(BUSY))[slot as usize & 1];
+        b.0 += Esp32p4v1::now() - start;
+        b.1 += 1;
+    }
+    r
+}
+
+fn command_timed(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
     if !wait(1_000_000, || unsafe { rd(CMD) } & CMD_START == 0) {
         return Err("SDMMC busy");
     }
