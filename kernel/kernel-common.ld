@@ -1,5 +1,6 @@
 /* Shared kernel layout. Platform scripts define the RAM region and the
- * REGION_TEXT / REGION_RODATA aliases before including this file. */
+ * REGION_TEXT / REGION_RODATA / REGION_LOG / REGION_BSS aliases and the
+ * KERNEL_STACK size before including this file. */
 ENTRY(_start)
 
 SECTIONS
@@ -47,11 +48,11 @@ SECTIONS
         *(.sbss .sbss.* .bss .bss.* COMMON)
         . = ALIGN(4);
         __bss_end = .;
-    } > RAM
+    } > REGION_BSS
 
     .stack (NOLOAD) : ALIGN(16) {
         __stack_bottom = .;
-        . += 48K;
+        . += KERNEL_STACK;
         __stack_top = .;
     } > RAM
 

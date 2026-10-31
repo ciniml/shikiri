@@ -98,6 +98,21 @@ apps: tools $(UNTRUSTED_KEY)
 	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip-0.2.t5a --key $(DEV_KEY) --name spin-xip --version 0.2.0
 	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-xip xipcheck))
 
+# The services started at boot on the Tab5 (doc/30 §5): the same apps with
+# the autostart flag, installed over RTT by `make install-auto`. The store
+# image (and so the tests) keeps them without it.
+AUTO_APPS := wifi fs net netctl
+AUTO_DIR  := $(APPS_DIR)/auto
+apps-auto: apps
+	mkdir -p $(AUTO_DIR)
+	$(foreach a,$(AUTO_APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(AUTO_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) --autostart &&) true
+
+install-auto: apps-auto schemas-p4
+	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
+	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
+	    $(foreach a,$(AUTO_APPS),--cmd "install $(AUTO_DIR)/$(a).t5a") --until-done \
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
+
 kernel-virt: apps
 	cd kernel && cargo build --release \
 	    --features platform-virt --target-dir target/virt

@@ -289,11 +289,12 @@ impl EthLink {
 }
 
 /// Opens `netdev:wlan0` once the Wi-Fi service has told the kernel the MAC
-/// address (it has joined or is joining), waiting up to 10 s.
+/// address (it has joined or is joining), waiting up to 2 s; `None` if the
+/// chip is not up yet (the caller tries again, doc/30 §5).
 fn open_wifi() -> Option<EthLink> {
     let h = Handle::open(netdev::WLAN0, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).ok()?;
     let mut mac = None;
-    for _ in 0..100 {
+    for _ in 0..20 {
         if let (Ok(lo), Ok(hi)) = (h.ctl(netdev::MAC_LO, 0), h.ctl(netdev::MAC_HI, 0)) {
             let b = (lo as u64 | (hi as u64) << 32).to_le_bytes();
             mac = Some([b[0], b[1], b[2], b[3], b[4], b[5]]);
@@ -1145,7 +1146,14 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
 
     let mut clients: [Option<Channel>; CLIENTS] = [const { None }; CLIENTS];
     let mut msg = [0u8; chan::MSG_MAX];
+    // Without Wi-Fi (started before the Wi-Fi service had the chip up, at
+    // boot), try again every second.
+    let mut wifi_retry_at = time_ns() + 1_000_000_000;
     loop {
+        if stack.eth[WLAN - 1].is_none() && static_addr == 0 && time_ns() >= wifi_retry_at {
+            wifi_retry_at = time_ns() + 1_000_000_000;
+            stack.eth[WLAN - 1] = open_wifi();
+        }
         stack.poll();
         // The listeners, the links (frames arriving), the control client,
         // the clients.

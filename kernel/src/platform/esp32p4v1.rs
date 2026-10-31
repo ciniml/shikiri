@@ -145,11 +145,12 @@ const MMU_ITEM_INDEX: usize = 0x5008_C380;
 const MMU_VALID: u32 = 1 << 12;
 const FLASH_WINDOW_BASE: usize = 0x4000_0000;
 const FLASH_WINDOW: usize = 0x4100_0000;
-/// XIP text of process slot k at XIP_TEXT + k * XIP_SLOT (flash MMU entries
-/// 512-1023); its data at the same offset in the PSRAM window's second
-/// alias, 0x4A00_0000 + k * XIP_SLOT (doc/15 §2).
+/// XIP text of a process slot at XIP_TEXT + the slot's offset in the PSRAM
+/// window (flash MMU entries 512-1023, 32 MiB); its data at the same offset
+/// in the PSRAM window's second alias, 0x4A00_0000 + offset, which is the
+/// slot itself (doc/15 §2, doc/30 §3).
 const XIP_TEXT: usize = 0x4200_0000;
-const XIP_SLOT: usize = 8 << 20;
+const XIP_SPAN: usize = 32 << 20;
 const FLASH_SIZE: usize = 16 << 20;
 const MMU_PAGE: usize = 64 << 10;
 // esp32p4.rom.ld:259-260
@@ -391,8 +392,10 @@ unsafe fn wr(addr: usize, v: u32) {
 impl Platform for Esp32p4v1 {
     const NAME: &'static str = "esp32p4-v1.x";
     const MTVEC_MODE: usize = 3;
-    // Upper L2MEM region with a 128 KiB L2 cache (doc/02 §1.1, doc/07 §3).
-    const APP_POOL: core::ops::Range<usize> = 0x4FF4_0000..0x4FFA_0000;
+    // Upper L2MEM below the 128 KiB L2 cache (doc/02 §1.1, doc/07 §3), but
+    // the kernel's .bss below it (RAM_HI, doc/30 §2). Apps only use it when
+    // there is no PSRAM.
+    const APP_POOL: core::ops::Range<usize> = 0x4FF8_0000..0x4FFA_0000;
     const PROTECTED_MMIO: usize = USJ_BASE;
     const SERVE: bool = true;
     const TIMER_HZ: u64 = 16_000_000;
@@ -567,13 +570,18 @@ impl Platform for Esp32p4v1 {
         (FLASH_WINDOW..FLASH_WINDOW + FLASH_SIZE).contains(&addr).then(|| (addr - FLASH_WINDOW) as u32)
     }
 
-    fn map_xip(slot: usize, flash_offset: u32, pages: usize) -> Option<usize> {
+    fn map_xip(base: usize, capacity: usize, flash_offset: u32, pages: usize) -> Option<usize> {
         let psram = unsafe { PSRAM_SIZE };
-        let per_slot = XIP_SLOT / MMU_PAGE;
-        if flash_offset as usize % MMU_PAGE != 0 || pages > per_slot || (slot + 1) * XIP_SLOT > psram {
+        let offset = base.checked_sub(psram::WINDOW)?;
+        let per_slot = capacity / MMU_PAGE;
+        if flash_offset as usize % MMU_PAGE != 0
+            || offset % MMU_PAGE != 0
+            || pages > per_slot
+            || offset + capacity > psram.min(XIP_SPAN)
+        {
             return None;
         }
-        let vbase = XIP_TEXT + slot * XIP_SLOT;
+        let vbase = XIP_TEXT + offset;
         let first = (vbase - FLASH_WINDOW_BASE) / MMU_PAGE;
         unsafe { map_flash_pages(first, per_slot, flash_offset as usize / MMU_PAGE, pages) };
         Some(vbase)

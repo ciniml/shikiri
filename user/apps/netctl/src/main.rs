@@ -15,7 +15,11 @@
 //!   the host link, a DHCP server on the test LAN;
 //! - 6: the NAT set for the Tab5: the test LAN and the PC masqueraded
 //!   behind Wi-Fi, a DHCP server on the test LAN, and the NDP proxy from
-//!   Wi-Fi to the test LAN (IPv6, doc/27).
+//!   Wi-Fi to the test LAN (IPv6, doc/27);
+//! - 7: writes the guard set to `T5OS/NET.RUL` (to start from, doc/30 §5).
+//!
+//! At boot (autostart, doc/30) it runs with mode 0, maybe before `net` and
+//! `fs` are up: it waits up to 10 s for each.
 //!
 //! Built with `--permit svc:netctl --permit svc:fs`. Exit 0 if the service
 //! took the rules; otherwise the step that failed, or 100 + the first line
@@ -68,6 +72,7 @@ fn main(mode: usize, _: usize) -> usize {
         4 => simple(ctl::STATS),
         5 => load(NAT_TEST_SET),
         6 => load(NAT_SET),
+        7 => write_file(GUARD_SET),
         _ => Err(1),
     };
     match r {
@@ -82,9 +87,9 @@ fn main(mode: usize, _: usize) -> usize {
     }
 }
 
-/// Connects to the service, which may still be starting (up to 3 s).
+/// Connects to the service, which may still be starting (up to 10 s).
 fn connect() -> Result<Channel, u32> {
-    for _ in 0..30 {
+    for _ in 0..100 {
         if let Ok(c) = Channel::connect(ctl::SERVICE) {
             return Ok(c);
         }
@@ -130,8 +135,30 @@ fn load(text: &str) -> Result<u32, u32> {
     }
 }
 
+/// The file service, which may still be starting (up to 10 s).
+fn files() -> Result<Files, u32> {
+    for _ in 0..100 {
+        if let Ok(f) = Files::connect() {
+            return Ok(f);
+        }
+        sleep_ms(100);
+    }
+    Err(10)
+}
+
+fn write_file(text: &str) -> Result<u32, u32> {
+    let mut files = files()?;
+    let _ = files.mkdir("T5OS");
+    let f = files.open(RULE_FILE, fs::flag::WRITE | fs::flag::CREATE).map_err(|_| 20u32)?;
+    files.write(f, b"# tab5-os network rules (doc/24, section 3), read by netctl at boot.\n").map_err(|_| 21u32)?;
+    files.write(f, text.as_bytes()).map_err(|_| 21u32)?;
+    files.close(f).map_err(|_| 22u32)?;
+    event!(Info, "netctl.written", file = RULE_FILE, bytes = text.len() as u32);
+    Ok(0)
+}
+
 fn from_file() -> Result<u32, u32> {
-    let mut files = Files::connect().map_err(|_| 10u32)?;
+    let mut files = files()?;
     let f = files.open(RULE_FILE, fs::flag::READ).map_err(|_| 11u32)?;
     let mut buf = [0u8; FILE_MAX];
     let mut n = 0;

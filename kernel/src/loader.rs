@@ -70,10 +70,9 @@ pub fn check_signature(s: &t5a::Signed) -> Result<(), t5a::Error> {
         .map_err(|_| t5a::Error::BadSignature)
 }
 
-/// Where a process goes: its slot number and the slot's memory (for images
-/// that are copied).
+/// Where a process goes: its slot's memory (an XIP image's text is mapped
+/// over it, doc/30 §3).
 pub struct Slot {
-    pub index: usize,
     pub base: usize,
     pub capacity: usize,
 }
@@ -131,7 +130,7 @@ pub unsafe fn load(bytes: &'static [u8], slot: &Slot) -> Result<Loaded, LoadErro
             let offset = <Current as Platform>::flash_offset(bytes.as_ptr() as usize).ok_or(LoadError::NoXip)?;
             let image_off = h.image_offset();
             let pages = (image_off + text_size).div_ceil(64 << 10);
-            let vbase = <Current as Platform>::map_xip(slot.index, offset, pages).ok_or(LoadError::NoXip)?;
+            let vbase = <Current as Platform>::map_xip(slot.base, slot.capacity, offset, pages).ok_or(LoadError::NoXip)?;
             let need = image_off + align_up(mem_size + stack_size, GRANULE);
             if need > slot.capacity {
                 return Err(LoadError::TooLarge { need, have: slot.capacity });

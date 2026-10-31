@@ -17,7 +17,9 @@ use crate::platform::{Current, Platform};
 use crate::process::{Exit, Next, Process, State};
 use crate::time;
 
-pub const MAX_PROCS: usize = 4;
+/// Processes at once (doc/30 §4). With the PSRAM, each gets 1/8 of the app
+/// pool (3 MiB).
+pub const MAX_PROCS: usize = 8;
 pub const SLICE_MS: u64 = 10;
 
 /// Counters the self-test checks to see that each path was exercised.
@@ -77,7 +79,7 @@ pub const POLL_MS: u64 = 10;
 impl Scheduler {
     pub fn new() -> Scheduler {
         Scheduler {
-            slots: [None, None, None, None],
+            slots: [const { None }; MAX_PROCS],
             fpu: Fpu { owner: None, dirty: false, saved: [FpState::default(); MAX_PROCS] },
             stats: Stats::default(),
             next: 0,

@@ -87,6 +87,8 @@ impl Apps {
 /// The end of the PSRAM kept for the display: room for two 720x1280 RGB565
 /// framebuffers (doc/17 §3).
 const FB_RESERVE: usize = 4 << 20;
+/// Process slots start on MMU pages (and so on PMP granules).
+const SLOT_ALIGN: usize = 64 << 10;
 /// Below the display's: shared memory (doc/19 §2).
 const SHM_RESERVE: usize = 4 << 20;
 
@@ -516,13 +518,17 @@ fn pool() -> core::ops::Range<usize> {
 
 fn slot_of(index: usize) -> loader::Slot {
     let (base, capacity) = slot(index);
-    loader::Slot { index, base, capacity }
+    loader::Slot { base, capacity }
 }
 
 /// Slot `i` of the app pool; each process gets one.
 fn slot(i: usize) -> (usize, usize) {
     let pool = pool();
-    let size = (pool.end - pool.start) / sched::MAX_PROCS / pmp::GRANULE * pmp::GRANULE;
+    // Whole 64 KiB pages where the pool is large enough (the PSRAM): an XIP
+    // image's text is mapped over its slot (doc/30 §3).
+    let share = (pool.end - pool.start) / sched::MAX_PROCS;
+    let align = if share >= SLOT_ALIGN { SLOT_ALIGN } else { pmp::GRANULE };
+    let size = share / align * align;
     (pool.start + i * size, size)
 }
 
@@ -658,7 +664,7 @@ fn selftest_m2(apps: &Apps) -> u32 {
         return 1;
     };
     let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), Some(d)];
+    s.slots = [Some(a), Some(b), Some(c), Some(d), None, None, None, None];
 
     let start = Current::now();
     s.run(Some(3000), &mut |_| {});
@@ -716,7 +722,7 @@ fn selftest_m3d(apps: &Apps) -> u32 {
         return 1;
     };
     let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), None];
+    s.slots = [Some(a), Some(b), Some(c), None, None, None, None, None];
     s.run(Some(2000), &mut |_| {});
     let mut failures = 0;
     for p in s.slots.iter().flatten() {
@@ -820,7 +826,7 @@ fn selftest_m6c(apps: &Apps) -> u32 {
             continue;
         };
         let mut s = sched::Scheduler::new();
-        s.slots = [Some(p), None, None, None];
+        s.slots = [Some(p), None, None, None, None, None, None, None];
         s.run(Some(limit), &mut |_| {});
         let p = s.slots[0].as_ref().unwrap();
         let exit = p.exit().unwrap();
@@ -839,7 +845,8 @@ fn selftest_m4b(apps: &Apps) -> u32 {
         event!(Warn, "selftest.skipped", part = "m4b", reason = "no XIP apps in the store");
         return 0;
     };
-    if Current::map_xip(0, 0, 0).is_none() {
+    let (base, capacity) = slot(0);
+    if Current::map_xip(base, capacity, 0, 0).is_none() {
         event!(Warn, "selftest.skipped", part = "m4b", reason = "no XIP on this platform");
         return 0;
     }
@@ -854,7 +861,7 @@ fn selftest_m4b(apps: &Apps) -> u32 {
         return 1;
     };
     let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), None];
+    s.slots = [Some(a), Some(b), Some(c), None, None, None, None, None];
     s.run(Some(2000), &mut |_| {});
     let mut failures = 0;
     for p in s.slots.iter().flatten() {

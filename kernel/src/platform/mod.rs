@@ -56,7 +56,7 @@ pub trait Platform {
     /// XIP (doc/15): maps `pages` 64 KiB flash pages from `flash_offset`
     /// as the text of process slot `slot`; returns the address
     /// `flash_offset` now appears at. Its data goes `t5a::XIP_DELTA` above.
-    fn map_xip(_slot: usize, _flash_offset: u32, _pages: usize) -> Option<usize> {
+    fn map_xip(_base: usize, _capacity: usize, _flash_offset: u32, _pages: usize) -> Option<usize> {
         None
     }
     /// Before `[addr, addr + len)` is used: writes back and drops the same
