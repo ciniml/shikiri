@@ -66,6 +66,7 @@ net.peer_http v6=true status=HTTP/1.1 301 Moved Permanently ms=22
   - 相手が上流の機器を直接 NS で探す件（下流での代理 NA を足した）
   - smoltcp が NA を送信元で覚える件（代理 NA の送信元を target にした）
 - 一度、`net` の起動から 1 分以上、Wi-Fi に SLAAC のアドレスが付かないことがあった（RA が来なかった）。次の起動では数秒で付いた。上流のルータの RA の間隔によると考える（未調査）。上流のルータを覚えたときは `net.ra` を出すようにした。
+- その後、4 分間 RA が 1 つも来ないこともあった。smoltcp の SLAAC は起動時に RS を 3 回出すだけなので、Wi-Fi に全体向けのアドレスがない間は、Tab5 から 10 秒ごとに RS を出すようにした（`Stack::solicit`、`net.rs_sent`）。直後の起動ではすぐに付いたが、RS が効いたのかどうかはまだ確かめていない。
 
 ## 5. まだ
 - ICMPv6 のエラー（Time Exceeded、Destination Unreachable、Packet Too Big）を作る。

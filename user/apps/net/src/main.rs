@@ -21,6 +21,8 @@
 //! Built with `--permit shm --permit listen:net --permit listen:netctl
 //! --permit netdev:host --permit netdev:wlan0`.
 
+use core::mem::MaybeUninit;
+
 mod filter;
 mod fwd;
 mod fwd6;
@@ -94,16 +96,37 @@ static mut TCP_RX: [[u8; TCP_BUF]; POOL] = [[0; TCP_BUF]; POOL];
 static mut TCP_TX: [[u8; TCP_BUF]; POOL] = [[0; TCP_BUF]; POOL];
 static mut UDP_RX: [[u8; UDP_BUF]; POOL] = [[0; UDP_BUF]; POOL];
 static mut UDP_TX: [[u8; UDP_BUF]; POOL] = [[0; UDP_BUF]; POOL];
-static mut UDP_RX_META: [[udp::PacketMetadata; UDP_PACKETS]; POOL] = [[udp::PacketMetadata::EMPTY; UDP_PACKETS]; POOL];
-static mut UDP_TX_META: [[udp::PacketMetadata; UDP_PACKETS]; POOL] = [[udp::PacketMetadata::EMPTY; UDP_PACKETS]; POOL];
+// The tables whose empty values are not zero bytes are uninitialised (in
+// .bss, not in the image) and filled by `init_statics` at start.
+static mut UDP_RX_META: MaybeUninit<[[udp::PacketMetadata; UDP_PACKETS]; POOL]> = MaybeUninit::uninit();
+static mut UDP_TX_META: MaybeUninit<[[udp::PacketMetadata; UDP_PACKETS]; POOL]> = MaybeUninit::uninit();
 static mut ICMP_RX: [[u8; ICMP_BUF]; POOL] = [[0; ICMP_BUF]; POOL];
 static mut ICMP_TX: [[u8; ICMP_BUF]; POOL] = [[0; ICMP_BUF]; POOL];
 static mut ICMP_RX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; POOL];
 static mut ICMP_TX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; POOL];
-static mut STORAGE0: [SocketStorage<'static>; POOL] = [SocketStorage::EMPTY; POOL];
+static mut STORAGE0: MaybeUninit<[SocketStorage<'static>; POOL]> = MaybeUninit::uninit();
 /// The Ethernet interfaces' sockets: any of the pool, plus the DHCP
 /// client, DNS and the DHCP server.
-static mut ETH_STORAGE: [[SocketStorage<'static>; POOL + 3]; IFACES - 1] = [const { [SocketStorage::EMPTY; POOL + 3] }; IFACES - 1];
+static mut ETH_STORAGE: MaybeUninit<[[SocketStorage<'static>; POOL + 3]; IFACES - 1]> = MaybeUninit::uninit();
+
+/// Writes `n` values made by `f` from `p` on.
+unsafe fn fill<T>(p: *mut T, n: usize, f: impl Fn() -> T) {
+    for i in 0..n {
+        unsafe { p.add(i).write(f()) };
+    }
+}
+
+/// Fills the uninitialised tables (once, before anything uses them).
+fn init_statics() {
+    unsafe {
+        fill(core::ptr::addr_of_mut!(UDP_RX_META).cast::<udp::PacketMetadata>(), UDP_PACKETS * POOL, || udp::PacketMetadata::EMPTY);
+        fill(core::ptr::addr_of_mut!(UDP_TX_META).cast::<udp::PacketMetadata>(), UDP_PACKETS * POOL, || udp::PacketMetadata::EMPTY);
+        fill(core::ptr::addr_of_mut!(STORAGE0).cast::<SocketStorage<'static>>(), POOL, || SocketStorage::EMPTY);
+        fill(core::ptr::addr_of_mut!(ETH_STORAGE).cast::<SocketStorage<'static>>(), (POOL + 3) * (IFACES - 1), || SocketStorage::EMPTY);
+    }
+    filter::init();
+    nat::init();
+}
 static mut DNS_SLOTS: [Option<dns::DnsQuery>; DNS_QUERIES] = [const { None }; DNS_QUERIES];
 
 /// Row `i` of a static table, for pool entry `i` only (each entry's
@@ -123,8 +146,8 @@ fn tcp_socket(i: usize) -> tcp::Socket<'static> {
 
 fn udp_socket(i: usize) -> udp::Socket<'static> {
     unsafe {
-        let rx = udp::PacketBuffer::new(row(core::ptr::addr_of_mut!(UDP_RX_META), i), row(core::ptr::addr_of_mut!(UDP_RX), i));
-        let tx = udp::PacketBuffer::new(row(core::ptr::addr_of_mut!(UDP_TX_META), i), row(core::ptr::addr_of_mut!(UDP_TX), i));
+        let rx = udp::PacketBuffer::new(row((*core::ptr::addr_of_mut!(UDP_RX_META)).as_mut_ptr(), i), row(core::ptr::addr_of_mut!(UDP_RX), i));
+        let tx = udp::PacketBuffer::new(row((*core::ptr::addr_of_mut!(UDP_TX_META)).as_mut_ptr(), i), row(core::ptr::addr_of_mut!(UDP_TX), i));
         udp::Socket::new(rx, tx)
     }
 }
@@ -138,7 +161,7 @@ fn icmp_socket(i: usize) -> icmp::Socket<'static> {
 }
 
 fn eth_storage(link: usize) -> &'static mut [SocketStorage<'static>] {
-    unsafe { row(core::ptr::addr_of_mut!(ETH_STORAGE), link - 1) }
+    unsafe { row((*core::ptr::addr_of_mut!(ETH_STORAGE)).as_mut_ptr(), link - 1) }
 }
 
 // ---- Ethernet links ----
@@ -1027,6 +1050,7 @@ const FLAG_TEST_LAN: u32 = 1;
 const FLAG_PEER_DHCP: u32 = 2;
 
 fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
+    init_statics();
     let pool_shm = Shm::alloc(CLIENTS * proto::SLICE).map_err(|_| 1u32)?;
     let pool = pool_shm.map().map_err(|_| 2u32)?;
     let l = Listener::open(proto::SERVICE).map_err(|_| 3u32)?;
@@ -1040,7 +1064,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let mut stack = Stack {
         iface,
         dev,
-        sockets: SocketSet::new(unsafe { &mut (&mut *core::ptr::addr_of_mut!(STORAGE0))[..] }),
+        sockets: SocketSet::new(unsafe { core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(STORAGE0).cast::<SocketStorage<'static>>(), POOL) }),
         eth: [None, None],
         peer: None,
         slots: [None; SOCKETS],

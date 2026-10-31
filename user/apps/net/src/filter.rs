@@ -155,20 +155,31 @@ struct Filter {
     generation: u32,
 }
 
-static mut FILTER: Filter = Filter {
-    rules: Ruleset::OPEN,
-    hits: [0; MAX_RULES + 3],
-    table: [None; CONNECTIONS],
-    tracked: 0,
-    table_full: 0,
-    log_left: 0,
-    log_until: 0,
-    log_suppressed: 0,
-    generation: 0,
-};
+/// In .bss (its empty values are not all zero bytes, which would put 52
+/// KiB of initial data in the image): `init` fills it in place.
+static mut FILTER: core::mem::MaybeUninit<Filter> = core::mem::MaybeUninit::uninit();
+
+/// Sets the filter up (no rules, no connections); once, at start.
+pub fn init() {
+    unsafe {
+        let p = (*core::ptr::addr_of_mut!(FILTER)).as_mut_ptr();
+        core::ptr::addr_of_mut!((*p).rules).write(Ruleset::OPEN);
+        core::ptr::addr_of_mut!((*p).hits).write([0; MAX_RULES + 3]);
+        let table = core::ptr::addr_of_mut!((*p).table).cast::<Option<Conn>>();
+        for i in 0..CONNECTIONS {
+            table.add(i).write(None);
+        }
+        core::ptr::addr_of_mut!((*p).tracked).write(0);
+        core::ptr::addr_of_mut!((*p).table_full).write(0);
+        core::ptr::addr_of_mut!((*p).log_left).write(0);
+        core::ptr::addr_of_mut!((*p).log_until).write(0);
+        core::ptr::addr_of_mut!((*p).log_suppressed).write(0);
+        core::ptr::addr_of_mut!((*p).generation).write(0);
+    }
+}
 
 fn f() -> &'static mut Filter {
-    unsafe { &mut *core::ptr::addr_of_mut!(FILTER) }
+    unsafe { (*core::ptr::addr_of_mut!(FILTER)).assume_init_mut() }
 }
 
 /// Puts `r` in force at once, between two packets; connections stay.

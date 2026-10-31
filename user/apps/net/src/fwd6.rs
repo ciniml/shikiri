@@ -29,6 +29,9 @@ const NEIGHBOR_TTL_NS: u64 = 300_000_000_000;
 const PENDING: usize = 4;
 const PENDING_NS: u64 = 1_000_000_000;
 const RA_EVERY_NS: u64 = 10_000_000_000;
+/// While Wi-Fi has no global address: how often to ask for an RA.
+const RS_EVERY_NS: u64 = 10_000_000_000;
+const ALL_ROUTERS: u128 = 0xff02_0000_0000_0000_0000_0000_0000_0002;
 /// Advertised lifetimes (s): the router, and the prefix (valid, preferred).
 const ROUTER_LIFETIME: u16 = 1800;
 const PREFIX_VALID: u32 = 3600;
@@ -238,6 +241,8 @@ pub struct Fwd6 {
     router: Option<(u128, [u8; 6])>,
     ra_at: u64,
     ra_now: bool,
+    rs_at: u64,
+    rs_sent: u32,
     /// The downstream prefix last advertised (logged when it changes).
     advertised: Option<u128>,
     stats: Stats,
@@ -248,7 +253,7 @@ pub struct Fwd6 {
 impl Fwd6 {
     pub const fn new() -> Fwd6 {
         let z = Stats { forwarded: 0, no_route: 0, hop_limit: 0, no_neighbor: 0, proxied: 0, ra_sent: 0 };
-        Fwd6 { pending: [const { None }; PENDING], router: None, ra_at: 0, ra_now: false, advertised: None, stats: z, logged: z, stats_at: 0 }
+        Fwd6 { pending: [const { None }; PENDING], router: None, ra_at: 0, ra_now: false, rs_at: 0, rs_sent: 0, advertised: None, stats: z, logged: z, stats_at: 0 }
     }
 }
 
@@ -391,6 +396,7 @@ impl Stack {
             }
         }
         self.ndp();
+        self.solicit();
         self.advertise();
         if now >= self.v6.stats_at {
             self.v6.stats_at = now + 30_000_000_000;
@@ -455,6 +461,32 @@ impl Stack {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Router Solicitations on Wi-Fi while it has no global address:
+    /// smoltcp's SLAAC asks three times at start only, and a router's
+    /// unsolicited RAs may be many minutes apart (seen on the Tab5).
+    fn solicit(&mut self) {
+        if !self.eth_present(WLAN) || self.upstream_prefix(WLAN).is_some() {
+            return;
+        }
+        let now = time_ns();
+        if now < self.v6.rs_at {
+            return;
+        }
+        self.v6.rs_at = now + RS_EVERY_NS;
+        let Some(e) = self.eth[WLAN - 1].as_mut() else { return };
+        let mac = e.dev.mac;
+        let mut msg = [0u8; 16];
+        msg[0] = RS;
+        msg[8..16].copy_from_slice(&[1, 1, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
+        let mut out = [0u8; ETH_HDR + 40 + 16];
+        let n = icmp6_frame(&mut out, multicast_mac(ALL_ROUTERS), mac, link_local(mac), ALL_ROUTERS, &mut msg);
+        e.dev.port.write(&out[..n]);
+        self.v6.rs_sent += 1;
+        if self.v6.rs_sent.is_power_of_two() {
+            event!(Info, "net.rs_sent", count = self.v6.rs_sent);
         }
     }
 

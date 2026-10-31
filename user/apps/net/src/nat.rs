@@ -39,10 +39,25 @@ struct Nat {
     pub full: u32,
 }
 
-static mut NAT: Nat = Nat { maps: [None; MAPS], next_port: PORTS.start, mapped: 0, full: 0 };
+/// In .bss, filled by `init` (as the filter's table).
+static mut NAT: core::mem::MaybeUninit<Nat> = core::mem::MaybeUninit::uninit();
+
+/// Empties the table; once, at start.
+pub fn init() {
+    unsafe {
+        let p = (*core::ptr::addr_of_mut!(NAT)).as_mut_ptr();
+        let maps = core::ptr::addr_of_mut!((*p).maps).cast::<Option<Map>>();
+        for i in 0..MAPS {
+            maps.add(i).write(None);
+        }
+        core::ptr::addr_of_mut!((*p).next_port).write(PORTS.start);
+        core::ptr::addr_of_mut!((*p).mapped).write(0);
+        core::ptr::addr_of_mut!((*p).full).write(0);
+    }
+}
 
 fn nat() -> &'static mut Nat {
-    unsafe { &mut *core::ptr::addr_of_mut!(NAT) }
+    unsafe { (*core::ptr::addr_of_mut!(NAT)).assume_init_mut() }
 }
 
 fn lifetime(proto: u8) -> u64 {
