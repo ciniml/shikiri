@@ -1,21 +1,32 @@
 //! The PC end of the host link (doc/21) inside the emulator: a smoltcp
 //! interface at 10.55.0.1/24 whose packets travel as frames on the USJ
-//! console, as `t5log hostlink` sends them. Once started it pings the Tab5
-//! (10.55.0.2) and then sends data to the TCP echo server (`nettest 1`,
-//! port 7777) and checks that the same bytes come back.
+//! console, as `t5log hostlink` sends them. Once started it pings the
+//! target (the Tab5, 10.55.0.2, by default) and then sends data to the TCP
+//! echo server on port 7777 (`nettest 1`) and checks that the same bytes
+//! come back.
+//!
+//! A target elsewhere is reached through the Tab5 (default route via
+//! 10.55.0.2): the forwarding test (doc/23 §6) against the test LAN's peer
+//! (`run net 1`, 192.168.50.2). It then also checks the Tab5's ICMP errors:
+//! Time Exceeded for a ping with TTL 1, Destination Unreachable for a ping
+//! to a network without a route.
 
 use std::collections::VecDeque;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{icmp, tcp};
+use smoltcp::socket::{icmp, raw, tcp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr};
+use smoltcp::wire::{HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpProtocol, IpVersion, Ipv4Address};
 
 use crate::periph::{PACKET, Usj};
 
 const PEER: IpAddress = IpAddress::v4(10, 55, 0, 1);
 const TAB5: IpAddress = IpAddress::v4(10, 55, 0, 2);
+/// Has no route on the Tab5 (forwarding test).
+const NOWHERE: IpAddress = IpAddress::v4(192, 168, 99, 1);
+const ICMP_TIME_EXCEEDED: u8 = 11;
+const ICMP_DEST_UNREACHABLE: u8 = 3;
 const ECHO_PORT: u16 = 7777;
 const MTU: usize = 1500;
 const PINGS: u16 = 3;
@@ -77,6 +88,9 @@ enum Step {
     Idle,
     Ping { seq: u16, sent_at: i64 },
     Tcp,
+    /// An ICMP error of `kind` from the Tab5 is due for the ping sent at
+    /// `sent_at` (to the target with TTL 1, or to `NOWHERE`).
+    IcmpError { kind: u8, sent_at: i64 },
     Passed,
     Failed,
 }
@@ -87,6 +101,9 @@ pub struct HostPeer {
     sockets: SocketSet<'static>,
     icmp: SocketHandle,
     tcp: SocketHandle,
+    /// Every ICMP packet that arrives (for the errors).
+    raw: SocketHandle,
+    target: IpAddress,
     step: Step,
     since: i64,
     /// What goes to the echo server, and how much was sent and checked.
@@ -95,21 +112,30 @@ pub struct HostPeer {
     checked: usize,
     pub ping_ms: Vec<f64>,
     pub tcp_ms: i64,
+    /// ICMP errors seen (forwarding test).
+    pub icmp_errors: Vec<u8>,
     pub why: String,
 }
 
 impl HostPeer {
-    /// `bytes`: how much to send to the echo server.
-    pub fn new(bytes: usize) -> HostPeer {
+    /// `bytes`: how much to send to the echo server at `target`.
+    pub fn new(bytes: usize, target: Ipv4Address) -> HostPeer {
         let mut dev = Queues::default();
         let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut dev, Instant::ZERO);
         iface.update_ip_addrs(|a| a.push(IpCidr::new(PEER, 24)).unwrap());
+        iface.routes_mut().add_default_ipv4_route(Ipv4Address::new(10, 55, 0, 2)).unwrap();
         let mut sockets = SocketSet::new(Vec::new());
         let icmp = sockets.add(icmp::Socket::new(
             icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 1024]),
             icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 4], vec![0; 1024]),
         ));
         let tcp = sockets.add(tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 65536]), tcp::SocketBuffer::new(vec![0; 65536])));
+        let raw = sockets.add(raw::Socket::new(
+            Some(IpVersion::Ipv4),
+            Some(IpProtocol::Icmp),
+            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 16], vec![0; 4096]),
+            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 1], vec![0; 64]),
+        ));
         // Deterministic contents that are not periodic in the window size.
         let mut x = 0x2545_F491u32;
         let data = (0..bytes)
@@ -126,6 +152,8 @@ impl HostPeer {
             sockets,
             icmp,
             tcp,
+            raw,
+            target: IpAddress::Ipv4(target),
             step: Step::Idle,
             since: 0,
             data,
@@ -133,6 +161,7 @@ impl HostPeer {
             checked: 0,
             ping_ms: Vec::new(),
             tcp_ms: 0,
+            icmp_errors: Vec::new(),
             why: String::new(),
         }
     }
@@ -187,7 +216,7 @@ impl HostPeer {
                 }
                 if sent_at < 0 {
                     let repr = Icmpv4Repr::EchoRequest { ident: IDENT, seq_no: seq, data: b"t5emu host peer" };
-                    let Ok(buf) = s.send(repr.buffer_len(), TAB5) else { return };
+                    let Ok(buf) = s.send(repr.buffer_len(), self.target) else { return };
                     repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &ChecksumCapabilities::default());
                     self.step = Step::Ping { seq, sent_at: now_ms };
                     return;
@@ -197,7 +226,7 @@ impl HostPeer {
                     let Ok(Icmpv4Repr::EchoReply { seq_no, .. }) = Icmpv4Repr::parse(&p, &ChecksumCapabilities::default()) else {
                         continue;
                     };
-                    if from == TAB5 && seq_no == seq {
+                    if from == self.target && seq_no == seq {
                         self.ping_ms.push((now_ms - sent_at) as f64);
                         self.step = if seq + 1 == PINGS {
                             self.since = now_ms;
@@ -216,7 +245,7 @@ impl HostPeer {
                 let cx = self.iface.context();
                 let s = self.sockets.get_mut::<tcp::Socket>(self.tcp);
                 if !s.is_open() {
-                    s.connect(cx, (TAB5, ECHO_PORT), 49152).unwrap();
+                    s.connect(cx, (self.target, ECHO_PORT), 49152).unwrap();
                 }
                 if s.can_send() && self.sent < self.data.len() {
                     self.sent += s.send_slice(&self.data[self.sent..]).unwrap_or(0);
@@ -242,14 +271,47 @@ impl HostPeer {
                 if self.checked == self.data.len() {
                     s.close();
                     self.tcp_ms = now_ms - self.since;
-                    self.step = Step::Passed;
+                    self.step = if self.target == TAB5 { Step::Passed } else { self.send_probe(ICMP_TIME_EXCEEDED, now_ms) };
                 } else if !s.is_open() {
                     self.fail(format!("TCP closed after {} of {} bytes", self.checked, self.data.len()));
                 } else if now_ms - self.since > TIMEOUT_MS * 4 {
                     self.fail(format!("TCP echo: {} of {} bytes after {} ms", self.checked, self.data.len(), now_ms - self.since));
                 }
             }
+            Step::IcmpError { kind, sent_at } => {
+                // An IPv4 packet: the ICMP type follows the header.
+                let mut got = false;
+                let r = self.sockets.get_mut::<raw::Socket>(self.raw);
+                while let Ok(p) = r.recv() {
+                    let ihl = (p[0] & 0xF) as usize * 4;
+                    let src = IpAddress::v4(p[12], p[13], p[14], p[15]);
+                    if src == TAB5 && p.get(ihl) == Some(&kind) {
+                        got = true;
+                    }
+                }
+                if got {
+                    self.icmp_errors.push(kind);
+                    self.step = if kind == ICMP_TIME_EXCEEDED { self.send_probe(ICMP_DEST_UNREACHABLE, now_ms) } else { Step::Passed };
+                } else if now_ms - sent_at > TIMEOUT_MS {
+                    self.fail(format!("no ICMP type {kind} from the Tab5"));
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Sends the ping that should come back as ICMP error `kind`.
+    fn send_probe(&mut self, kind: u8, now_ms: i64) -> Step {
+        // Drop what the raw socket has collected so far (echo replies).
+        let r = self.sockets.get_mut::<raw::Socket>(self.raw);
+        while r.recv().is_ok() {}
+        let s = self.sockets.get_mut::<icmp::Socket>(self.icmp);
+        let (to, ttl) = if kind == ICMP_TIME_EXCEEDED { (self.target, Some(1)) } else { (NOWHERE, None) };
+        s.set_hop_limit(ttl);
+        let repr = Icmpv4Repr::EchoRequest { ident: IDENT, seq_no: 100 + kind as u16, data: b"t5emu probe" };
+        if let Ok(buf) = s.send(repr.buffer_len(), to) {
+            repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &ChecksumCapabilities::default());
+        }
+        Step::IcmpError { kind, sent_at: now_ms }
     }
 }

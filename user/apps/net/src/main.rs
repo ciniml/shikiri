@@ -1,38 +1,49 @@
 #![no_std]
 #![no_main]
 
-//! The network service (N1/N2a/N2b, doc/20, doc/21, doc/22): smoltcp in
-//! U-mode. Links: loopback (127.0.0.0/8) and, if the kernel offers it, the
-//! host link to the PC (`netdev:host`, 10.55.0.2/24): one smoltcp interface
-//! runs over a `Links` device that sends each packet to the link its
-//! destination belongs to (the place for forwarding later, N3). The Wi-Fi
-//! station (`netdev:wlan0`, Ethernet, address by DHCP) is a second
-//! interface with its own sockets; a TCP connection goes there when its
-//! destination is on neither of the first two links. Clients on `svc:net`
-//! get a 64 KiB slice of shared memory for data and use TCP and UDP sockets
-//! through `t5_abi::net` requests, and can ping and resolve names (DNS, on
-//! the Wi-Fi link with the servers DHCP gave). No allocator: socket buffers
-//! are static.
+//! The network service (N1-N3, doc/20, doc/21, doc/22, doc/23): smoltcp in
+//! U-mode, one interface per kind of link:
+//!
+//! - interface 0 (`Medium::Ip`): loopback (127.0.0.0/8) and, if the kernel
+//!   offers it, the host link to the PC (`netdev:host`, 10.55.0.2/24);
+//! - the Wi-Fi station (`netdev:wlan0`, Ethernet, address by DHCP);
+//! - with `run net 1`, the test LAN (`test0`, 192.168.50.1/24, whose peer
+//!   192.168.50.2 lives in this service too, `testlan`).
+//!
+//! Packets for other hosts are forwarded between the links (`fwd`). Clients
+//! on `svc:net` get a 64 KiB slice of shared memory for data and use TCP and
+//! UDP sockets, ping and DNS through `t5_abi::net` requests. A socket that
+//! listens on every link is one smoltcp socket per interface. No allocator:
+//! socket buffers are a static pool.
 //!
 //! Built with `--permit shm --permit listen:net --permit netdev:host
 //! --permit netdev:wlan0`.
 
+mod fwd;
+mod link;
+mod testlan;
+
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
+use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address};
 use t5_rt::net::{self as proto, op, state, status};
 use t5_rt::{Channel, Error, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
+
+use fwd::{Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
+use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, Port};
 
 t5_rt::entry!(main);
 
 const CLIENTS: usize = 4;
+/// Client sockets.
 const SOCKETS: usize = 8;
+/// smoltcp sockets with buffers: a client socket that listens on every
+/// link takes one per interface.
+const POOL: usize = 16;
 const TCP_BUF: usize = 16 << 10;
 const UDP_PACKETS: usize = 16;
 const UDP_BUF: usize = 8 << 10;
-const MTU: usize = 1500;
 const ICMP_PACKETS: usize = 2;
 const ICMP_BUF: usize = 256;
 /// Echo data at most (PING's b).
@@ -41,363 +52,32 @@ const PING_DATA: usize = 64;
 const DNS_QUERIES: usize = 4;
 /// Longest wait without a request, so timers (retransmission) run.
 const IDLE_NS: u64 = 50_000_000;
+/// The pool index of the shared DNS socket (not in the pool).
+const SHARED: usize = usize::MAX;
 
-// ---- loopback link: a fixed ring of frames ----
-
-const RING: usize = 16;
-
-struct Loopback {
-    frames: [[u8; MTU]; RING],
-    lens: [usize; RING],
-    head: usize,
-    count: usize,
-}
-
-impl Loopback {
-    fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-}
-
-struct Rx {
-    frame: [u8; MTU],
-    len: usize,
-}
-
-impl RxToken for Rx {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.frame[..self.len])
-    }
-}
-
-struct Tx<'a>(&'a mut Loopback);
-
-impl TxToken for Tx<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let l = self.0;
-        if l.count == RING {
-            // Full: the frame is lost, as on a real link.
-            let mut scratch = [0u8; MTU];
-            return f(&mut scratch[..len]);
-        }
-        let i = (l.head + l.count) % RING;
-        let r = f(&mut l.frames[i][..len]);
-        l.lens[i] = len;
-        l.count += 1;
-        r
-    }
-}
-
-impl Device for Loopback {
-    type RxToken<'a> = Rx;
-    type TxToken<'a> = Tx<'a>;
-
-    fn receive(&mut self, _: Instant) -> Option<(Rx, Tx<'_>)> {
-        if self.count == 0 {
-            return None;
-        }
-        let i = self.head;
-        let mut rx = Rx { frame: [0; MTU], len: self.lens[i] };
-        rx.frame[..rx.len].copy_from_slice(&self.frames[i][..rx.len]);
-        self.head = (self.head + 1) % RING;
-        self.count -= 1;
-        Some((rx, Tx(self)))
-    }
-
-    fn transmit(&mut self, _: Instant) -> Option<Tx<'_>> {
-        (self.count < RING).then_some(Tx(self))
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut c = DeviceCapabilities::default();
-        c.medium = Medium::Ip;
-        c.max_transmission_unit = MTU;
-        c
-    }
-}
-
-// ---- the links: loopback and the host link, behind one device ----
-
-/// The host link's address and network (doc/21).
-const HOST_ADDR: [u8; 4] = [10, 55, 0, 2];
-const HOST_PREFIX: u8 = 24;
-
-struct Links {
-    lo: &'static mut Loopback,
-    /// `netdev:host`, if the kernel has it.
-    host: Option<Handle>,
-    to_host: u32,
-    from_host: u32,
-}
-
-/// A frame for the stack: copied out of either link.
-struct LinkRx {
-    frame: [u8; MTU],
-    len: usize,
-}
-
-impl RxToken for LinkRx {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.frame[..self.len])
-    }
-}
-
-/// A frame from the stack: built here, then sent by its destination.
-struct LinkTx<'a>(&'a mut Links);
-
-impl TxToken for LinkTx<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut buf = [0u8; MTU];
-        let r = f(&mut buf[..len]);
-        let links = self.0;
-        // IPv4 destination: bytes 16-19. 127/8 stays on the Tab5.
-        if len >= 20 && buf[16] != 127
-            && let Some(h) = &links.host
-        {
-            let ok = h.write(&buf[..len]).is_ok();
-            if ok {
-                links.to_host += 1;
-            }
-            if links.to_host < 4 || !ok {
-                event!(Debug, "net.host_tx", len = len as u32, ok = ok, sent = links.to_host);
-            }
-            return r;
-        }
-        Tx(links.lo).consume(len, |out| out.copy_from_slice(&buf[..len]));
-        r
-    }
-}
-
-impl Device for Links {
-    type RxToken<'a> = LinkRx;
-    type TxToken<'a> = LinkTx<'a>;
-
-    fn receive(&mut self, t: Instant) -> Option<(LinkRx, LinkTx<'_>)> {
-        if let Some((rx, _)) = self.lo.receive(t) {
-            let mut out = LinkRx { frame: [0; MTU], len: rx.len };
-            out.frame[..rx.len].copy_from_slice(&rx.frame[..rx.len]);
-            return Some((out, LinkTx(self)));
-        }
-        let h = self.host.as_ref()?;
-        let mut out = LinkRx { frame: [0; MTU], len: 0 };
-        out.len = h.read(&mut out.frame).ok()?;
-        self.from_host += 1;
-        if self.from_host <= 8 {
-            let f = &out.frame;
-            event!(Debug, "net.host_rx", len = out.len as u32, ver = f[0] >> 4, proto = f[9], dst = u32::from_be_bytes([f[16], f[17], f[18], f[19]]));
-        }
-        Some((out, LinkTx(self)))
-    }
-
-    fn transmit(&mut self, _: Instant) -> Option<LinkTx<'_>> {
-        (self.lo.count < RING).then_some(LinkTx(self))
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        self.lo.capabilities()
-    }
-}
-
-// ---- the Wi-Fi station: Ethernet frames on `netdev:wlan0` ----
-
-struct WlanNic {
-    h: Handle,
-    mac: [u8; 6],
-    rx: u32,
-    /// Frames to this station's MAC address, and DHCP replies (UDP to 68).
-    rx_unicast: u32,
-    rx_dhcp: u32,
-    tx: u32,
-    tx_dropped: u32,
-}
-
-struct EthRx {
-    frame: [u8; netdev::ETH_FRAME],
-    len: usize,
-}
-
-impl RxToken for EthRx {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.frame[..self.len])
-    }
-}
-
-struct EthTx<'a>(&'a mut WlanNic);
-
-impl TxToken for EthTx<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut buf = [0u8; netdev::ETH_FRAME];
-        let r = f(&mut buf[..len]);
-        let nic = self.0;
-        for _ in 0..20 {
-            match nic.h.write(&buf[..len]) {
-                Ok(_) => {
-                    nic.tx += 1;
-                    return r;
-                }
-                Err(Error::Busy) => sleep_ms(1),
-                Err(_) => break,
-            }
-        }
-        nic.tx_dropped += 1;
-        r
-    }
-}
-
-impl Device for WlanNic {
-    type RxToken<'a> = EthRx;
-    type TxToken<'a> = EthTx<'a>;
-
-    fn receive(&mut self, _: Instant) -> Option<(EthRx, EthTx<'_>)> {
-        let mut out = EthRx { frame: [0; netdev::ETH_FRAME], len: 0 };
-        out.len = self.h.read(&mut out.frame).ok()?;
-        self.rx += 1;
-        let f = &out.frame;
-        if f[..6] == self.mac {
-            self.rx_unicast += 1;
-        }
-        // IPv4 (no options assumed), UDP, destination port 68.
-        if out.len > 42 && f[12..14] == [8, 0] && f[23] == 17 && f[36..38] == [0, 68] {
-            self.rx_dhcp += 1;
-            // From the IP header to the client hardware address (BOOTP chaddr).
-            event!(Debug, "net.dhcp_rx", len = out.len as u32, head = &f[14..76]);
-        }
-        Some((out, EthTx(self)))
-    }
-
-    fn transmit(&mut self, _: Instant) -> Option<EthTx<'_>> {
-        Some(EthTx(self))
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut c = DeviceCapabilities::default();
-        c.medium = Medium::Ethernet;
-        c.max_transmission_unit = netdev::ETH_FRAME;
-        c
-    }
-}
-
-struct Wifi {
-    iface: Interface,
-    dev: WlanNic,
-    sockets: SocketSet<'static>,
-    dhcp: SocketHandle,
-    /// Made when DHCP names DNS servers.
-    dns: Option<SocketHandle>,
-    configured: bool,
-    /// Static addressing: no DHCP socket.
-    dhcp_off: bool,
-    /// While not configured: when to log the counters next.
-    report_at: u64,
-}
-
-/// Opens `netdev:wlan0` once the Wi-Fi service has told the kernel the MAC
-/// address (it has joined or is joining), waiting up to 10 s.
-fn open_wifi() -> Option<Wifi> {
-    let h = Handle::open(netdev::WLAN0, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).ok()?;
-    let mut mac = None;
-    for _ in 0..100 {
-        if let (Ok(lo), Ok(hi)) = (h.ctl(netdev::MAC_LO, 0), h.ctl(netdev::MAC_HI, 0)) {
-            let b = (lo as u64 | (hi as u64) << 32).to_le_bytes();
-            mac = Some(EthernetAddress([b[0], b[1], b[2], b[3], b[4], b[5]]));
-            break;
-        }
-        sleep_ms(100);
-    }
-    let Some(mac) = mac else {
-        event!(Warn, "net.no_wifi_mac");
-        return None;
-    };
-    let mut dev = WlanNic { h, mac: mac.0, rx: 0, rx_unicast: 0, rx_dhcp: 0, tx: 0, tx_dropped: 0 };
-    let iface = Interface::new(Config::new(HardwareAddress::Ethernet(mac)), &mut dev, now());
-    let storage = unsafe { core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(WIFI_STORAGE).cast::<SocketStorage<'static>>(), SOCKETS + 2) };
-    let mut sockets = SocketSet::new(storage);
-    let dhcp = sockets.add(dhcpv4::Socket::new());
-    event!(Info, "net.link", link = "wlan0", addr = "dhcp", mtu = netdev::MTU as u32);
-    Some(Wifi { iface, dev, sockets, dhcp, dns: None, configured: false, dhcp_off: false, report_at: time_ns() + 5_000_000_000 })
-}
-
-impl Wifi {
-    /// Applies what DHCP says (address, default route).
-    fn dhcp(&mut self) {
-        if (!self.configured || self.dhcp_off) && time_ns() >= self.report_at {
-            self.report_at = time_ns() + 5_000_000_000;
-            let d = &self.dev;
-            event!(Info, "net.wifi_waiting", rx = d.rx, rx_unicast = d.rx_unicast, rx_dhcp = d.rx_dhcp, tx = d.tx, tx_dropped = d.tx_dropped);
-        }
-        if self.dhcp_off {
-            return;
-        }
-        let ev = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll();
-        match ev {
-            Some(dhcpv4::Event::Configured(c)) => {
-                self.iface.update_ip_addrs(|a| {
-                    a.clear();
-                    let _ = a.push(IpCidr::Ipv4(c.address));
-                });
-                match c.router {
-                    Some(gw) => {
-                        let _ = self.iface.routes_mut().add_default_ipv4_route(gw);
-                    }
-                    None => {
-                        self.iface.routes_mut().remove_default_ipv4_route();
-                    }
-                }
-                let dns = c.dns_servers.first().map_or(0, |d| d.to_bits());
-                let mut servers = [IpAddress::v4(0, 0, 0, 0); 3];
-                let n = c.dns_servers.len().min(servers.len());
-                for (s, d) in servers.iter_mut().zip(c.dns_servers.iter()) {
-                    *s = IpAddress::Ipv4(*d);
-                }
-                event!(
-                    Info,
-                    "net.dhcp",
-                    link = "wlan0",
-                    addr = c.address.address().to_bits(),
-                    prefix = c.address.prefix_len() as u32,
-                    router = c.router.map_or(0, |r| r.to_bits()),
-                    dns = dns
-                );
-                match self.dns {
-                    Some(h) => self.sockets.get_mut::<dns::Socket>(h).update_servers(&servers[..n]),
-                    None if n > 0 => {
-                        let q = unsafe { &mut *core::ptr::addr_of_mut!(DNS_SLOTS) };
-                        self.dns = Some(self.sockets.add(dns::Socket::new(&servers[..n], &mut q[..])));
-                    }
-                    None => {}
-                }
-                self.configured = true;
-            }
-            Some(dhcpv4::Event::Deconfigured) => {
-                self.iface.update_ip_addrs(|a| a.clear());
-                self.iface.routes_mut().remove_default_ipv4_route();
-                event!(Info, "net.dhcp_lost", link = "wlan0");
-                self.configured = false;
-            }
-            None => {}
-        }
-    }
+pub fn now() -> Instant {
+    Instant::from_micros((time_ns() / 1000) as i64)
 }
 
 // ---- socket storage (static: there is no allocator) ----
 
-static mut TCP_RX: [[u8; TCP_BUF]; SOCKETS] = [[0; TCP_BUF]; SOCKETS];
-static mut TCP_TX: [[u8; TCP_BUF]; SOCKETS] = [[0; TCP_BUF]; SOCKETS];
-static mut UDP_RX: [[u8; UDP_BUF]; SOCKETS] = [[0; UDP_BUF]; SOCKETS];
-static mut UDP_TX: [[u8; UDP_BUF]; SOCKETS] = [[0; UDP_BUF]; SOCKETS];
-static mut UDP_RX_META: [[udp::PacketMetadata; UDP_PACKETS]; SOCKETS] = [[udp::PacketMetadata::EMPTY; UDP_PACKETS]; SOCKETS];
-static mut UDP_TX_META: [[udp::PacketMetadata; UDP_PACKETS]; SOCKETS] = [[udp::PacketMetadata::EMPTY; UDP_PACKETS]; SOCKETS];
-static mut STORAGE: [SocketStorage<'static>; SOCKETS] = [SocketStorage::EMPTY; SOCKETS];
-static mut ICMP_RX: [[u8; ICMP_BUF]; SOCKETS] = [[0; ICMP_BUF]; SOCKETS];
-static mut ICMP_TX: [[u8; ICMP_BUF]; SOCKETS] = [[0; ICMP_BUF]; SOCKETS];
-static mut ICMP_RX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; SOCKETS] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; SOCKETS];
-static mut ICMP_TX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; SOCKETS] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; SOCKETS];
-/// The Wi-Fi interface's sockets: any slot can be there, plus DHCP and DNS.
-static mut WIFI_STORAGE: [SocketStorage<'static>; SOCKETS + 2] = [SocketStorage::EMPTY; SOCKETS + 2];
+static mut TCP_RX: [[u8; TCP_BUF]; POOL] = [[0; TCP_BUF]; POOL];
+static mut TCP_TX: [[u8; TCP_BUF]; POOL] = [[0; TCP_BUF]; POOL];
+static mut UDP_RX: [[u8; UDP_BUF]; POOL] = [[0; UDP_BUF]; POOL];
+static mut UDP_TX: [[u8; UDP_BUF]; POOL] = [[0; UDP_BUF]; POOL];
+static mut UDP_RX_META: [[udp::PacketMetadata; UDP_PACKETS]; POOL] = [[udp::PacketMetadata::EMPTY; UDP_PACKETS]; POOL];
+static mut UDP_TX_META: [[udp::PacketMetadata; UDP_PACKETS]; POOL] = [[udp::PacketMetadata::EMPTY; UDP_PACKETS]; POOL];
+static mut ICMP_RX: [[u8; ICMP_BUF]; POOL] = [[0; ICMP_BUF]; POOL];
+static mut ICMP_TX: [[u8; ICMP_BUF]; POOL] = [[0; ICMP_BUF]; POOL];
+static mut ICMP_RX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; POOL];
+static mut ICMP_TX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; POOL];
+static mut STORAGE0: [SocketStorage<'static>; POOL] = [SocketStorage::EMPTY; POOL];
+/// The Ethernet interfaces' sockets: any of the pool, plus DHCP and DNS.
+static mut ETH_STORAGE: [[SocketStorage<'static>; POOL + 2]; IFACES - 1] = [const { [SocketStorage::EMPTY; POOL + 2] }; IFACES - 1];
 static mut DNS_SLOTS: [Option<dns::DnsQuery>; DNS_QUERIES] = [const { None }; DNS_QUERIES];
 
-/// Row `i` of a static table, for slot `i` only (each slot's buffers are
-/// handed to one socket at a time).
+/// Row `i` of a static table, for pool entry `i` only (each entry's
+/// buffers are handed to one socket at a time).
 unsafe fn row<T, const N: usize, const M: usize>(table: *mut [[T; N]; M], i: usize) -> &'static mut [T] {
     assert!(i < M);
     unsafe { core::slice::from_raw_parts_mut(table.cast::<T>().add(i * N), N) }
@@ -427,145 +107,417 @@ fn icmp_socket(i: usize) -> icmp::Socket<'static> {
     }
 }
 
+fn eth_storage(link: usize) -> &'static mut [SocketStorage<'static>] {
+    unsafe { row(core::ptr::addr_of_mut!(ETH_STORAGE), link - 1) }
+}
+
+// ---- Ethernet links ----
+
+pub struct EthLink {
+    pub iface: Interface,
+    pub dev: EthNic,
+    pub sockets: SocketSet<'static>,
+    dhcp: Option<SocketHandle>,
+    /// Made when DHCP names DNS servers.
+    dns: Option<SocketHandle>,
+    /// The default router DHCP gave.
+    pub router: Option<u32>,
+    /// While it has no address: when to log the counters next.
+    report_at: u64,
+}
+
+impl EthLink {
+    fn new(link: usize, port: Port, mac: [u8; 6]) -> EthLink {
+        let mut dev = EthNic { link, port, mac, own: None, rx: 0, rx_unicast: 0, tx: 0, tx_dropped: 0 };
+        let iface = Interface::new(Config::new(HardwareAddress::Ethernet(EthernetAddress(mac))), &mut dev, now());
+        EthLink { iface, dev, sockets: SocketSet::new(eth_storage(link)), dhcp: None, dns: None, router: None, report_at: time_ns() + 5_000_000_000 }
+    }
+
+    fn set_addr(&mut self, addr: u32, prefix: u8, router: Option<u32>) {
+        self.iface.update_ip_addrs(|a| {
+            a.clear();
+            let _ = a.push(IpCidr::new(Ipv4Address::from_bits(addr).into(), prefix));
+        });
+        match router {
+            Some(gw) => {
+                let _ = self.iface.routes_mut().add_default_ipv4_route(Ipv4Address::from_bits(gw));
+            }
+            None => {
+                self.iface.routes_mut().remove_default_ipv4_route();
+            }
+        }
+        self.dev.own = Some((addr, prefix));
+        self.router = router;
+    }
+
+    /// Applies what DHCP says (address, default route, DNS servers).
+    fn dhcp(&mut self) {
+        let name = LINK_NAMES[self.dev.link];
+        if self.dev.own.is_none() && time_ns() >= self.report_at {
+            self.report_at = time_ns() + 5_000_000_000;
+            link::log_counters(name, &self.dev);
+        }
+        let Some(h) = self.dhcp else { return };
+        match self.sockets.get_mut::<dhcpv4::Socket>(h).poll() {
+            Some(dhcpv4::Event::Configured(c)) => {
+                let (addr, prefix) = (c.address.address().to_bits(), c.address.prefix_len());
+                let router = c.router.map(|r| r.to_bits());
+                let mut servers = [IpAddress::v4(0, 0, 0, 0); 3];
+                let n = c.dns_servers.len().min(servers.len());
+                for (s, d) in servers.iter_mut().zip(c.dns_servers.iter()) {
+                    *s = IpAddress::Ipv4(*d);
+                }
+                event!(Info, "net.dhcp", link = name, addr = addr, prefix = prefix as u32, router = router.unwrap_or(0), dns = c.dns_servers.first().map_or(0, |d| d.to_bits()));
+                self.set_addr(addr, prefix, router);
+                match self.dns {
+                    Some(d) => self.sockets.get_mut::<dns::Socket>(d).update_servers(&servers[..n]),
+                    None if n > 0 => {
+                        let q = unsafe { &mut *core::ptr::addr_of_mut!(DNS_SLOTS) };
+                        self.dns = Some(self.sockets.add(dns::Socket::new(&servers[..n], &mut q[..])));
+                    }
+                    None => {}
+                }
+            }
+            Some(dhcpv4::Event::Deconfigured) => {
+                self.iface.update_ip_addrs(|a| a.clear());
+                self.iface.routes_mut().remove_default_ipv4_route();
+                self.dev.own = None;
+                self.router = None;
+                event!(Info, "net.dhcp_lost", link = name);
+            }
+            None => {}
+        }
+    }
+}
+
+/// Opens `netdev:wlan0` once the Wi-Fi service has told the kernel the MAC
+/// address (it has joined or is joining), waiting up to 10 s.
+fn open_wifi() -> Option<EthLink> {
+    let h = Handle::open(netdev::WLAN0, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).ok()?;
+    let mut mac = None;
+    for _ in 0..100 {
+        if let (Ok(lo), Ok(hi)) = (h.ctl(netdev::MAC_LO, 0), h.ctl(netdev::MAC_HI, 0)) {
+            let b = (lo as u64 | (hi as u64) << 32).to_le_bytes();
+            mac = Some([b[0], b[1], b[2], b[3], b[4], b[5]]);
+            break;
+        }
+        sleep_ms(100);
+    }
+    let Some(mac) = mac else {
+        event!(Warn, "net.no_wifi_mac");
+        return None;
+    };
+    let mut l = EthLink::new(WLAN, Port::Dev(h), mac);
+    l.dhcp = Some(l.sockets.add(dhcpv4::Socket::new()));
+    event!(Info, "net.link", link = "wlan0", addr = "dhcp", mtu = netdev::MTU as u32);
+    Some(l)
+}
+
+// ---- client sockets ----
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Tcp,
     Udp,
     /// One echo request and its reply.
     Ping,
-    /// One name lookup on the Wi-Fi link's DNS socket (shared: `handle`).
+    /// One name lookup on the Wi-Fi link's DNS socket (shared).
     Dns,
+}
+
+/// One smoltcp socket and its pool entry.
+#[derive(Clone, Copy)]
+struct Sock {
+    handle: SocketHandle,
+    pool: usize,
 }
 
 #[derive(Clone, Copy)]
 struct Slot {
-    handle: SocketHandle,
     kind: Kind,
-    /// On the Wi-Fi interface (else on the first one).
-    wifi: bool,
     /// The client that owns it; None once closed, until the stack is done.
     owner: Option<usize>,
+    /// Its smoltcp socket on each interface (several only while listening
+    /// or bound on every link).
+    socks: [Option<Sock>; IFACES],
+    /// The interface that sends and receives.
+    primary: usize,
     /// Ping: when the request went out (ns).
     sent_ns: u64,
     /// Dns: the lookup, until its result is taken.
     query: Option<dns::QueryHandle>,
 }
 
-/// The echo identifier of slot `i`.
+/// The echo identifier of client socket `i`.
 fn ping_ident(i: usize) -> u16 {
     0x7450 + i as u16
 }
 
-struct Stack {
+pub struct Stack {
     iface: Interface,
-    dev: Links,
+    pub dev: Links,
     sockets: SocketSet<'static>,
-    wifi: Option<Wifi>,
+    /// The Ethernet links (`WLAN`, `TEST`), at index link - 1.
+    pub eth: [Option<EthLink>; IFACES - 1],
+    peer: Option<testlan::Peer>,
     slots: [Option<Slot>; SOCKETS],
+    pool_used: [bool; POOL],
     next_port: u16,
-}
-
-/// Whether `a` is reached on the first interface (loopback, host link).
-fn local(a: u32) -> bool {
-    let [x, y, z, _] = a.to_be_bytes();
-    x == 127 || [x, y, z] == [HOST_ADDR[0], HOST_ADDR[1], HOST_ADDR[2]]
-}
-
-fn now() -> Instant {
-    Instant::from_micros((time_ns() / 1000) as i64)
+    pub fwd: Forwarder,
 }
 
 impl Stack {
-    /// Runs the stack until nothing moves.
+    /// Runs the interfaces, the test LAN's peer and forwarding until
+    /// nothing moves (a forwarded packet may need another round: ARP, the
+    /// peer's answer).
     fn poll(&mut self) {
-        for _ in 0..256 {
-            let r = self.iface.poll(now(), &mut self.dev, &mut self.sockets);
-            if r == PollResult::None && self.dev.lo.is_empty() {
+        for _ in 0..8 {
+            let mut moved = false;
+            for _ in 0..256 {
+                let r = self.iface.poll(now(), &mut self.dev, &mut self.sockets);
+                if r == PollResult::None && Links::loopback_idle() {
+                    break;
+                }
+                moved = true;
+            }
+            for e in self.eth.iter_mut().flatten() {
+                for _ in 0..64 {
+                    if e.iface.poll(now(), &mut e.dev, &mut e.sockets) == PollResult::None {
+                        break;
+                    }
+                    moved = true;
+                }
+                e.dhcp();
+            }
+            if let Some(p) = &mut self.peer {
+                p.poll();
+            }
+            let busy = !fwd::inbox().is_empty() || !link::to_peer().is_empty() || !link::from_peer().is_empty();
+            self.forward();
+            if !moved && !busy {
                 break;
             }
         }
-        if let Some(w) = &mut self.wifi {
-            for _ in 0..64 {
-                if w.iface.poll(now(), &mut w.dev, &mut w.sockets) == PollResult::None {
-                    break;
-                }
+        self.sweep();
+    }
+
+    /// The earliest time an interface wants to be polled again.
+    fn poll_delay(&mut self) -> Option<smoltcp::time::Duration> {
+        let mut delay = self.iface.poll_delay(now(), &self.sockets);
+        let mut min = |d: Option<smoltcp::time::Duration>| {
+            if let Some(d) = d {
+                delay = Some(delay.map_or(d, |e| e.min(d)));
             }
-            w.dhcp();
+        };
+        for e in self.eth.iter_mut().flatten() {
+            min(e.iface.poll_delay(now(), &e.sockets));
         }
-        // Closed sockets the stack has finished with go back to the pool.
-        for s in self.slots.iter_mut() {
-            if let Some(slot) = s
-                && slot.owner.is_none()
-            {
-                let set = match (&mut self.wifi, slot.wifi) {
-                    (Some(w), true) => &mut w.sockets,
-                    _ => &mut self.sockets,
-                };
+        if let Some(p) = &mut self.peer {
+            min(p.poll_delay());
+        }
+        delay
+    }
+
+    /// Closed sockets the stack has finished with go back to the pool.
+    fn sweep(&mut self) {
+        for i in 0..SOCKETS {
+            let Some(slot) = self.slots[i] else { continue };
+            if slot.owner.is_some() {
+                continue;
+            }
+            for k in 0..IFACES {
+                let Some(s) = slot.socks[k] else { continue };
                 let done = match slot.kind {
-                    Kind::Tcp => matches!(set.get::<tcp::Socket>(slot.handle).state(), tcp::State::Closed | tcp::State::TimeWait),
-                    Kind::Udp | Kind::Ping => true,
-                    Kind::Dns => {
-                        // The socket is shared: only the lookup goes.
-                        if let Some(q) = slot.query {
-                            set.get_mut::<dns::Socket>(slot.handle).cancel_query(q);
-                        }
-                        *s = None;
-                        continue;
-                    }
+                    Kind::Tcp => self.set(k).is_none_or(|set| matches!(set.get::<tcp::Socket>(s.handle).state(), tcp::State::Closed | tcp::State::TimeWait)),
+                    _ => true,
                 };
                 if done {
-                    set.remove(slot.handle);
-                    *s = None;
+                    self.drop_sock(k, s);
+                    self.slots[i].as_mut().unwrap().socks[k] = None;
+                }
+            }
+            if self.slots[i].unwrap().socks.iter().all(Option::is_none) {
+                self.slots[i] = None;
+            }
+        }
+    }
+
+    fn set(&mut self, iface: usize) -> Option<&mut SocketSet<'static>> {
+        match iface {
+            IFACE0 => Some(&mut self.sockets),
+            _ => self.eth[iface - 1].as_mut().map(|e| &mut e.sockets),
+        }
+    }
+
+    fn iface_set(&mut self, iface: usize) -> Option<(&mut Interface, &mut SocketSet<'static>)> {
+        match iface {
+            IFACE0 => Some((&mut self.iface, &mut self.sockets)),
+            _ => self.eth[iface - 1].as_mut().map(|e| (&mut e.iface, &mut e.sockets)),
+        }
+    }
+
+    /// A new smoltcp socket of `kind` on interface `iface`.
+    fn new_sock(&mut self, iface: usize, kind: Kind) -> Result<Sock, u32> {
+        let pool = self.pool_used.iter().position(|u| !u).ok_or(status::NO_SOCKETS)?;
+        let set = self.set(iface).ok_or(status::NO_ADDRESS)?;
+        let handle = match kind {
+            Kind::Tcp => set.add(tcp_socket(pool)),
+            Kind::Udp => set.add(udp_socket(pool)),
+            Kind::Ping => set.add(icmp_socket(pool)),
+            Kind::Dns => return Err(status::BAD_REQUEST),
+        };
+        self.pool_used[pool] = true;
+        Ok(Sock { handle, pool })
+    }
+
+    fn drop_sock(&mut self, iface: usize, s: Sock) {
+        if s.pool == SHARED {
+            return;
+        }
+        if let Some(set) = self.set(iface) {
+            set.remove(s.handle);
+        }
+        self.pool_used[s.pool] = false;
+    }
+
+    /// Drops every socket of client socket `i` and frees it (a request
+    /// failed half way).
+    fn unalloc(&mut self, i: usize) {
+        if let Some(slot) = self.slots[i].take() {
+            for k in 0..IFACES {
+                if let Some(s) = slot.socks[k] {
+                    self.drop_sock(k, s);
                 }
             }
         }
     }
 
-    /// The socket set of the first interface, or of Wi-Fi.
-    fn set(&mut self, wifi: bool) -> &mut SocketSet<'static> {
-        match (&mut self.wifi, wifi) {
-            (Some(w), true) => &mut w.sockets,
-            _ => &mut self.sockets,
-        }
-    }
-
-    fn alloc(&mut self, client: usize, kind: Kind, wifi: bool) -> Result<usize, u32> {
+    fn new_slot(&mut self, client: usize, kind: Kind) -> Result<usize, u32> {
         let i = self.slots.iter().position(Option::is_none).ok_or(status::NO_SOCKETS)?;
-        let wifi = wifi && self.wifi.is_some();
-        let set = self.set(wifi);
-        let handle = match kind {
-            Kind::Tcp => set.add(tcp_socket(i)),
-            Kind::Udp => set.add(udp_socket(i)),
-            Kind::Ping => set.add(icmp_socket(i)),
-            Kind::Dns => return Err(status::BAD_REQUEST),
-        };
-        self.slots[i] = Some(Slot { handle, kind, wifi, owner: Some(client), sent_ns: 0, query: None });
+        self.slots[i] = Some(Slot { kind, owner: Some(client), socks: [None; IFACES], primary: IFACE0, sent_ns: 0, query: None });
         Ok(i)
     }
 
-    /// Frees slot `i` that was just allocated (a request failed).
-    fn unalloc(&mut self, i: usize) {
-        if let Some(s) = self.slots[i].take()
-            && s.kind != Kind::Dns
-        {
-            self.set(s.wifi).remove(s.handle);
+    /// Client socket `i` gets `s` on `iface` as its primary socket.
+    fn attach(&mut self, i: usize, iface: usize, s: Sock) {
+        let slot = self.slots[i].as_mut().unwrap();
+        slot.socks[iface] = Some(s);
+        slot.primary = iface;
+    }
+
+    /// A new client socket of `kind` with one smoltcp socket on `iface`.
+    fn open_one(&mut self, client: usize, kind: Kind, iface: usize) -> Result<(usize, Sock), u32> {
+        let i = self.new_slot(client, kind)?;
+        match self.new_sock(iface, kind) {
+            Ok(s) => {
+                self.attach(i, iface, s);
+                Ok((i, s))
+            }
+            Err(e) => {
+                self.unalloc(i);
+                Err(e)
+            }
         }
     }
 
-    /// The socket set and handle of a client's socket.
-    fn slot(&mut self, client: usize, sock: u16, kind: Kind) -> Result<(&mut SocketSet<'static>, SocketHandle), u32> {
-        match self.slots.get(sock as usize) {
-            Some(Some(s)) if s.owner == Some(client) && s.kind == kind => {
-                let (wifi, h) = (s.wifi, s.handle);
-                Ok((self.set(wifi), h))
-            }
-            _ => Err(status::BAD_REQUEST),
+    /// The interface a packet to `dst` leaves by.
+    fn out_iface(&self, dst: u32) -> Option<usize> {
+        if dst >> 24 == 127 { Some(IFACE0) } else { self.route(dst).map(|r| r.link) }
+    }
+
+    /// Where TCP_LISTEN or UDP_BIND puts its sockets: for each interface,
+    /// None (not there) or the local address to accept (None = any).
+    fn bind_targets(&self, addr: u32, link: u8) -> Result<[Option<Option<u32>>; IFACES], u32> {
+        let mut t = [None; IFACES];
+        let present = |k: usize| k == IFACE0 || self.eth[k - 1].is_some();
+        if addr != 0 {
+            let k = if addr >> 24 == 127 {
+                IFACE0
+            } else {
+                (0..IFACES).find(|&k| self.link_addr(k).is_some_and(|(a, _)| a == addr)).ok_or(status::NO_ADDRESS)?
+            };
+            t[k] = Some(Some(addr));
+            return Ok(t);
         }
+        match link {
+            proto::link::ANY => {
+                for (k, slot) in t.iter_mut().enumerate() {
+                    if present(k) {
+                        *slot = Some(None);
+                    }
+                }
+            }
+            proto::link::LO => t[IFACE0] = Some(Some(0x7F00_0001)),
+            proto::link::HOST if self.dev.host.is_some() => t[IFACE0] = Some(Some(HOST_ADDR)),
+            proto::link::WLAN0 if present(WLAN) => t[WLAN] = Some(None),
+            proto::link::TEST0 if present(TEST) => t[TEST] = Some(None),
+            _ => return Err(status::NO_ADDRESS),
+        }
+        Ok(t)
+    }
+
+    /// The primary socket of a client's socket, after settling a listener
+    /// on several links: the one a connection came to stays, the others go.
+    fn primary(&mut self, client: usize, sock: u16, kind: Kind) -> Result<(usize, SocketHandle), u32> {
+        let i = sock as usize;
+        let slot = match self.slots.get(i) {
+            Some(Some(s)) if s.owner == Some(client) && s.kind == kind => *s,
+            _ => return Err(status::BAD_REQUEST),
+        };
+        if kind == Kind::Tcp && slot.socks.iter().flatten().count() > 1 {
+            let taken = (0..IFACES).find(|&k| {
+                slot.socks[k].is_some_and(|s| self.set(k).is_some_and(|set| !matches!(set.get::<tcp::Socket>(s.handle).state(), tcp::State::Listen | tcp::State::Closed)))
+            });
+            if let Some(k) = taken {
+                for j in (0..IFACES).filter(|&j| j != k) {
+                    if let Some(s) = slot.socks[j] {
+                        self.drop_sock(j, s);
+                        self.slots[i].as_mut().unwrap().socks[j] = None;
+                    }
+                }
+                self.slots[i].as_mut().unwrap().primary = k;
+                return Ok((k, slot.socks[k].unwrap().handle));
+            }
+        }
+        let p = slot.primary;
+        slot.socks[p].map(|s| (p, s.handle)).ok_or(status::BAD_REQUEST)
     }
 
     fn ephemeral(&mut self) -> u16 {
         self.next_port = if self.next_port >= 65000 { 49152 } else { self.next_port + 1 };
         self.next_port
+    }
+
+    /// TCP_LISTEN and UDP_BIND.
+    fn bind(&mut self, client: usize, kind: Kind, addr: u32, b: u32) -> Result<(u32, u32), u32> {
+        let (port, link) = (b as u16, (b >> 16) as u8);
+        let targets = self.bind_targets(addr, link)?;
+        let i = self.new_slot(client, kind)?;
+        let mut first = None;
+        for (k, t) in targets.iter().enumerate() {
+            let Some(local) = *t else { continue };
+            let s = match self.new_sock(k, kind) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.unalloc(i);
+                    return Err(e);
+                }
+            };
+            self.slots[i].as_mut().unwrap().socks[k] = Some(s);
+            let ep = IpListenEndpoint { addr: local.map(|a| Ipv4Address::from_bits(a).into()), port };
+            let set = self.set(k).unwrap();
+            let ok = match kind {
+                Kind::Tcp => set.get_mut::<tcp::Socket>(s.handle).listen(ep).is_ok(),
+                _ => set.get_mut::<udp::Socket>(s.handle).bind(ep).is_ok(),
+            };
+            if !ok {
+                self.unalloc(i);
+                return Err(status::ADDR_IN_USE);
+            }
+            first.get_or_insert(k);
+        }
+        self.slots[i].as_mut().unwrap().primary = first.unwrap_or(IFACE0);
+        Ok((i as u32, 0))
     }
 
     fn handle(&mut self, client: usize, mem: &mut [u8], m: &[u8]) -> Result<(u32, u32), u32> {
@@ -578,32 +530,22 @@ impl Stack {
         let b = u32::from_le_bytes([m[8], m[9], m[10], m[11]]);
         let addr = |a: u32| IpAddress::Ipv4(Ipv4Address::from_bits(a));
         match code {
-            op::TCP_LISTEN => {
-                let i = self.alloc(client, Kind::Tcp, false)?;
-                let h = self.slots[i].unwrap().handle;
-                if self.sockets.get_mut::<tcp::Socket>(h).listen(b as u16).is_err() {
-                    self.unalloc(i);
-                    return Err(status::ADDR_IN_USE);
-                }
-                Ok((i as u32, 0))
-            }
+            op::TCP_LISTEN => self.bind(client, Kind::Tcp, a, b),
+            op::UDP_BIND => self.bind(client, Kind::Udp, a, b),
             op::TCP_CONNECT => {
-                let i = self.alloc(client, Kind::Tcp, !local(a))?;
-                let slot = self.slots[i].unwrap();
+                let k = self.out_iface(a).ok_or(status::UNREACHABLE)?;
+                let (i, s) = self.open_one(client, Kind::Tcp, k)?;
                 let port = self.ephemeral();
-                let r = match (&mut self.wifi, slot.wifi) {
-                    (Some(w), true) => w.sockets.get_mut::<tcp::Socket>(slot.handle).connect(w.iface.context(), (addr(a), b as u16), port),
-                    _ => self.sockets.get_mut::<tcp::Socket>(slot.handle).connect(self.iface.context(), (addr(a), b as u16), port),
-                };
-                if r.is_err() {
+                let (iface, set) = self.iface_set(k).unwrap();
+                if set.get_mut::<tcp::Socket>(s.handle).connect(iface.context(), (addr(a), b as u16), port).is_err() {
                     self.unalloc(i);
                     return Err(status::UNREACHABLE);
                 }
                 Ok((i as u32, 0))
             }
             op::TCP_STATE => {
-                let (set, h) = self.slot(client, sock, Kind::Tcp)?;
-                let s = set.get::<tcp::Socket>(h);
+                let (k, h) = self.primary(client, sock, Kind::Tcp)?;
+                let s = self.set(k).unwrap().get::<tcp::Socket>(h);
                 let st = match s.state() {
                     tcp::State::Closed | tcp::State::TimeWait => state::CLOSED,
                     tcp::State::Listen => state::LISTEN,
@@ -614,8 +556,8 @@ impl Stack {
                 Ok((st, s.recv_queue() as u32))
             }
             op::SEND => {
-                let (set, h) = self.slot(client, sock, Kind::Tcp)?;
-                let s = set.get_mut::<tcp::Socket>(h);
+                let (k, h) = self.primary(client, sock, Kind::Tcp)?;
+                let s = self.set(k).unwrap().get_mut::<tcp::Socket>(h);
                 let n = (b as usize).min(mem.len());
                 if !s.may_send() {
                     return Err(status::NOT_CONNECTED);
@@ -623,8 +565,8 @@ impl Stack {
                 s.send_slice(&mem[..n]).map(|k| (k as u32, 0)).map_err(|_| status::NOT_CONNECTED)
             }
             op::RECV => {
-                let (set, h) = self.slot(client, sock, Kind::Tcp)?;
-                let s = set.get_mut::<tcp::Socket>(h);
+                let (k, h) = self.primary(client, sock, Kind::Tcp)?;
+                let s = self.set(k).unwrap().get_mut::<tcp::Socket>(h);
                 let n = (b as usize).min(mem.len());
                 if s.can_recv() {
                     return s.recv_slice(&mut mem[..n]).map(|k| (k as u32, 0)).map_err(|_| status::NOT_CONNECTED);
@@ -639,27 +581,16 @@ impl Stack {
                     Some(Some(s)) if s.owner == Some(client) => *s,
                     _ => return Err(status::BAD_REQUEST),
                 };
-                let set = self.set(slot.wifi);
-                match slot.kind {
-                    Kind::Tcp => set.get_mut::<tcp::Socket>(slot.handle).close(),
-                    Kind::Udp => set.get_mut::<udp::Socket>(slot.handle).close(),
-                    Kind::Ping | Kind::Dns => {}
-                }
-                self.slots[i].as_mut().unwrap().owner = None;
+                self.release(i, slot, false);
                 Ok((0, 0))
             }
-            op::UDP_BIND => {
-                let i = self.alloc(client, Kind::Udp, false)?;
-                let h = self.slots[i].unwrap().handle;
-                if self.sockets.get_mut::<udp::Socket>(h).bind(b as u16).is_err() {
-                    self.unalloc(i);
-                    return Err(status::ADDR_IN_USE);
-                }
-                Ok((i as u32, 0))
-            }
             op::UDP_SEND => {
-                let (set, h) = self.slot(client, sock, Kind::Udp)?;
-                let s = set.get_mut::<udp::Socket>(h);
+                let (k0, _) = self.primary(client, sock, Kind::Udp)?;
+                let slot = self.slots[sock as usize].unwrap();
+                // The bound socket on the link the destination is on.
+                let k = self.out_iface(a).filter(|&k| slot.socks[k].is_some()).unwrap_or(k0);
+                let h = slot.socks[k].unwrap().handle;
+                let s = self.set(k).unwrap().get_mut::<udp::Socket>(h);
                 let (port, n) = ((b >> 16) as u16, (b & 0xFFFF) as usize);
                 let n = n.min(mem.len());
                 match s.send_slice(&mem[..n], IpEndpoint::new(addr(a), port)) {
@@ -669,26 +600,28 @@ impl Stack {
                 }
             }
             op::UDP_RECV => {
-                let (set, h) = self.slot(client, sock, Kind::Udp)?;
-                let s = set.get_mut::<udp::Socket>(h);
-                match s.recv_slice(&mut mem[proto::UDP_HEADER..]) {
-                    Ok((n, meta)) => {
+                self.primary(client, sock, Kind::Udp)?;
+                let slot = self.slots[sock as usize].unwrap();
+                for k in 0..IFACES {
+                    let Some(s) = slot.socks[k] else { continue };
+                    let Some(set) = self.set(k) else { continue };
+                    if let Ok((n, meta)) = set.get_mut::<udp::Socket>(s.handle).recv_slice(&mut mem[proto::UDP_HEADER..]) {
                         mem[..2].copy_from_slice(&meta.endpoint.port.to_le_bytes());
                         let IpAddress::Ipv4(src) = meta.endpoint.addr;
-                        Ok((n as u32, src.to_bits()))
+                        return Ok((n as u32, src.to_bits()));
                     }
-                    Err(_) => Ok((0, 0)),
                 }
+                Ok((0, 0))
             }
             op::PING => {
                 let n = (b as usize).min(PING_DATA).min(mem.len());
-                let i = self.alloc(client, Kind::Ping, !local(a))?;
-                let slot = self.slots[i].unwrap();
-                let s = self.set(slot.wifi).get_mut::<icmp::Socket>(slot.handle);
+                let k = self.out_iface(a).ok_or(status::UNREACHABLE)?;
+                let (i, s) = self.open_one(client, Kind::Ping, k)?;
                 let ident = ping_ident(i);
+                let sk = self.set(k).unwrap().get_mut::<icmp::Socket>(s.handle);
                 let repr = Icmpv4Repr::EchoRequest { ident, seq_no: 0, data: &mem[..n] };
-                let sent = s.bind(icmp::Endpoint::Ident(ident)).is_ok()
-                    && match s.send(repr.buffer_len(), addr(a)) {
+                let sent = sk.bind(icmp::Endpoint::Ident(ident)).is_ok()
+                    && match sk.send(repr.buffer_len(), addr(a)) {
                         Ok(buf) => {
                             repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &Default::default());
                             true
@@ -703,16 +636,15 @@ impl Stack {
                 Ok((i as u32, 0))
             }
             op::PING_RESULT => {
-                let sent_ns = self.slots.get(sock as usize).copied().flatten().map_or(0, |s| s.sent_ns);
-                let (set, h) = self.slot(client, sock, Kind::Ping)?;
-                let s = set.get_mut::<icmp::Socket>(h);
+                let (k, h) = self.primary(client, sock, Kind::Ping)?;
+                let sent_ns = self.slots[sock as usize].unwrap().sent_ns;
+                let s = self.set(k).unwrap().get_mut::<icmp::Socket>(h);
                 while let Ok((buf, _)) = s.recv() {
                     let Ok(p) = Icmpv4Packet::new_checked(buf) else { continue };
                     if let Ok(Icmpv4Repr::EchoReply { ident, .. }) = Icmpv4Repr::parse(&p, &Default::default())
                         && ident == ping_ident(sock as usize)
                     {
-                        let us = (time_ns() - sent_ns) / 1000;
-                        return Ok((1, us as u32));
+                        return Ok((1, ((time_ns() - sent_ns) / 1000) as u32));
                     }
                 }
                 Ok((0, 0))
@@ -720,20 +652,27 @@ impl Stack {
             op::RESOLVE => {
                 let n = (b as usize).min(proto::NAME_MAX).min(mem.len());
                 let name = core::str::from_utf8(&mem[..n]).map_err(|_| status::BAD_REQUEST)?;
-                let w = self.wifi.as_mut().ok_or(status::UNREACHABLE)?;
+                let w = self.eth[WLAN - 1].as_mut().ok_or(status::UNREACHABLE)?;
                 let dns = w.dns.ok_or(status::UNREACHABLE)?;
-                let i = self.slots.iter().position(Option::is_none).ok_or(status::NO_SOCKETS)?;
                 let q = w
                     .sockets
                     .get_mut::<dns::Socket>(dns)
                     .start_query(w.iface.context(), name, DnsQueryType::A)
                     .map_err(|e| if e == dns::StartQueryError::NoFreeSlot { status::NO_SOCKETS } else { status::BAD_REQUEST })?;
-                self.slots[i] = Some(Slot { handle: dns, kind: Kind::Dns, wifi: true, owner: Some(client), sent_ns: 0, query: Some(q) });
+                let i = match self.new_slot(client, Kind::Dns) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        self.eth[WLAN - 1].as_mut().unwrap().sockets.get_mut::<dns::Socket>(dns).cancel_query(q);
+                        return Err(e);
+                    }
+                };
+                self.attach(i, WLAN, Sock { handle: dns, pool: SHARED });
+                self.slots[i].as_mut().unwrap().query = Some(q);
                 Ok((i as u32, 0))
             }
             op::RESOLVE_RESULT => {
-                let (_, h) = self.slot(client, sock, Kind::Dns)?;
-                let w = self.wifi.as_mut().ok_or(status::UNREACHABLE)?;
+                let (_, h) = self.primary(client, sock, Kind::Dns)?;
+                let w = self.eth[WLAN - 1].as_mut().ok_or(status::UNREACHABLE)?;
                 let slot = self.slots[sock as usize].as_mut().unwrap();
                 let Some(q) = slot.query else { return Err(status::BAD_REQUEST) };
                 match w.sockets.get_mut::<dns::Socket>(h).get_query_result(q) {
@@ -757,18 +696,54 @@ impl Stack {
         }
     }
 
+    /// CLOSE (`abort` false) or the client went away (true): listeners and
+    /// everything but TCP connections go now; connections close (or abort)
+    /// and go once the stack is done with them (`sweep`).
+    fn release(&mut self, i: usize, slot: Slot, abort: bool) {
+        for k in 0..IFACES {
+            let Some(s) = slot.socks[k] else { continue };
+            let keep = match (slot.kind, self.set(k)) {
+                (Kind::Tcp, Some(set)) => {
+                    let t = set.get_mut::<tcp::Socket>(s.handle);
+                    if matches!(t.state(), tcp::State::Listen | tcp::State::Closed) {
+                        false
+                    } else {
+                        if abort {
+                            t.abort()
+                        } else {
+                            t.close()
+                        }
+                        true
+                    }
+                }
+                (Kind::Dns, Some(set)) => {
+                    if let Some(q) = slot.query {
+                        set.get_mut::<dns::Socket>(s.handle).cancel_query(q);
+                    }
+                    false
+                }
+                _ => false,
+            };
+            if !keep {
+                self.drop_sock(k, s);
+                self.slots[i].as_mut().unwrap().socks[k] = None;
+            }
+        }
+        let s = self.slots[i].as_mut().unwrap();
+        s.owner = None;
+        s.query = None;
+        if s.socks.iter().all(Option::is_none) {
+            self.slots[i] = None;
+        }
+    }
+
     /// A client left: abort its sockets.
     fn drop_client(&mut self, client: usize) {
         for i in 0..SOCKETS {
-            let Some(s) = self.slots[i] else { continue };
-            if s.owner == Some(client) {
-                let set = self.set(s.wifi);
-                match s.kind {
-                    Kind::Tcp => set.get_mut::<tcp::Socket>(s.handle).abort(),
-                    Kind::Udp => set.get_mut::<udp::Socket>(s.handle).close(),
-                    Kind::Ping | Kind::Dns => {}
-                }
-                self.slots[i].as_mut().unwrap().owner = None;
+            if let Some(s) = self.slots[i]
+                && s.owner == Some(client)
+            {
+                self.release(i, s, true);
             }
         }
     }
@@ -782,12 +757,12 @@ fn reply(status: u32, v0: u32, v1: u32) -> [u8; proto::REPLY_SIZE] {
     r
 }
 
-static mut DEV: Loopback = Loopback { frames: [[0; MTU]; RING], lens: [0; RING], head: 0, count: 0 };
-
-/// `run net [ADDR [ROUTER]]`: with ADDR (IPv4 as a number) the Wi-Fi link
-/// uses ADDR/24 and ROUTER instead of DHCP (for tests, doc/22 §7).
-fn main(addr: usize, router: usize) -> usize {
-    match run(addr as u32, router as u32) {
+/// `run net [FLAGS]`: FLAGS bit 0 adds the test LAN (doc/23 §4).
+/// `run net ADDR [ROUTER]` (ADDR an IPv4 address as a number, so ≥ 256):
+/// the Wi-Fi link uses ADDR/24 and ROUTER instead of DHCP (doc/22 §7).
+fn main(a0: usize, a1: usize) -> usize {
+    let (flags, static_addr, static_router) = if a0 < 0x100 { (a0 as u32, 0, 0) } else { (0, a0 as u32, a1 as u32) };
+    match run(flags, static_addr, static_router) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "net.failed", step = step);
@@ -796,49 +771,54 @@ fn main(addr: usize, router: usize) -> usize {
     }
 }
 
-fn run(static_addr: u32, static_router: u32) -> Result<(), u32> {
+const FLAG_TEST_LAN: u32 = 1;
+
+fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let pool_shm = Shm::alloc(CLIENTS * proto::SLICE).map_err(|_| 1u32)?;
     let pool = pool_shm.map().map_err(|_| 2u32)?;
     let l = Listener::open(proto::SERVICE).map_err(|_| 3u32)?;
 
-    let lo: &'static mut Loopback = unsafe { &mut *core::ptr::addr_of_mut!(DEV) };
     let host = Handle::open(netdev::HOST, rights::READ | rights::WRITE | rights::WAIT).ok();
-    let mut dev = Links { lo, host, to_host: 0, from_host: 0 };
+    let mut dev = Links { host, to_host: 0, from_host: 0 };
     let iface = Interface::new(Config::new(HardwareAddress::Ip), &mut dev, now());
     let mut stack = Stack {
         iface,
         dev,
-        sockets: SocketSet::new(unsafe { core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(STORAGE).cast::<SocketStorage<'static>>(), SOCKETS) }),
-        wifi: None,
+        sockets: SocketSet::new(unsafe { &mut (&mut *core::ptr::addr_of_mut!(STORAGE0))[..] }),
+        eth: [None, None],
+        peer: None,
         slots: [None; SOCKETS],
+        pool_used: [false; POOL],
         next_port: 49152,
+        fwd: Forwarder::new(),
     };
     let has_host = stack.dev.host.is_some();
     stack.iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
         if has_host {
-            let [x, y, z, w] = HOST_ADDR;
-            let _ = a.push(IpCidr::new(IpAddress::v4(x, y, z, w), HOST_PREFIX));
+            let _ = a.push(IpCidr::new(Ipv4Address::from_bits(HOST_ADDR).into(), HOST_PREFIX));
         }
     });
     event!(Info, "net.ready", link = "lo", addr = "127.0.0.1/8", sockets = SOCKETS as u32);
     if has_host {
         event!(Info, "net.link", link = "host", addr = "10.55.0.2/24", mtu = netdev::MTU as u32);
     }
-    stack.wifi = open_wifi();
+    stack.eth[WLAN - 1] = open_wifi();
     if static_addr != 0
-        && let Some(w) = &mut stack.wifi
+        && let Some(w) = &mut stack.eth[WLAN - 1]
     {
-        w.sockets.remove(w.dhcp);
-        w.dhcp_off = true;
-        w.iface.update_ip_addrs(|a| {
-            let _ = a.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::from_bits(static_addr)), 24));
-        });
-        if static_router != 0 {
-            let _ = w.iface.routes_mut().add_default_ipv4_route(Ipv4Address::from_bits(static_router));
+        if let Some(h) = w.dhcp.take() {
+            w.sockets.remove(h);
         }
-        w.configured = true;
+        w.set_addr(static_addr, 24, (static_router != 0).then_some(static_router));
         event!(Info, "net.static", link = "wlan0", addr = static_addr, router = static_router);
+    }
+    if flags & FLAG_TEST_LAN != 0 {
+        let mut t = EthLink::new(TEST, Port::Test, testlan::NET_MAC);
+        t.set_addr(testlan::NET_ADDR, testlan::PREFIX, None);
+        stack.eth[TEST - 1] = Some(t);
+        stack.peer = Some(testlan::Peer::new());
+        event!(Info, "net.link", link = "test0", addr = "192.168.50.1/24", mtu = netdev::MTU as u32);
     }
 
     let mut clients: [Option<Channel>; CLIENTS] = [const { None }; CLIENTS];
@@ -850,7 +830,8 @@ fn run(static_addr: u32, static_router: u32) -> Result<(), u32> {
         let mut who = [usize::MAX; 3 + CLIENTS];
         hs[0] = l.0.raw();
         let mut n = 1;
-        for h in [stack.dev.host.as_ref(), stack.wifi.as_ref().map(|w| &w.dev.h)].into_iter().flatten() {
+        let wifi = stack.eth[WLAN - 1].as_ref().and_then(|w| w.dev.port.handle());
+        for h in [stack.dev.host.as_ref(), wifi].into_iter().flatten() {
             hs[n] = h.raw();
             n += 1;
         }
@@ -862,12 +843,7 @@ fn run(static_addr: u32, static_router: u32) -> Result<(), u32> {
                 n += 1;
             }
         }
-        let mut delay = stack.iface.poll_delay(now(), &stack.sockets);
-        if let Some(w) = &mut stack.wifi
-            && let Some(d) = w.iface.poll_delay(now(), &w.sockets)
-        {
-            delay = Some(delay.map_or(d, |e| e.min(d)));
-        }
+        let delay = stack.poll_delay();
         let timeout = delay.map_or(IDLE_NS, |d| (d.total_micros() * 1000).min(IDLE_NS)).max(1);
         let ev = match wait_raw(&hs[..n], timeout) {
             Ok(ev) => ev,

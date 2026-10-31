@@ -15,7 +15,7 @@ PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --per
 PERMIT_paint  := --permit display --permit touch
 PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
-PERMIT_net    := --permit shm --permit listen:net --permit netdev:host --permit netdev:wlan0 --stack 32768
+PERMIT_net    := --permit shm --permit listen:net --permit netdev:host --permit netdev:wlan0 --stack 65536
 PERMIT_nettest := --permit svc:net --stack 32768
 PERMIT_wifi   := --permit wlan:ctl --stack 16384
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
@@ -299,6 +299,14 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	@# console line: 3 pings, then 16 KiB through the TCP echo server.
 	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run net" --ctl "run nettest 1" --ctl "wait-ms 40000" --host-peer 16384 \
+	    --expect-event net.ready --expect-event hostlink.open \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Forwarding (N3, doc/23): t5emu's PC reaches the test LAN's peer
+	@# (192.168.50.2, inside `net`) through the Tab5: pings, 16 KiB of TCP
+	@# echo, then Time Exceeded (TTL 1) and Destination Unreachable.
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net 1" --ctl "wait-ms 40000" --host-peer 16384 \
+	    --host-peer-target 192.168.50.2 --host-peer-start net.link \
 	    --expect-event net.ready --expect-event hostlink.open \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a

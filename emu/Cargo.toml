@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 t5log = { path = "../tools/t5log", default-features = false }
 t5-abi = { path = "../abi" }
 # The PC end of the host link (--host-peer, doc/21); the version `net` uses.
-smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-icmp"] }
+smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-icmp", "socket-raw"] }
 
 [profile.release]
 debug = true

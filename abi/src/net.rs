@@ -10,19 +10,25 @@
 //!
 //! | op | a | b | v0 / v1 |
 //! |---|---|---|---|
-//! | TCP_LISTEN | – | port | socket |
+//! | TCP_LISTEN | local IPv4 (0: any) | port \| `link` << 16 | socket |
 //! | TCP_CONNECT | IPv4 | port | socket |
 //! | TCP_STATE | – | – | `state` / bytes waiting to be read |
 //! | SEND | – | bytes from the slice | bytes taken |
 //! | RECV | – | at most | bytes put in the slice / 1 if the peer closed and nothing is left |
 //! | CLOSE | – | – | – |
-//! | UDP_BIND | – | port | socket |
+//! | UDP_BIND | local IPv4 (0: any) | port \| `link` << 16 | socket |
 //! | UDP_SEND | IPv4 | port << 16 \| bytes | bytes sent (0: queue full) |
 //! | UDP_RECV | – | – | bytes at slice + `UDP_HEADER` / source IPv4; the source port is the slice's first u16 |
 //! | PING | IPv4 | echo data bytes from the slice (≤ 64) | socket (one echo request sent) |
 //! | PING_RESULT | – | – | 1 once the reply came / round trip in µs |
 //! | RESOLVE | – | name bytes from the slice (≤ `NAME_MAX`) | socket (one DNS lookup for an A record) |
 //! | RESOLVE_RESULT | – | – | 1 once answered / IPv4 (`UNREACHABLE`: failed or no A record) |
+//!
+//! TCP_LISTEN and UDP_BIND (doc/23 §5): with address 0 and `link::ANY` the
+//! socket listens on every link (a TCP listener becomes the connection that
+//! comes first, on whichever link). A local address limits it to the link
+//! that has that address (`NO_ADDRESS` if none); a link limits it to that
+//! link.
 //!
 //! PING and RESOLVE sockets are freed with CLOSE like the others. Names are
 //! resolved on the Wi-Fi link only, with the DNS servers DHCP gave.
@@ -60,6 +66,20 @@ pub mod status {
     pub const NOT_CONNECTED: u32 = 4;
     pub const UNREACHABLE: u32 = 5;
     pub const OTHER: u32 = 6;
+    /// No link has the local address asked for, or the link is not there.
+    pub const NO_ADDRESS: u32 = 7;
+}
+
+/// Links for TCP_LISTEN and UDP_BIND.
+pub mod link {
+    pub const ANY: u8 = 0;
+    /// 127.0.0.1.
+    pub const LO: u8 = 1;
+    /// The host link to the PC (10.55.0.2).
+    pub const HOST: u8 = 2;
+    pub const WLAN0: u8 = 3;
+    /// The test LAN inside the service (doc/23 §4).
+    pub const TEST0: u8 = 4;
 }
 
 /// TCP_STATE values.

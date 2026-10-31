@@ -50,6 +50,7 @@ struct Monitor<'a> {
     /// The PC end of the host link; it starts when `nettest.listening` is
     /// logged and ends the run when it has finished.
     peer: Option<HostPeer>,
+    peer_start: String,
 }
 
 impl Monitor<'_> {
@@ -66,7 +67,7 @@ impl Monitor<'_> {
             self.seen.insert(name.to_string());
             match name {
                 "selftest.result" => self.selftest_done = true,
-                "nettest.listening" => {
+                n if n == self.peer_start => {
                     if let Some(p) = &mut self.peer {
                         p.start();
                     }
@@ -139,7 +140,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
-                     [--linger-ms N] [--host-peer BYTES] \
+                     [--linger-ms N] [--host-peer BYTES] [--host-peer-target A.B.C.D] [--host-peer-start EVENT] \
                      [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -167,6 +168,9 @@ struct Opts {
     linger_ms: u64,
     /// Run the PC end of the host link, sending this many bytes to the echo.
     host_peer: Option<usize>,
+    host_peer_target: std::net::Ipv4Addr,
+    /// The event that starts the host peer.
+    host_peer_start: String,
     elf: String,
 }
 
@@ -193,6 +197,8 @@ fn parse_args() -> Result<Opts, String> {
         expect_events: Vec::new(),
         linger_ms: 300,
         host_peer: None,
+        host_peer_target: std::net::Ipv4Addr::new(10, 55, 0, 2),
+        host_peer_start: "nettest.listening".into(),
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -230,6 +236,8 @@ fn parse_args() -> Result<Opts, String> {
             }
             "--expect-event" => o.expect_events.push(val()?),
             "--host-peer" => o.host_peer = Some(val()?.parse().map_err(|e| format!("--host-peer: {e}"))?),
+            "--host-peer-target" => o.host_peer_target = val()?.parse().map_err(|e| format!("--host-peer-target: {e}"))?,
+            "--host-peer-start" => o.host_peer_start = val()?,
             "--linger-ms" => o.linger_ms = val()?.parse().map_err(|e| format!("--linger-ms: {e}"))?,
             "--flash" => {
                 let v = val()?;
@@ -326,7 +334,8 @@ fn main() -> ExitCode {
         linger_cycles: o.linger_ms * o.mhz * 1000,
         stop_at: None,
         seen: Default::default(),
-        peer: o.host_peer.map(HostPeer::new),
+        peer: o.host_peer.map(|b| HostPeer::new(b, o.host_peer_target)),
+        peer_start: o.host_peer_start.clone(),
     };
     let stop = loop {
         let stop = m.run(limit, &mut |m| mon.tick(m));
@@ -472,7 +481,7 @@ fn main() -> ExitCode {
     let peer_ok = match &mon.peer {
         None => true,
         Some(p) if p.passed() => {
-            eprintln!("t5emu: host peer: ping {:?} ms, TCP echo in {} ms", p.ping_ms, p.tcp_ms);
+            eprintln!("t5emu: host peer: ping {:?} ms, TCP echo in {} ms, ICMP errors {:?}", p.ping_ms, p.tcp_ms, p.icmp_errors);
             true
         }
         Some(p) if p.finished() => {

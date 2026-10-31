@@ -553,8 +553,15 @@ impl Net {
         }
     }
 
+    /// Listens on `port` on every link.
     pub fn tcp_listen(&self, port: u16) -> Result<u16, NetError> {
-        self.call(net::op::TCP_LISTEN, 0, 0, port as u32).map(|(s, _)| s as u16)
+        self.tcp_listen_at(0, net::link::ANY, port)
+    }
+
+    /// Listens on `port` at local address `addr` (0: any) on `link`
+    /// (`net::link`; ANY with an address: the link that has it).
+    pub fn tcp_listen_at(&self, addr: u32, link: u8, port: u16) -> Result<u16, NetError> {
+        self.call(net::op::TCP_LISTEN, 0, addr, (link as u32) << 16 | port as u32).map(|(s, _)| s as u16)
     }
 
     pub fn tcp_connect(&self, ip: u32, port: u16) -> Result<u16, NetError> {
@@ -621,8 +628,14 @@ impl Net {
         self.call(net::op::CLOSE, s, 0, 0).map(|_| ())
     }
 
+    /// Binds `port` on every link.
     pub fn udp_bind(&self, port: u16) -> Result<u16, NetError> {
-        self.call(net::op::UDP_BIND, 0, 0, port as u32).map(|(s, _)| s as u16)
+        self.udp_bind_at(0, net::link::ANY, port)
+    }
+
+    /// Binds `port` at local address `addr` (0: any) on `link`.
+    pub fn udp_bind_at(&self, addr: u32, link: u8, port: u16) -> Result<u16, NetError> {
+        self.call(net::op::UDP_BIND, 0, addr, (link as u32) << 16 | port as u32).map(|(s, _)| s as u16)
     }
 
     /// Sends one datagram, waiting for room in the queue.
