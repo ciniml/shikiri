@@ -261,6 +261,11 @@ fn slot0_up() -> Result<(), &'static str> {
     set_card_clock(0, 50, 400)
 }
 
+/// `slot`'s data bus: 4 lines or 1 (CTYPE bit `slot`).
+pub(super) fn set_wide(slot: u32, four: bool) {
+    unsafe { wr(CTYPE, if four { rd(CTYPE) | 1 << slot } else { rd(CTYPE) & !(1 << slot) }) };
+}
+
 /// Sends the "update clock registers" command for `slot`.
 fn update_clock(slot: u32) -> Result<(), &'static str> {
     unsafe {
