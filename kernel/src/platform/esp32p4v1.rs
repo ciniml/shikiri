@@ -752,6 +752,18 @@ impl Platform for Esp32p4v1 {
         sdio::probe()
     }
 
+    fn wlan_up() -> Result<(), &'static str> {
+        sdio::up().map(|_| ())
+    }
+
+    fn wlan_poll(sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
+        sdio::poll(sink)
+    }
+
+    fn wlan_send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
+        sdio::send(if_type, payload)
+    }
+
     fn sd_info() -> Result<u32, &'static str> {
         sd::info()
     }

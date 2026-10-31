@@ -17,6 +17,7 @@ mod channel;
 mod flash;
 mod handle;
 mod hostlink;
+mod wlan;
 mod kupdate;
 mod loader;
 mod log;

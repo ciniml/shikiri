@@ -7,7 +7,7 @@
 #![no_std]
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, fs, net, netdev, rights, sd, shm, svc, sys, timer, touch};
+pub use t5_abi::{Error, FOREVER, chan, display, event, fs, net, netdev, rights, sd, shm, svc, sys, timer, touch, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",

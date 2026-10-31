@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
 PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --permit shm --permit listen:shmt --permit svc:shmt
@@ -17,6 +17,7 @@ PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
 PERMIT_net    := --permit shm --permit listen:net --permit netdev:host --stack 32768
 PERMIT_nettest := --permit svc:net --stack 32768
+PERMIT_wifi   := --permit wlan:ctl --stack 16384
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin

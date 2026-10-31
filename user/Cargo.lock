@@ -292,6 +292,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "wifi"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
+]
+
+[[package]]
 name = "xipcheck"
 version = "0.1.0"
 dependencies = [

@@ -24,7 +24,8 @@ pub const ABI_MAJOR: u16 = 0;
 /// display and touch objects. Minor 8 (N0a, doc/19): service channels
 /// (`listen:`/`svc:`). Minor 9 (N0b, doc/19 §2): shared memory. Minor 10
 /// (M7c, doc/18 §3): the `sd` object. Minor 11 (N2a, doc/21): `netdev`.
-pub const ABI_MINOR: u16 = 11;
+/// Minor 12 (N2b-3, doc/22): `netdev:wlan0` and `wlan:ctl`.
+pub const ABI_MINOR: u16 = 12;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -142,13 +143,34 @@ pub mod shm {
 }
 
 /// A network link for the network service (doc/21): `read` takes one
-/// received IP packet, `write` sends one. Only `netdev:host` so far: IP over
-/// the console line to the PC.
+/// received frame, `write` sends one. `netdev:host` carries IP packets over
+/// the console line to the PC; `netdev:wlan0` carries Ethernet frames of the
+/// Wi-Fi station (doc/22).
 pub mod netdev {
     pub const HOST: &str = "netdev:host";
+    pub const WLAN0: &str = "netdev:wlan0";
     pub const MTU: usize = 1500;
-    /// `wait` event: packets are waiting (value = how many).
+    /// An Ethernet frame without the FCS.
+    pub const ETH_FRAME: usize = MTU + 14;
+    /// `wait` event: frames are waiting (value = how many).
     pub const READABLE: usize = 1;
+    /// `ctl` on `netdev:wlan0`: the station's MAC address, bytes 0-3 and
+    /// 4-5 (little-endian; `Busy` until the Wi-Fi service has set it).
+    pub const MAC_LO: usize = 1;
+    pub const MAC_HI: usize = 2;
+}
+
+/// The Wi-Fi chip's control path (doc/22), for the Wi-Fi service: `read`
+/// takes one message from the chip, `write` sends one. A message is
+/// esp_hosted's serial payload (endpoint and data TLVs around an RPC). The
+/// first `open` starts the chip (about 2 s).
+pub mod wlan {
+    pub const CTL: &str = "wlan:ctl";
+    /// Longest message.
+    pub const MSG_MAX: usize = 1536;
+    /// `ctl`: the station's MAC address (`arg` = its 6 bytes, little-endian),
+    /// for `netdev:wlan0`'s `MAC_LO`/`MAC_HI`.
+    pub const SET_MAC: usize = 1;
 }
 
 /// The SD card as sectors (doc/18 §3), for the file service: one opener at

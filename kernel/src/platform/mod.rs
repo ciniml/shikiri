@@ -157,6 +157,19 @@ pub trait Platform {
     fn wlan_probe() -> Result<u32, &'static str> {
         Err("no Wi-Fi")
     }
+    /// Starts the Wi-Fi chip's transport (about 2 s, doc/22).
+    fn wlan_up() -> Result<(), &'static str> {
+        Err("no Wi-Fi")
+    }
+    /// Passes what the Wi-Fi chip has sent to `sink` (interface type,
+    /// payload).
+    fn wlan_poll(_sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
+        Ok(())
+    }
+    /// Sends one payload to the Wi-Fi chip; `Err("busy")` when it has no room.
+    fn wlan_send(_if_type: u8, _payload: &[u8]) -> Result<(), &'static str> {
+        Err("no Wi-Fi")
+    }
     /// Initialises the SD card if needed and logs what is on it (M7a).
     fn sd_info() -> Result<u32, &'static str> {
         Err("no SD card slot")

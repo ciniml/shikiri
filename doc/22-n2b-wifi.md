@@ -11,7 +11,8 @@
 |---|---|---|
 | N2b-1 | 電源、リセット、SDMMC slot1 での SDIO の識別（CMD5/3/7、CCCR、function 1） | 実機で確認（§4） |
 | N2b-2 | 4 ビット・20MHz、function 1 のブロック長、SLC ホストのレジスタ、esp_hosted の INIT イベント（C6 のファームウェアの版） | 実機で確認（§5）。**C6 は esp_hosted 2.12.7** |
-| N2b-3 | 送受信（CMD53）、`netdev:wlan0`、`wifi` サービスの RPC（接続）、DHCP | |
+| N2b-3a | 転送のドライバ（受信の切り出し、送信）、`wlan:ctl` と `netdev:wlan0`（ABI 0.12）、`wifi` サービス（RPC で初期化から接続まで） | 実機で AP に接続（§6） |
+| N2b-3b | `net` に Wi-Fi のリンク（Ethernet、DHCP）、外への ping と TCP | 次 |
 
 ## 2. 電源とリセット（kernel/src/platform/esp32p4v1/tab5.rs `wlan_power_on`）
 - エクスパンダ #2 の OUT（0x05）、DIR（0x03）、OUT_H_IM（0x07）を読んでログに出す（`wlan.expander`）。bit0 が「出力・High・高インピーダンスでない」なら、もう電源は入っているので**何も書かない**。
@@ -77,6 +78,41 @@ wlan.rx if_type=3 if_num=0 flags=0 len=22 offset=12 seq=1 priv_type=0 head=03001
 - 2 つ目は SERIAL（if_type 3）の RPC: TLV で端点名 `RPCEvt`、データ `08 03 10 81 06 8a 30 02 10 01`（protobuf の `Rpc`: msg_type = 3（イベント）、msg_id = 769 = `Event_ESPInit`、`esp_hosted_rpc.proto:465,2445`）。
 - 送信のバッファ（TOKEN_RDATA の bit27:16）は 20。
 
-## 6. まだ
-- N2b-3: ポーリングをやめてカードの割り込み（SDMMC の `sdio_int_mask`）を使う。送信（CMD53 の書き込み、TOKEN_RDATA のバッファ数を見る）。RPC（protobuf）で `WifiInit` から `WifiConnect` まで。STA のフレームを `netdev:wlan0` に出し、`net` で DHCP。
+## 6. N2b-3a: 転送、オブジェクト、`wifi` サービス
+### 6.1 カーネル
+- **転送**（sdio.rs の `up`/`poll`/`send`）。`wlanprobe` の手順を `up` にまとめ、終わりにデータの経路を開く。
+  - 受信: INT_RAW の bit23 を見て、`PACKET_LEN` との差の分を 4KiB（DMA の中継バッファの大きさ）ずつ読み、8 ブロック分のストリームのバッファにためる。esp_hosted のストリーミングモードでは、パケットはヘッダ（12 バイト）と本体が隙間なく並ぶ（`sdio_drv.c:967-1026`）。ヘッダの `len` で 1 つずつ切り出す。`offset` が 12 でない、`len` が 0 か 1536 を超えるときは、esp_hosted と同じく残りを捨てる（`wlan.bad_packet`）。
+  - PRIV（INIT イベント）はここでログに出す。それ以外は種類（if_type）と本体を上に渡す。
+  - 送信: ヘッダ（if_type、len、offset = 12、seq_num。チェックサムは使わない。TCC の sdkconfig で `ESP_HOSTED_SDIO_CHECKSUM` が無効で、受け取ったヘッダのチェックサムも 0）を付け、512 の倍数に 0 で埋めて `0x1F800 − 全長` へ CMD53 で書く。C6 の空きバッファは TOKEN_RDATA の bit27:16 から使った数を引いて求め、無ければ `Busy`（`sdio_drv.c:420-440,531-580`）。送信の抑制（bit7）の間も `Busy`。
+- **オブジェクト**（kernel/src/wlan.rs、ABI 0.12）:
+  - `wlan:ctl`（`wifi` サービス用）: SERIAL（if_type 3）の本体＝esp_hosted の TLV（端点名と RPC）を 1 つずつ `read`/`write`。最初の `open` で C6 を起動する（約 2 秒。この間カーネルは止まる。判断: 起動は 1 回だけなので許す）。`ctl(SET_MAC)` で局の MAC アドレスをカーネルに教える。
+  - `netdev:wlan0`（`net` 用）: STA（if_type 1）の本体＝Ethernet のフレーム（FCS なし）。`ctl(MAC_LO/MAC_HI)` で MAC アドレス（未設定なら `Busy`）。
+  - どちらかが開いている間、スケジューラのループごとに `poll` で C6 を読む（INT_RAW を CMD53 で 1 回読む）。カードの割り込みはまだ使っていない。
+  - 受信の待ち行列は内部 SRAM の残りで決めた: RPC 3 個、フレーム 5 個。8 個と 4 個ではカーネルの RAM が 4480 バイト足りなかった。
+
+### 6.2 `wifi` サービス（user/apps/wifi、`--permit wlan:ctl`）
+- RPC は protobuf の `Rpc { msg_type = 1, msg_id = 2, uid = 3, oneof payload（番号 = msg_id） }`（`esp_hosted_rpc.proto:2153-2452`）。必要なメッセージだけを手で組み立て・読む（ネストは一時バッファで長さを先に決める）。応答の id は要求の id + 256。
+- 手順: ESPInit のイベントを待つ（3 秒）→ `WifiInit` → `SetMode(STA)` → `GetMacAddress(STA)`（`ctl(SET_MAC)`）→ `WifiSetConfig(STA: ssid, password, pmf capable)` → `WifiStart` → `WifiConnect` → イベントを待ち続ける。切断されたら 5 秒後に `WifiConnect` をやり直す。
+  - 最初は `GetMacAddress` を先にしていたが、C6 は `ESP_ERR_WIFI_NOT_INIT`（0x3001）を返した。初期化の後に移した。
+  - `WifiInit` の設定値は、C6 がそのまま使う（`slave_wifi_std.c:150-198,423-470`）。TCC のホストが送る値（TCC の sdkconfig の `CONFIG_WIFI_RMT_*`: 静的受信 10、動的受信 32、動的送信 32、AMPDU 送受、NVS、BA の窓 6、管理用 32、magic 0x1F2F3F4F など）に合わせた。
+- **接続先**: リポジトリの外のファイル（`$T5_WIFI_FILE`、既定は `~/.config/tab5-os/wifi.txt`。1 行目が SSID、2 行目がパスフレーズ）を build.rs が読み、アプリのイメージに埋め込む（判断。SD カードの設定ファイルに移すまでのつなぎ）。make の変数を通さないので、コマンドの表示にも出ない。パスフレーズはログに出さない。ファイルが無ければ接続せず `wifi.no_credentials` を出す。
+  - イメージ（build/apps/wifi.t5a と user/target の ELF）にはパスフレーズが平文で入る。どちらも git の管理外。
+
+### 6.3 実機の結果（2026-10-31）
+```
+wlan.fw_version major=2 minor=12 patch=7
+wifi.chip_init reset_reason=1
+wifi.mac mac=e4b3239a1f25
+wifi.configured ssid=<利用者の AP>
+wifi.event event_id=2      (WIFI_EVENT_STA_START)
+wifi.event event_id=43
+wifi.connected ssid=<利用者の AP> bssid=… channel=11 authmode=6 aid=42
+```
+- `WifiConnect` から約 0.7 秒で接続した。authmode 6 は ESP-IDF の `WIFI_AUTH_WPA3_PSK`。
+- `wifi` はその後も待ち続けている（`ps`: state=waiting）。カーネルのスタックは 40976/49152。
+
+## 7. まだ
+- N2b-3b: `net` に `netdev:wlan0` のリンク（`Medium::Ethernet`、MAC は `ctl(MAC_LO/HI)`）と DHCP を足し、ゲートウェイと外への ping、TCP を通す。
+- ポーリングをやめて SDIO のカードの割り込み（SDMMC の `sdio_int_mask`）でカーネルを起こす。
+- 接続先を SD カードの設定ファイルから読む。
 - C6 の電源を入れた・入っていた状態を、M5Stack の元のファームウェア（バックアップ）がどう扱うかは確かめていない。

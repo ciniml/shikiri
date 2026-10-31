@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["rt", "apps/hello", "apps/fault", "apps/ticker", "apps/spin", "apps/timers", "apps/xipcheck", "apps/echo", "apps/paint", "apps/fs", "apps/fstest", "apps/net", "apps/nettest"]
+members = ["rt", "apps/hello", "apps/fault", "apps/ticker", "apps/spin", "apps/timers", "apps/xipcheck", "apps/echo", "apps/paint", "apps/fs", "apps/fstest", "apps/net", "apps/nettest", "apps/wifi"]
 
 [profile.release]
 opt-level = "s"

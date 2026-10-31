@@ -188,7 +188,7 @@ fn log_packet(p: &[u8]) {
         flags = p[1],
         len = len as u32,
         offset = offset as u32,
-        seq = u16::from_le_bytes([p[8], p[9]]),
+        seq_num = u16::from_le_bytes([p[8], p[9]]),
         priv_type = p[11],
         head = &p[..p.len().min(48)]
     );
@@ -241,9 +241,57 @@ fn chip_en(high: bool) {
     }
 }
 
-/// `wlanprobe`: powers the C6 (if needed), resets it, identifies the SDIO
-/// card at 400 kHz, logs the CCCR and enables function 1 (N2b-1).
-pub fn probe() -> Result<u32, &'static str> {
+/// The transport's state once `up` has run.
+struct Link {
+    up: bool,
+    /// Bytes read so far (mod 2^20), against the C6's PACKET_LEN.
+    rx_count: u32,
+    /// Buffers used so far (mod 2^12), against TOKEN_RDATA, and how many
+    /// are known to be free (sdio_drv.c:420-440, 531-580).
+    tx_count: u32,
+    tx_free: u32,
+    tx_seq: u16,
+    /// The C6 asked to pause sending (START/STOP_THROTTLE).
+    throttled: bool,
+    /// Received stream (packets back to back, streaming mode); `have` bytes.
+    stream: [u8; STREAM],
+    have: usize,
+    tx: [u8; TX_MAX],
+    dropped: u32,
+}
+
+/// Room for a 4 KiB read (the DMA bounce buffer's size) on top of a
+/// partial packet, rounded to whole blocks.
+const STREAM: usize = 8 * BLOCK;
+const READ_MAX: usize = 8 * BLOCK;
+/// Header and the longest payload (MAX_SDIO_BUFFER_SIZE), whole blocks.
+const BUF_SIZE: usize = 1536;
+const TX_MAX: usize = 4 * BLOCK;
+const RX_BYTE_MAX: u32 = 0x10_0000;
+const TX_BUFFER_MAX: u32 = 0x1000;
+
+static mut LINK: Link = Link {
+    up: false,
+    rx_count: 0,
+    tx_count: 0,
+    tx_free: 0,
+    tx_seq: 0,
+    throttled: false,
+    stream: [0; STREAM],
+    have: 0,
+    tx: [0; TX_MAX],
+    dropped: 0,
+};
+
+fn link() -> &'static mut Link {
+    unsafe { &mut *core::ptr::addr_of_mut!(LINK) }
+}
+
+/// Powers the C6 (if needed), resets it, identifies it on SDIO, sets the
+/// card up as esp_hosted's host does and opens the data path (N2b-1, N2b-2).
+pub fn up() -> Result<u32, &'static str> {
+    let l = link();
+    l.up = false;
     let was_on = tab5::wlan_power_on()?;
     // A reset pulse on CHIP_EN, as the esp_hosted host does; then the time
     // TCC gives the C6 to boot (wifi_setup.cpp:117-121).
@@ -254,6 +302,7 @@ pub fn probe() -> Result<u32, &'static str> {
 
     sd::host_up()?;
     pins();
+    sd::set_wide(SLOT, false);
     sd::set_card_clock(SLOT, 50, 400)?;
     delay_us(1000);
     // Ignored by a card that has just started; resets one that was in use.
@@ -296,7 +345,7 @@ pub fn probe() -> Result<u32, &'static str> {
         return Err("function 1 not ready");
     }
 
-    // N2b-2: as esp_hosted's card init (port_esp_hosted_host_sdio.c:150-218):
+    // As esp_hosted's card init (port_esp_hosted_host_sdio.c:150-218):
     // interrupts of function 1 and the master enable, 512-byte blocks, then
     // 4 lines at 20 MHz (TCC's clock: 40 MHz failed there).
     let ie = rw_direct(0, CCCR_INT_ENABLE, None)?;
@@ -316,42 +365,141 @@ pub fn probe() -> Result<u32, &'static str> {
         tx_buffers = (token >> 16) & 0xFFF,
         bus_if = rw_direct(0, CCCR_BUS_IF, None)?
     );
-
-    // Open the data path, then read what the C6 sends for up to 2 s
-    // (sdio_drv.c:1096-1290, polling instead of the card interrupt).
+    // The C6 has just restarted: its counters start from 0.
+    l.rx_count = 0;
+    l.tx_count = 0;
+    l.tx_free = 0;
+    l.have = 0;
+    l.throttled = false;
+    // Open the data path (sdio_drv.c:395-405,1146).
     rw_direct(1, SLC_HOST_TO_SLAVE, Some(1 << ESP_OPEN_DATA_PATH))?;
-    let mut rx_count = 0u32;
-    let mut buf = [0u8; 3 * BLOCK];
-    let end = Esp32p4v1::now() + 2 * 16_000_000;
-    let mut packets = 0u32;
-    let mut seen = 0u32;
-    while Esp32p4v1::now() < end && packets < 4 {
-        let ints = read_reg(SLC_INT_RAW)?;
-        if ints & !seen != 0 {
-            seen |= ints;
-            event!(Info, "wlan.int", ints = ints);
+    l.up = true;
+    Ok(rca)
+}
+
+/// Reads what the C6 has sent (sdio_drv.c:1096-1290, polled instead of
+/// waiting for the card interrupt) and passes each payload to `sink` with
+/// its interface type. The INIT event is logged here.
+pub fn poll(sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
+    let l = link();
+    if !l.up {
+        return Ok(());
+    }
+    let ints = read_reg(SLC_INT_RAW)?;
+    if ints & INT_USED == 0 {
+        return Ok(());
+    }
+    write_reg(SLC_INT_CLR, ints & INT_USED)?;
+    if ints & (1 << 7) != 0 {
+        l.throttled = true;
+    }
+    if ints & (1 << 6) != 0 {
+        l.throttled = false;
+    }
+    if ints & INT_NEW_PACKET == 0 {
+        return Ok(());
+    }
+    let total = read_reg(SLC_PACKET_LEN)? & LEN_MASK;
+    let mut left = (total + RX_BYTE_MAX - l.rx_count) % RX_BYTE_MAX;
+    while left > 0 {
+        // Whole blocks except for the last piece, which is rounded up (the
+        // C6 pads it with zeros).
+        let k = (left as usize).min(READ_MAX);
+        let xfer = k.next_multiple_of(BLOCK);
+        if l.have + xfer > STREAM {
+            // A packet longer than any the C6 sends: the stream is lost.
+            l.dropped += 1;
+            event!(Warn, "wlan.stream_lost", have = l.have as u32, left = left);
+            l.have = 0;
         }
-        if ints & INT_USED == 0 {
-            delay_us(1000);
-            continue;
-        }
-        write_reg(SLC_INT_CLR, ints & INT_USED)?;
-        if ints & INT_NEW_PACKET == 0 {
-            continue;
-        }
-        let total = read_reg(SLC_PACKET_LEN)? & LEN_MASK;
-        let len = (total + 0x10_0000 - rx_count) % 0x10_0000;
-        if len == 0 || len as usize > buf.len() {
-            event!(Warn, "wlan.bad_len", packet_len = total, rx_count = rx_count);
+        let have = l.have;
+        rw_extended(CMD53_END_ADDR - left, Data::Read(&mut l.stream[have..have + xfer]))?;
+        l.have += k;
+        left -= k as u32;
+        l.rx_count = (l.rx_count + k as u32) % RX_BYTE_MAX;
+        split(l, sink);
+    }
+    Ok(())
+}
+
+/// Passes on the whole packets at the start of the stream.
+fn split(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) {
+    let mut at = 0;
+    while l.have - at >= HEADER_LEN {
+        let p = &l.stream[at..l.have];
+        let len = u16::from_le_bytes([p[2], p[3]]) as usize;
+        let offset = u16::from_le_bytes([p[4], p[5]]) as usize;
+        if len == 0 || offset != HEADER_LEN || len > BUF_SIZE {
+            // As esp_hosted: the rest of the stream cannot be decoded.
+            event!(Warn, "wlan.bad_packet", len = len as u32, offset = offset as u32);
+            l.dropped += 1;
+            at = l.have;
             break;
         }
-        // Whole blocks; the C6 pads with zeros.
-        let n = (len as usize).next_multiple_of(BLOCK);
-        rw_extended(CMD53_END_ADDR - len, Data::Read(&mut buf[..n]))?;
-        rx_count = total;
-        packets += 1;
-        log_packet(&buf[..len as usize]);
+        if p.len() < offset + len {
+            break;
+        }
+        let if_type = p[0] & 0xF;
+        if if_type == IF_PRIV {
+            log_packet(&p[..offset + len]);
+        } else {
+            sink(if_type, &p[offset..offset + len]);
+        }
+        at += offset + len;
     }
-    event!(Info, "wlan.probe_done", packets = packets, rx_bytes = rx_count);
+    l.stream.copy_within(at..l.have, 0);
+    l.have -= at;
+}
+
+/// Sends one payload on interface `if_type` (sdio_drv.c:586-770). `Err`
+/// "busy" when the C6 has no free buffer or asked to pause.
+pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
+    let l = link();
+    if !l.up {
+        return Err("Wi-Fi not up");
+    }
+    let total = HEADER_LEN + payload.len();
+    if total > BUF_SIZE {
+        return Err("too long");
+    }
+    if l.throttled {
+        return Err("busy");
+    }
+    if l.tx_free == 0 {
+        let token = read_reg(SLC_TOKEN_RDATA)?;
+        l.tx_free = (((token >> 16) & 0xFFF) + TX_BUFFER_MAX - l.tx_count) % TX_BUFFER_MAX;
+        if l.tx_free == 0 {
+            return Err("busy");
+        }
+    }
+    let xfer = total.next_multiple_of(BLOCK);
+    let h = &mut l.tx[..HEADER_LEN];
+    h.fill(0);
+    h[0] = if_type & 0xF;
+    h[2..4].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+    h[4..6].copy_from_slice(&(HEADER_LEN as u16).to_le_bytes());
+    h[8..10].copy_from_slice(&l.tx_seq.to_le_bytes());
+    l.tx[HEADER_LEN..total].copy_from_slice(payload);
+    l.tx[total..xfer].fill(0);
+    rw_extended(CMD53_END_ADDR - total as u32, Data::Write(&l.tx[..xfer]))?;
+    l.tx_seq = l.tx_seq.wrapping_add(1);
+    l.tx_count = (l.tx_count + 1) % TX_BUFFER_MAX;
+    l.tx_free -= 1;
+    Ok(())
+}
+
+/// `wlanprobe`: starts the transport and logs what the C6 sends for 2 s.
+pub fn probe() -> Result<u32, &'static str> {
+    let rca = up()?;
+    let end = Esp32p4v1::now() + 2 * 16_000_000;
+    let mut n = 0u32;
+    while Esp32p4v1::now() < end {
+        poll(&mut |if_type, p| {
+            n += 1;
+            event!(Info, "wlan.rx", if_type = if_type, len = p.len() as u32, head = &p[..p.len().min(48)]);
+        })?;
+        delay_us(1000);
+    }
+    event!(Info, "wlan.probe_done", packets = n, rx_bytes = link().rx_count);
     Ok(rca)
 }

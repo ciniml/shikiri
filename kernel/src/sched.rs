@@ -124,6 +124,7 @@ impl Scheduler {
             Current::feed_watchdog();
             Current::display_service();
             crate::hostlink::poll();
+            crate::wlan::poll();
             let now = Current::now();
             if limit.is_none() && now >= next_poll {
                 poll(self);

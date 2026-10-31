@@ -3,7 +3,7 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, chan, display, netdev, rights, sd, shm, svc, timer, touch};
+use t5_abi::{Error, MAX_HANDLES, chan, display, netdev, rights, sd, shm, svc, timer, touch, wlan};
 
 use crate::channel;
 use crate::screen::{DisplayHandle, TouchHandle};
@@ -23,6 +23,8 @@ pub enum Object {
     Shm(ShmHandle),
     Sd(SdHandle),
     NetDev(crate::hostlink::NetDev),
+    WlanCtl(crate::wlan::WlanCtl),
+    WlanDev(crate::wlan::WlanDev),
 }
 
 /// The SD card's sectors (doc/18 §3): one handle at a time.
@@ -90,6 +92,14 @@ impl Object {
             n if n == netdev::HOST.as_bytes() => {
                 Ok((Object::NetDev(crate::hostlink::NetDev::open()?), rights::READ | rights::WRITE | rights::WAIT))
             }
+            n if n == netdev::WLAN0.as_bytes() => Ok((
+                Object::WlanDev(crate::wlan::WlanDev::open()?),
+                rights::READ | rights::WRITE | rights::WAIT | rights::CTL,
+            )),
+            n if n == wlan::CTL.as_bytes() => Ok((
+                Object::WlanCtl(crate::wlan::WlanCtl::open()?),
+                rights::READ | rights::WRITE | rights::WAIT | rights::CTL,
+            )),
             n if n == sd::NAME.as_bytes() => Ok((Object::Sd(SdHandle::open()?), rights::READ | rights::WRITE | rights::CTL)),
             n if n == shm::NAME.as_bytes() => {
                 if !crate::shm::available() {
@@ -233,6 +243,8 @@ impl Table {
                 shm::MAP => s.window.map(|w| w.addr()).ok_or(Error::Invalid),
                 _ => Err(Error::NoSupport), // GRANT: `grant`
             },
+            Object::WlanCtl(c) => c.ctl(op, arg),
+            Object::WlanDev(d) => d.ctl(op, arg),
             Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) => Err(Error::NoSupport),
         }
     }
@@ -311,6 +323,8 @@ impl Table {
             Object::Channel(e) => e.write(buf),
             Object::Sd(s) => s.write(buf),
             Object::NetDev(d) => d.write(buf),
+            Object::WlanCtl(c) => c.write(buf),
+            Object::WlanDev(d) => d.write(buf),
             _ => Err(Error::NoSupport),
         }
     }
@@ -322,6 +336,8 @@ impl Table {
             Object::Touch(t) => t.read(buf),
             Object::Sd(s) => s.read(buf),
             Object::NetDev(d) => d.read(buf),
+            Object::WlanCtl(c) => c.read(buf),
+            Object::WlanDev(d) => d.read(buf),
             _ => Err(Error::NoSupport),
         }
     }
@@ -349,6 +365,8 @@ impl Table {
             Object::Touch(t) => t.poll().map(|(ev, v)| (i, ev, v)),
             Object::Listener(l) => l.poll().map(|(ev, v)| (i, ev, v)),
             Object::NetDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
+            Object::WlanCtl(c) => c.poll().map(|(ev, v)| (i, ev, v)),
+            Object::WlanDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::Shm(_) | Object::Sd(_) => None,
         })
     }
