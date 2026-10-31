@@ -20,6 +20,13 @@ const USJ_WR_DONE: u32 = 1 << 0;
 const USJ_SERIAL_IN_EP_DATA_FREE: u32 = 1 << 1;
 /// EP1_CONF.SERIAL_OUT_EP_DATA_AVAIL: the host sent bytes (usb_serial_jtag_reg.h:50).
 const USJ_SERIAL_OUT_EP_DATA_AVAIL: u32 = 1 << 2;
+const USJ_INT_ENA: usize = USJ_BASE + 0x10;
+const USJ_INT_CLR: usize = USJ_BASE + 0x14;
+/// SERIAL_OUT_RECV_PKT: the host sent a USB packet (usb_serial_jtag_reg.h:319,439).
+const USJ_OUT_RECV_PKT_INT: u32 = 1 << 2;
+/// ETS_USB_SERIAL_JTAG_INTR_SOURCE (interrupts.h), routed to CPU line 3.
+const USJ_SOURCE: usize = 22;
+const USJ_IRQ: usize = 3 + CLIC_EXT_INTR_NUM_OFFSET;
 /// How long to wait for room in the FIFO before deciding that nobody reads
 /// the CDC port. Longer than the host's 1 ms USB polling interval: with a
 /// poll-count limit (50,000) bursts were dropped while a host was reading
@@ -407,6 +414,11 @@ impl Platform for Esp32p4v1 {
             wr(SYSTIMER_INT_ENA, rd(SYSTIMER_INT_ENA) | SYSTIMER_TARGET0_INT);
             wr(INTMTX_CORE0_BASE + 4 * SYSTIMER_TARGET0_SOURCE, TIMER_CLIC_INDEX as u32);
             wr(CLIC_CTRL_BASE + 4 * TIMER_CLIC_INDEX, CLIC_TIMER_CTRL);
+            // Console input: routed now, enabled at the source by `console_wake`.
+            wr(USJ_INT_ENA, rd(USJ_INT_ENA) & !USJ_OUT_RECV_PKT_INT);
+            wr(USJ_INT_CLR, USJ_OUT_RECV_PKT_INT);
+            wr(INTMTX_CORE0_BASE + 4 * USJ_SOURCE, USJ_IRQ as u32);
+            wr(CLIC_CTRL_BASE + 4 * USJ_IRQ, CLIC_TIMER_CTRL);
             wr(CLIC_INT_THRESH, 0);
         }
     }
@@ -474,12 +486,27 @@ impl Platform for Esp32p4v1 {
     }
 
     fn console_read(buf: &mut [u8]) -> usize {
+        // Clear first: a packet arriving after the reads below raises the
+        // interrupt again, so the idle wait cannot miss it.
+        unsafe { wr(USJ_INT_CLR, USJ_OUT_RECV_PKT_INT) };
         let mut n = 0;
         while n < buf.len() && unsafe { rd(USJ_EP1_CONF) } & USJ_SERIAL_OUT_EP_DATA_AVAIL != 0 {
             buf[n] = unsafe { rd(USJ_EP1) } as u8;
             n += 1;
         }
         n
+    }
+
+    fn console_pending() -> bool {
+        unsafe { rd(USJ_EP1_CONF) & USJ_SERIAL_OUT_EP_DATA_AVAIL != 0 }
+    }
+
+    fn console_wake(on: bool) {
+        unsafe {
+            wr(USJ_INT_CLR, USJ_OUT_RECV_PKT_INT);
+            let ena = rd(USJ_INT_ENA) & !USJ_OUT_RECV_PKT_INT;
+            wr(USJ_INT_ENA, if on { ena | USJ_OUT_RECV_PKT_INT } else { ena });
+        }
     }
 
     fn sync_code(addr: usize, len: usize) {
@@ -710,6 +737,11 @@ impl Platform for Esp32p4v1 {
     fn handle_irq(code: usize) -> bool {
         if code == display::IRQ {
             display::service();
+            return true;
+        }
+        if code == USJ_IRQ {
+            // Woken for console input; the scheduler loop reads it.
+            unsafe { wr(USJ_INT_CLR, USJ_OUT_RECV_PKT_INT) };
             return true;
         }
         false

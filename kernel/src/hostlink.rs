@@ -65,6 +65,12 @@ fn link() -> &'static mut Link {
     unsafe { &mut *core::ptr::addr_of_mut!(LINK) }
 }
 
+/// Whether bytes wait on the line for `poll` (the scheduler does not sleep
+/// then: `poll` reads a bounded amount per call).
+pub fn pending() -> bool {
+    link().open && Current::console_pending()
+}
+
 /// Reads what the line has (from the scheduler loop). Only while the
 /// service has the link open: otherwise the bytes are left to the hardware.
 pub fn poll() {
@@ -140,6 +146,7 @@ impl NetDev {
         l.open = true;
         l.raw_len = 0;
         l.count = 0;
+        Current::console_wake(true);
         event!(Info, "hostlink.open", mtu = MTU as u32);
         Ok(NetDev)
     }
@@ -184,6 +191,7 @@ impl Drop for NetDev {
     fn drop(&mut self) {
         let l = link();
         l.open = false;
+        Current::console_wake(false);
         event!(Info, "hostlink.closed", received = l.received, dropped = l.dropped, bytes = l.bytes, other = l.other);
     }
 }

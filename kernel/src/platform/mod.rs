@@ -186,6 +186,13 @@ pub trait Platform {
     fn console_read(_buf: &mut [u8]) -> usize {
         0
     }
+    /// Whether the console line has received bytes not read yet.
+    fn console_pending() -> bool {
+        false
+    }
+    /// Lets bytes arriving on the console line wake `wait_for_interrupt`
+    /// (while the host link is open, doc/21 §6).
+    fn console_wake(_on: bool) {}
     /// Restarts the system watchdog (no-op where there is none).
     fn feed_watchdog() {}
     /// Turns the system watchdog on again (a debug probe turns it off when

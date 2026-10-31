@@ -11,6 +11,11 @@
 ## 2. カーネル（kernel/src/hostlink.rs、ABI 0.11）
 - 受信: USJ の OUT エンドポイント。`EP1_CONF.SERIAL_OUT_EP_DATA_AVAIL`（bit2）が立っている間 `EP1` から 1 バイトずつ読む（kernel/src/platform/esp32p4v1.rs:476、出典は usb_serial_jtag_reg.h:50）。
 - `hostlink::poll()` をスケジューラのループから呼ぶ（kernel/src/sched.rs:126）。1 回に 64 バイト × 32 回まで読む（洪水でループを止めないため）。**サービスが開いている間だけ**読む。開いていなければ、バイトはハードウェアに残る。
+- **受信で眠りから覚める**: 開いている間は USJ の `SERIAL_OUT_RECV_PKT` 割り込み（INT_ENA/INT_CLR の bit2、usb_serial_jtag_reg.h:319,439）を有効にする。割り込み元は `ETS_USB_SERIAL_JTAG_INTR_SOURCE` = 22（interrupts.h。`ETS_TEMPERATURE_SENSOR_INTR_SOURCE` は別名なので数えない）で、CPU の線 3（CLIC の番号 19）に回す。タイマと同じく MIE=0 のままで、`wfi` を起こすためだけに使う。
+  - `console_read` は読む**前に**割り込みを消す。読んだ後に届いたパケットは割り込みをもう一度立てるので、その後の `wfi` が取り逃がさない。
+  - 読み残し（上限に達したとき）があれば、スケジューラは眠らずにループを回す（`hostlink::pending()`）。
+  - U モードの実行中に来たら、`handle_irq` で消してそのプロセスに戻る。読むのは次のループ。
+  - これが無い間は、パケットはタイマで起きるまで（`POLL_MS` = 10ms か、`net` の待ちの時間切れ）待たされていた。
 - 受け取ったパケットは固定の待ち行列（1500 バイト × 8）に入れる。一杯なら捨てて `dropped` を数える。
 - オブジェクト `netdev:host`（`t5_abi::netdev`）: 一度に一人だけが開ける（2 人目は `Busy`）。権限は READ/WRITE/WAIT。
   - `read`: 1 パケットを取る。無ければ `Busy`。バッファが小さければ `Size`（パケットは残る）。
@@ -44,13 +49,21 @@ tools/target/release/t5log hostlink --port /dev/ttyACM3 --tun t5 --elf build/t5-
 - 注意: `t5log hostlink` が動いている間はシリアルのポートを握っている。その間 `espflash`（`make flash-kernel-p4`）は接続できずに止まる。実際に一度、otadata の消去の前で何時間も止まった（何も書かれていなかった）。書き込みの前に `t5log hostlink` を止めること。RTT（`t5log rtt`）は JTAG なので並行して使える。
 
 ## 5. 実機の結果（2026-10-31、360MHz）
-- PC（10.55.0.1）から `ping 10.55.0.2`: 5/5、往復は最小 0.97ms・平均 2.4ms・最大 5.1ms。
-- TCP の echo（`nettest 1`、ポート 7777）: PC から乱数を送り、戻りが一致した。64KiB は 646ms、**1MiB は 10.0 秒（約 0.84Mbps）**。`net.host_tx` に失敗はなく、`hostlink.closed` の `dropped` は 0。
+TCP の echo は `nettest 1`（ポート 7777）に PC から乱数を送り、戻りが一致することを確かめた（scratchpad の小さな Python）。
+
+| | ping（5 回） | TCP 64KiB | TCP 1MiB |
+|---|---|---|---|
+| 受信の割り込みなし | 平均 2.4ms（0.97〜5.1ms） | 646ms | 10.0 秒（約 0.84Mbps） |
+| 受信の割り込みあり（§2） | **平均 0.41ms**（0.38〜0.51ms） | 266ms | **3.6 秒（約 2.3Mbps）** |
+
+- どちらも全部一致した。`net.host_tx` に失敗はなく、`hostlink.closed` の `dropped` は 0。
+- 割り込みありで research の見込み（2〜6Mbps）の範囲に入った。echo なので、同じ線の上で両方向に同時に流れている。
+- 割り込みを足した後も `make test-p4emu` は全部通る（t5emu の USJ は割り込みを出さないので、そこでは前と同じ動き）。
 - ログは同じ線で読めている。ただし `t5log hostlink` が動いていない間（誰も読まない間）は、コンソールのログは捨てられる（`log.dropped sink=console`）。RTT のほうには残る。
 - 書き込み・インストール・実行は、利用者が足した許可（`t5log rtt --probe <Tab5>`）で Claude が行った。TUN の装置は利用者が作った。
 
 ## 6. まだ
-- **速さ**: research の見込み（2〜6Mbps）より遅い。原因はまだ調べていない。考えられるのは、受信をスケジューラのループで 1 バイトずつ読んでいること、1 回の `poll` で読む量の上限、`net` が起きるまでの遅れ、TCP の窓（推測）。USJ の受信の割り込みや、`net` からの読み出しの回数を測ってから直す。
+- **さらに速く**: 今は受信を 1 バイトずつレジスタから読み、送信も 1 バイトずつ書いている。`net` は要求ごとに 1 パケットずつ `read`/`write` する。どこが効いているかは測っていない（推測の候補: USB FS の 64 バイトのパケット、システムコールの回数、TCP の窓）。今の用途（開発中の PC とのやりとり）には足りるので、後回しにする（判断）。
 - **t5emu の中の相手役のホスト**（research §4）: まだ無い。今の確認は実機だけで、`make test-p4emu` には入っていない。
 - PC から Tab5 へログ以外の制御（コマンド）を同じ線で送ること。今は RTT を使っている。
 - 次は N2b（Wi-Fi）。エクスパンダ #2 の bit0（WLAN_PWR_EN）の書き込みには利用者の承認が要る。C6 のファームウェアの版も確かめる必要がある。

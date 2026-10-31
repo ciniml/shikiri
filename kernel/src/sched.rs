@@ -164,6 +164,9 @@ impl Scheduler {
                 if limit.is_some() && self.slots.iter().flatten().all(|p| p.exit().is_some()) {
                     break;
                 }
+                if crate::hostlink::pending() {
+                    continue;
+                }
                 // Everyone is asleep (or nothing runs). Wake at least every
                 // second to feed the watchdog.
                 Current::set_alarm(wake.min(now + time::ms_to_ticks(1000)));
