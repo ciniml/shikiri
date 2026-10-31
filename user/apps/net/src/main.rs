@@ -30,6 +30,7 @@ mod link;
 mod nat;
 mod rules;
 mod dhcpd;
+mod dnsrelay;
 mod testlan;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
@@ -106,8 +107,8 @@ static mut ICMP_RX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::
 static mut ICMP_TX_META: [[icmp::PacketMetadata; ICMP_PACKETS]; POOL] = [[icmp::PacketMetadata::EMPTY; ICMP_PACKETS]; POOL];
 static mut STORAGE0: MaybeUninit<[SocketStorage<'static>; POOL]> = MaybeUninit::uninit();
 /// The Ethernet interfaces' sockets: any of the pool, plus the DHCP
-/// client, DNS and the DHCP server.
-static mut ETH_STORAGE: MaybeUninit<[[SocketStorage<'static>; POOL + 3]; IFACES - 1]> = MaybeUninit::uninit();
+/// client, DNS, the DHCP server and the DNS relay.
+static mut ETH_STORAGE: MaybeUninit<[[SocketStorage<'static>; POOL + 4]; IFACES - 1]> = MaybeUninit::uninit();
 
 /// Writes `n` values made by `f` from `p` on.
 unsafe fn fill<T>(p: *mut T, n: usize, f: impl Fn() -> T) {
@@ -122,7 +123,7 @@ fn init_statics() {
         fill(core::ptr::addr_of_mut!(UDP_RX_META).cast::<udp::PacketMetadata>(), UDP_PACKETS * POOL, || udp::PacketMetadata::EMPTY);
         fill(core::ptr::addr_of_mut!(UDP_TX_META).cast::<udp::PacketMetadata>(), UDP_PACKETS * POOL, || udp::PacketMetadata::EMPTY);
         fill(core::ptr::addr_of_mut!(STORAGE0).cast::<SocketStorage<'static>>(), POOL, || SocketStorage::EMPTY);
-        fill(core::ptr::addr_of_mut!(ETH_STORAGE).cast::<SocketStorage<'static>>(), (POOL + 3) * (IFACES - 1), || SocketStorage::EMPTY);
+        fill(core::ptr::addr_of_mut!(ETH_STORAGE).cast::<SocketStorage<'static>>(), (POOL + 4) * (IFACES - 1), || SocketStorage::EMPTY);
     }
     filter::init();
     nat::init();
@@ -366,6 +367,8 @@ pub struct Stack {
     pub v6: fwd6::Fwd6,
     /// The DHCP server, and the rule set generation it was made from.
     dhcpd: Option<dhcpd::Server>,
+    /// The DNS relay, with the DHCP server (doc/29).
+    relay: Option<dnsrelay::Relay>,
     rules_gen: u32,
     /// An IPv6 address for the reply being made (doc/26 §4).
     reply_addr: Option<[u8; 16]>,
@@ -423,18 +426,47 @@ impl Stack {
             {
                 old.remove(&mut e.sockets);
             }
+            if let Some(old) = self.relay.take()
+                && let Some((down, up)) = self.down_up(old.link as usize)
+            {
+                old.remove(&mut down.sockets, &mut up.sockets);
+            }
             if let Some(cfg) = rules.dhcp
                 && cfg.link as usize != IFACE0
                 && let Some(e) = self.eth[cfg.link as usize - 1].as_mut()
             {
                 self.dhcpd = Some(dhcpd::Server::new(cfg, &mut e.sockets));
+                if let Some((down, up)) = self.down_up(cfg.link as usize) {
+                    self.relay = Some(dnsrelay::Relay::new(cfg.link, &mut down.sockets, &mut up.sockets));
+                }
             }
         }
-        let Some(srv) = &mut self.dhcpd else { return };
         let dns = self.eth[WLAN - 1].as_ref().and_then(|w| w.dns_server);
+        if let Some(r) = &mut self.relay
+            && let (Some(w), Some(d)) = {
+                let (a, b) = self.eth.split_at_mut(1);
+                (a[0].as_mut(), b[0].as_mut())
+            }
+        {
+            r.poll(&mut d.sockets, &mut w.sockets, dns);
+        }
+        let relaying = self.relay.is_some();
+        let Some(srv) = &mut self.dhcpd else { return };
         let Some(e) = self.eth[srv.cfg.link as usize - 1].as_mut() else { return };
         let Some(own) = e.dev.own else { return };
-        srv.poll(&mut e.sockets, own, dns.unwrap_or(own.0));
+        // The relay answers for names on the link itself.
+        let given = if relaying { own.0 } else { dns.unwrap_or(own.0) };
+        srv.poll(&mut e.sockets, own, given);
+    }
+
+    /// The downstream link `down` and Wi-Fi (the DNS relay's two sides),
+    /// if both are there and differ.
+    fn down_up(&mut self, down: usize) -> Option<(&mut EthLink, &mut EthLink)> {
+        if down != TEST {
+            return None;
+        }
+        let (a, b) = self.eth.split_at_mut(1);
+        Some((b[0].as_mut()?, a[0].as_mut()?))
     }
 
     /// Gives each interface, besides its own addresses, the Tab5's
@@ -1073,6 +1105,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         fwd: Forwarder::new(),
         v6: fwd6::Fwd6::new(),
         dhcpd: None,
+        relay: None,
         rules_gen: 0,
         reply_addr: None,
     };

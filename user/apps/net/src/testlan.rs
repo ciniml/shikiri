@@ -19,9 +19,9 @@
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, TxToken};
-use smoltcp::socket::{dhcpv4, icmp, tcp};
+use smoltcp::socket::{dhcpv4, dns, icmp, tcp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Address};
 use t5_rt::{event, time_ns};
 
 use crate::link::{ETH_FRAME, Rx, from_peer, to_peer};
@@ -80,7 +80,10 @@ impl Device for PeerDev {
     }
 }
 
-static mut STORAGE: [SocketStorage<'static>; 4] = [SocketStorage::EMPTY; 4];
+static mut STORAGE: [SocketStorage<'static>; 5] = [SocketStorage::EMPTY; 5];
+static mut DNS_SLOTS: [Option<dns::DnsQuery>; 1] = [const { None }; 1];
+/// What the peer looks up through the DNS server DHCP gave (doc/29).
+const DNS_NAME: &str = "one.one.one.one";
 static mut HTTP_RX: [u8; HTTP_BUF] = [0; HTTP_BUF];
 static mut HTTP_TX: [u8; HTTP_BUF] = [0; HTTP_BUF];
 static mut PROBE_RX: [u8; 512] = [0; 512];
@@ -113,6 +116,8 @@ pub struct Peer {
     http6: bool,
     /// The fetch going on is over IPv6.
     http_v6: bool,
+    /// The lookup through the DNS server DHCP gave: socket, query, start.
+    dns: Option<(SocketHandle, dns::QueryHandle, u64)>,
 }
 
 impl Peer {
@@ -171,6 +176,7 @@ impl Peer {
             http_bytes: 0,
             http6: false,
             http_v6: false,
+            dns: None,
         }
     }
 
@@ -186,6 +192,14 @@ impl Peer {
                 let _ = self.iface.routes_mut().add_default_ipv4_route(r);
             }
             event!(Info, "net.peer_dhcp", addr = c.address.address().to_bits(), router = c.router.map_or(0, |r| r.to_bits()), dns = c.dns_servers.first().map_or(0, |d| d.to_bits()));
+            if let (Some(server), None) = (c.dns_servers.first(), self.dns) {
+                let q = unsafe { &mut *core::ptr::addr_of_mut!(DNS_SLOTS) };
+                let h = self.sockets.add(dns::Socket::new(&[IpAddress::Ipv4(*server)], &mut q[..]));
+                let cx = self.iface.context();
+                if let Ok(query) = self.sockets.get_mut::<dns::Socket>(h).start_query(cx, DNS_NAME, DnsQueryType::A) {
+                    self.dns = Some((h, query, time_ns()));
+                }
+            }
             self.configured = true;
             // Fetch the page once (DHCP mode only).
             if self.http_since.is_none() && !self.http_done {
@@ -301,8 +315,31 @@ impl Peer {
         }
     }
 
+    /// The lookup's answer (`net.peer_dns`), once.
+    fn dns_result(&mut self) {
+        let Some((h, q, since)) = self.dns else { return };
+        let r = self.sockets.get_mut::<dns::Socket>(h).get_query_result(q);
+        let ms = ((time_ns() - since) / 1_000_000) as u32;
+        match r {
+            Err(dns::GetQueryResultError::Pending) => return,
+            Ok(addrs) => {
+                let ip = addrs.iter().find_map(|a| match a {
+                    IpAddress::Ipv4(v) => Some(v.to_bits()),
+                    _ => None,
+                });
+                event!(Info, "net.peer_dns", name = DNS_NAME, ip = ip.unwrap_or(0), ms = ms);
+            }
+            Err(dns::GetQueryResultError::Failed) => event!(Warn, "net.peer_dns_failed", name = DNS_NAME, ms = ms),
+        }
+        // Done: the slot stays taken so it is not asked again.
+        self.dns = Some((h, q, u64::MAX));
+    }
+
     pub fn poll(&mut self) {
         self.dhcp();
+        if self.dns.is_some_and(|d| d.2 != u64::MAX) {
+            self.dns_result();
+        }
         self.http6_start();
         self.http();
         self.probe();

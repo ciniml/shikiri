@@ -71,6 +71,6 @@ net.peer_http status=HTTP/1.1 301 Moved Permanently ms=3182
 
 ## 6. まだ
 - USB の下流のリンク（CDC-NCM）。research の N5 の完了条件はそれを待つ。
-- DNS の中継（Tab5 を DNS サーバとして渡せるように）。
+- DNS の中継（Tab5 を DNS サーバとして渡せるように）: doc/29 で済み。
 - ICMP のエラーの中身の変換、ポートの転送（外から内への DNAT）。
 - 設定（規則、NAT、DHCP サーバ）を `net` の起動時に SD から自動で読む。
