@@ -15,7 +15,7 @@ PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --per
 PERMIT_paint  := --permit display --permit touch
 PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
-PERMIT_net    := --permit shm --permit listen:net --permit netdev:host --stack 32768
+PERMIT_net    := --permit shm --permit listen:net --permit netdev:host --permit netdev:wlan0 --stack 32768
 PERMIT_nettest := --permit svc:net --stack 32768
 PERMIT_wifi   := --permit wlan:ctl --stack 16384
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built

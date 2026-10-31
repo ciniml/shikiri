@@ -8,7 +8,9 @@
 //!
 //! With `mode` 1 it is instead a TCP echo server on port 7777 (for a PC on
 //! the host link, doc/21), serving one connection after another until
-//! killed.
+//! killed. With `mode` 2 it fetches `http://ARG/` (ARG an IPv4 address as
+//! a number, e.g. 0x01010101) and logs the status line and the size: a
+//! test of the way out over Wi-Fi (doc/22).
 //!
 //! Built with `--permit svc:net`. Exit 0 if everything held, otherwise the
 //! number of the failed check.
@@ -21,8 +23,12 @@ t5_rt::entry!(main);
 const LOCALHOST: u32 = ipv4(127, 0, 0, 1);
 const TCP_BYTES: usize = 1 << 20;
 
-fn main(mode: usize, _: usize) -> usize {
-    let r = if mode == 1 { echo_server() } else { run() };
+fn main(mode: usize, arg: usize) -> usize {
+    let r = match mode {
+        1 => echo_server(),
+        2 => http_get(arg as u32),
+        _ => run(),
+    };
     match r {
         Ok(()) => 0,
         Err(check) => {
@@ -91,6 +97,41 @@ fn echo_server() -> Result<(), u32> {
         served += 1;
         event!(Info, "nettest.echoed", bytes = bytes);
     }
+}
+
+fn http_get(ip: u32) -> Result<(), u32> {
+    let mut net = connect()?;
+    let t = time_ns();
+    let s = net.tcp_connect(ip, 80).map_err(|_| 40u32)?;
+    net.wait_established(s, 10_000).map_err(|_| 41u32)?;
+    let connect_ms = ((time_ns() - t) / 1_000_000) as u32;
+    net.send_all(s, b"GET / HTTP/1.0\r\nConnection: close\r\n\r\n").map_err(|_| 42u32)?;
+    let mut buf = [0u8; 2048];
+    let mut first = [0u8; 64];
+    let (mut total, mut first_len) = (0usize, 0usize);
+    loop {
+        let n = net.recv(s, &mut buf).map_err(|_| 43u32)?;
+        if n == 0 {
+            break;
+        }
+        if total == 0 {
+            let line = buf[..n].iter().position(|&b| b == b'\r').unwrap_or(n).min(first.len());
+            first[..line].copy_from_slice(&buf[..line]);
+            first_len = line;
+        }
+        total += n;
+    }
+    let _ = net.close(s);
+    event!(
+        Info,
+        "nettest.http",
+        ip = ip,
+        connect_ms = connect_ms,
+        bytes = total as u32,
+        total_ms = ((time_ns() - t) / 1_000_000) as u32,
+        status = core::str::from_utf8(&first[..first_len]).unwrap_or("?")
+    );
+    if total == 0 { Err(44) } else { Ok(()) }
 }
 
 fn run() -> Result<(), u32> {

@@ -35,6 +35,10 @@ const EVENT_STA_CONNECTED: u32 = 775;
 const EVENT_STA_DISCONNECTED: u32 = 776;
 
 const MODE_STA: u64 = 1;
+/// wifi_event_t (esp_wifi_types_generic.h).
+const WIFI_EVENT_STA_START: i32 = 2;
+/// wifi_auth_mode_t (esp_wifi_types_generic.h).
+const AUTH_WPA2_PSK: u64 = 3;
 const IF_STA: u64 = 0;
 /// WIFI_INIT_CONFIG_MAGIC (esp_wifi.h).
 const INIT_MAGIC: u64 = 0x1F2F_3F4F;
@@ -385,6 +389,9 @@ fn run() -> Result<(), u32> {
             cfg.msg(2, |sta| {
                 sta.bytes(1, SSID);
                 sta.bytes(2, PSK);
+                // wifi_scan_threshold.authmode = WIFI_AUTH_WPA2_PSK, as TCC
+                // sets it (wifi_setup.cpp:164).
+                sta.msg(9, |t| t.uint(2, AUTH_WPA2_PSK));
                 // wifi_pmf_config: capable.
                 sta.msg(10, |pmf| pmf.uint(1, 1));
             })
@@ -392,6 +399,20 @@ fn run() -> Result<(), u32> {
     })?;
     event!(Info, "wifi.configured", ssid = core::str::from_utf8(SSID).unwrap_or("?"));
     rpc.call(REQ_WIFI_START, 1, |_| {})?;
+    // Connect once the station has started, as ESP-IDF's host does (TCC:
+    // "wifi station started", then esp_wifi_remote_connect). Connecting at
+    // once failed twice before joining (reasons 202, 205).
+    let end = time_ns() + RESPONSE_NS;
+    while time_ns() < end {
+        let Ok(m) = rpc.recv(end - time_ns()) else { break };
+        let started = m.kind == EVENT && m.id == EVENT_NO_ARGS && int(rpc.payload(&m), 2) == WIFI_EVENT_STA_START;
+        if m.kind == EVENT {
+            rpc.on_event(&m);
+        }
+        if started {
+            break;
+        }
+    }
     rpc.call(REQ_WIFI_CONNECT, 1, |_| {})?;
     idle(&mut rpc)
 }

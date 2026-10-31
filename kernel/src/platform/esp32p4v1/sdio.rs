@@ -100,6 +100,8 @@ const PRIV_EVENT_INIT: u8 = 0x22;
 const TAG_CHIP_ID: u8 = 0x12;
 const TAG_FW_VERSION: u8 = 0x17;
 const TAG_SDIO_MODE: u8 = 0x18;
+/// ESP_PRIV_FIRMWARE_CHIP_ESP32C6.
+const CHIP_ESP32C6: u8 = 0x0D;
 
 fn ms(n: u64) {
     // In 100 ms steps, feeding the watchdog (power-up waits are 1.5 s).
@@ -253,6 +255,8 @@ struct Link {
     tx_seq: u16,
     /// The C6 asked to pause sending (START/STOP_THROTTLE).
     throttled: bool,
+    /// The INIT event came: answer with the host's configuration.
+    send_config: bool,
     /// Received stream (packets back to back, streaming mode); `have` bytes.
     stream: [u8; STREAM],
     have: usize,
@@ -277,6 +281,7 @@ static mut LINK: Link = Link {
     tx_free: 0,
     tx_seq: 0,
     throttled: false,
+    send_config: false,
     stream: [0; STREAM],
     have: 0,
     tx: [0; TX_MAX],
@@ -419,6 +424,22 @@ pub fn poll(sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
         l.rx_count = (l.rx_count + k as u32) % RX_BYTE_MAX;
         split(l, sink);
     }
+    if l.send_config {
+        l.send_config = false;
+        // As the esp_hosted host after the INIT event (transport_drv.c:726-
+        // 780, 945): host capabilities 0, the chip id it found, no raw
+        // throughput test, flow control at 80 % / 60 % (TCC's values).
+        let config = [
+            PRIV_EVENT_INIT, 15, //
+            0x44, 1, 0, // HOST_CAPABILITIES
+            0x45, 1, CHIP_ESP32C6, // RCVD_ESP_FIRMWARE_CHIP_ID
+            0x46, 1, 0, // SLV_CONFIG_TEST_RAW_TP
+            0x47, 1, 80, // SLV_CONFIG_THROTTLE_HIGH_THRESHOLD
+            0x48, 1, 60, // SLV_CONFIG_THROTTLE_LOW_THRESHOLD
+        ];
+        send(IF_PRIV, &config)?;
+        event!(Info, "wlan.host_config_sent");
+    }
     Ok(())
 }
 
@@ -442,6 +463,7 @@ fn split(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) {
         let if_type = p[0] & 0xF;
         if if_type == IF_PRIV {
             log_packet(&p[..offset + len]);
+            l.send_config = true;
         } else {
             sink(if_type, &p[offset..offset + len]);
         }

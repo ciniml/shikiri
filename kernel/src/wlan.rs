@@ -73,6 +73,8 @@ struct Wlan {
     mac: u64,
     other: u32,
     errors: u32,
+    sta_rx: u32,
+    sta_tx: u32,
 }
 
 static mut WLAN: Wlan = Wlan {
@@ -84,6 +86,8 @@ static mut WLAN: Wlan = Wlan {
     mac: 0,
     other: 0,
     errors: 0,
+    sta_rx: 0,
+    sta_tx: 0,
 };
 
 fn w() -> &'static mut Wlan {
@@ -97,13 +101,22 @@ pub fn poll() {
         return;
     }
     let (ctl, sta, dev_open) = (&mut w.ctl, &mut w.sta, w.dev_open);
-    let mut other = 0;
+    let (mut other, mut sta_rx) = (0, 0);
     let r = Current::wlan_poll(&mut |if_type, p| match if_type {
         IF_SERIAL => ctl.push(p),
-        IF_STA if dev_open => sta.push(p),
+        IF_STA => {
+            if w.sta_rx + sta_rx < 4 {
+                event!(Debug, "wlan.sta_rx", len = p.len() as u32, open = dev_open, head = &p[..p.len().min(48)]);
+            }
+            sta_rx += 1;
+            if dev_open {
+                sta.push(p);
+            }
+        }
         _ => other += 1,
     });
     w.other += other;
+    w.sta_rx += sta_rx;
     if let Err(e) = r {
         w.errors += 1;
         // Rate-limited: the first errors and then every 1000th.
@@ -183,8 +196,12 @@ impl Drop for WlanCtl {
 pub struct WlanDev;
 
 impl WlanDev {
+    /// Only once the chip runs (the Wi-Fi service has opened `wlan:ctl`).
     pub fn open() -> Result<WlanDev, Error> {
         let w = w();
+        if !w.up {
+            return Err(Error::NoDevice);
+        }
         if w.dev_open {
             return Err(Error::Busy);
         }
@@ -198,10 +215,18 @@ impl WlanDev {
     }
 
     pub fn write(&mut self, frame: &[u8]) -> Result<usize, Error> {
-        if !w().up {
+        let w = w();
+        if !w.up {
             return Err(Error::Busy);
         }
-        send(IF_STA, frame)
+        let r = send(IF_STA, frame);
+        if w.sta_tx < 4 {
+            event!(Debug, "wlan.sta_tx", len = frame.len() as u32, ok = r.is_ok(), head = &frame[frame.len().min(14)..frame.len().min(76)]);
+        }
+        if r.is_ok() {
+            w.sta_tx += 1;
+        }
+        r
     }
 
     pub fn ctl(&mut self, op: usize, _arg: u64) -> Result<usize, Error> {
@@ -224,6 +249,6 @@ impl Drop for WlanDev {
     fn drop(&mut self) {
         let w = w();
         w.dev_open = false;
-        event!(Info, "wlan.dev_closed", dropped = w.sta.dropped);
+        event!(Info, "wlan.dev_closed", rx = w.sta_rx, tx = w.sta_tx, dropped = w.sta.dropped);
     }
 }
