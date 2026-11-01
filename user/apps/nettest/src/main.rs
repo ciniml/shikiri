@@ -303,6 +303,10 @@ fn run() -> Result<(), u32> {
 
     // TCP: connect to our own listener and push 1 MiB through.
     let server = net.tcp_listen(7000).map_err(|_| 12u32)?;
+    // A second listener on the port is refused.
+    if !matches!(net.tcp_listen(7000), Err(t5_rt::NetError::Status(t5_rt::net::status::ADDR_IN_USE))) {
+        return Err(28);
+    }
     let client = net.tcp_connect(LOCALHOST, 7000).map_err(|_| 13u32)?;
     net.wait_established(client, 2000).map_err(|_| 14u32)?;
     net.wait_established(server, 2000).map_err(|_| 15u32)?;

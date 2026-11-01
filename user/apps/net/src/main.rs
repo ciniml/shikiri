@@ -759,6 +759,24 @@ impl Stack {
         slot.socks[p].map(|s| (p, s.handle)).ok_or(status::BAD_REQUEST)
     }
 
+    /// Whether a client's socket on `iface` already listens on (TCP) or is
+    /// bound to (UDP) `port` at an address overlapping `local`. smoltcp
+    /// lets two listeners share a port, and the first one takes every
+    /// connection.
+    fn in_use(&mut self, iface: usize, kind: Kind, local: Option<IpAddress>, port: u16) -> bool {
+        let slots = self.slots;
+        let Some(set) = self.set(iface) else { return false };
+        port != 0
+            && slots.iter().flatten().filter(|s| s.owner.is_some() && s.kind == kind).filter_map(|s| s.socks[iface]).any(|s| {
+                let ep = match kind {
+                    Kind::Tcp => Some(set.get::<tcp::Socket>(s.handle)).filter(|t| t.is_listening()).map(|t| t.listen_endpoint()),
+                    Kind::Udp => Some(set.get::<udp::Socket>(s.handle)).filter(|u| u.is_open()).map(|u| u.endpoint()),
+                    _ => None,
+                };
+                ep.is_some_and(|ep| ep.port == port && (ep.addr.is_none() || local.is_none() || ep.addr == local))
+            })
+    }
+
     fn ephemeral(&mut self) -> u16 {
         self.next_port = if self.next_port >= 65000 { 49152 } else { self.next_port + 1 };
         self.next_port
@@ -768,6 +786,9 @@ impl Stack {
     fn bind(&mut self, client: usize, kind: Kind, addr: Option<IpAddress>, v6: bool, b: u32) -> Result<(u32, u32), u32> {
         let (port, link) = (b as u16, (b >> 16) as u8);
         let targets = self.bind_targets(addr, v6, link)?;
+        if targets.iter().enumerate().any(|(k, t)| t.is_some_and(|local| self.in_use(k, kind, local, port))) {
+            return Err(status::ADDR_IN_USE);
+        }
         let i = self.new_slot(client, kind)?;
         let mut first = None;
         for (k, t) in targets.iter().enumerate() {

@@ -36,6 +36,7 @@ doc/28 の結果（カーネルの区画が 99%、プロセスの上限が 4）�
   - 対象: `wifi`、`fs`、`net`、`netctl`（`AUTO_APPS`）
   - 置き場: `build/apps/auto/`
   - インストール: `make install-auto PROBE=...`、または `t5log rtt --cmd "install ..."`
+  - 追記（2026-11-02）: `make install-apps PROBE=...` は、ストアのアプリすべてを今のソースから入れ直す（自動起動のものは印つき、`fault` は除く）。実機のストアは最後に入れたものを持ち続け、起動時の自己試験もそれで動くため。次の起動から使われる。
 - 起動順に頼らないための変更:
   - `net` は、Wi-Fi のリンクがない間、1 秒ごとに `netdev:wlan0` を開き直す（チップがまだ上がっていなければ `NoDevice`）。MAC を待つのは 2 秒まで。`wifi` を後から起動し直した場合にも効く。
   - `netctl` は、`svc:netctl` と `svc:fs` に、それぞれ最大 10 秒、つながるまで待つ。

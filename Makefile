@@ -40,7 +40,7 @@ QEMU_STORE := -device loader,file=$(BUILD)/store/appmeta.bin,addr=0x84410000,for
 
 .PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
         schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 flash-store monitor \
-        probe-rs rtt clean kupdate-test-kernels flash-kernel-p4 kupdate
+        probe-rs rtt clean kupdate-test-kernels flash-kernel-p4 kupdate install-apps
 
 all: kernel-virt image-p4 boot
 
@@ -111,6 +111,19 @@ apps-auto: apps
 install-auto: apps-auto schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
+	    $(foreach a,$(AUTO_APPS),--cmd "install $(AUTO_DIR)/$(a).t5a") --until-done \
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
+
+# Every app the Tab5's store holds, from the current sources (the store
+# keeps what was installed last; the self-test runs it): the store apps
+# without the autostart services, and those with the flag. Not `fault`,
+# which always faults, so its update would be rolled back. Run on the next
+# boot (`reboot`).
+STORE_APPS := $(filter-out fault $(AUTO_APPS),$(APPS)) hello-xip xipcheck
+install-apps: apps-auto schemas-p4
+	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
+	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
+	    $(foreach a,$(STORE_APPS),--cmd "install $(APPS_DIR)/$(a).t5a") \
 	    $(foreach a,$(AUTO_APPS),--cmd "install $(AUTO_DIR)/$(a).t5a") --until-done \
 	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
 
