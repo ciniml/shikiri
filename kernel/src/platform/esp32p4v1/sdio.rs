@@ -151,11 +151,7 @@ fn rw_direct(func: u32, addr: u32, write: Option<u8>) -> Result<u8, &'static str
 /// CMD53 on function 1, incrementing address: whole blocks in block mode,
 /// otherwise up to 512 bytes in byte mode.
 fn rw_extended(addr: u32, data: Data) -> Result<(), &'static str> {
-    let len = match &data {
-        Data::Read(b) => b.len(),
-        Data::Write(b) => b.len(),
-        Data::None => 0,
-    };
+    let len = data.len();
     let (block_mode, count) = if len >= BLOCK && len % BLOCK == 0 {
         (1, len / BLOCK)
     } else if len > 0 && len <= BLOCK {
@@ -163,7 +159,7 @@ fn rw_extended(addr: u32, data: Data) -> Result<(), &'static str> {
     } else {
         return Err("bad CMD53 length");
     };
-    let write = matches!(data, Data::Write(_));
+    let write = data.is_write();
     let arg = (write as u32) << 31 | 1 << 28 | block_mode << 27 | 1 << 26 | addr << 9 | count as u32;
     let r = sd::command_on(SLOT, BLOCK, if write { CMD53_WRITE } else { CMD53_READ }, arg, data)?[0];
     if r & R5_ERRORS != 0 {
@@ -258,6 +254,13 @@ fn chip_en(high: bool) {
     }
 }
 
+/// What reading the stream found, besides packets.
+struct RxFlags {
+    /// The INIT event came: answer with the host's configuration.
+    send_config: bool,
+    dropped: u32,
+}
+
 /// The transport's state once `up` has run.
 struct Link {
     up: bool,
@@ -270,13 +273,11 @@ struct Link {
     tx_seq: u16,
     /// The C6 asked to pause sending (START/STOP_THROTTLE).
     throttled: bool,
-    /// The INIT event came: answer with the host's configuration.
-    send_config: bool,
-    /// Received stream (packets back to back, streaming mode); `have` bytes.
+    flags: RxFlags,
+    /// The start of a packet the last read cut (packets come back to back,
+    /// streaming mode); `have` bytes.
     stream: [u8; STREAM],
     have: usize,
-    tx: [u8; TX_MAX],
-    dropped: u32,
     /// When to ask the C6 even without its interrupt (ticks).
     next_poll: u64,
     /// DAT1 was still low when the interrupt was armed: no edge will come,
@@ -290,10 +291,11 @@ struct Link {
 /// Room for a 4 KiB read (the DMA bounce buffer's size) on top of a
 /// partial packet, rounded to whole blocks.
 const STREAM: usize = 8 * BLOCK;
+/// The C6 takes whole blocks; a frame's last one is padded with these.
+static ZEROS: [u8; BLOCK] = [0; BLOCK];
 const READ_MAX: usize = 8 * BLOCK;
 /// Header and the longest payload (MAX_SDIO_BUFFER_SIZE), whole blocks.
 const BUF_SIZE: usize = 1536;
-const TX_MAX: usize = 4 * BLOCK;
 const RX_BYTE_MAX: u32 = 0x10_0000;
 const TX_BUFFER_MAX: u32 = 0x1000;
 
@@ -304,11 +306,9 @@ static mut LINK: Link = Link {
     tx_free: 0,
     tx_seq: 0,
     throttled: false,
-    send_config: false,
+    flags: RxFlags { send_config: false, dropped: 0 },
     stream: [0; STREAM],
     have: 0,
-    tx: [0; TX_MAX],
-    dropped: 0,
     next_poll: 0,
     again: false,
     irqs: 0,
@@ -507,21 +507,20 @@ fn drain(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static s
         // C6 pads it with zeros).
         let k = (left as usize).min(READ_MAX);
         let xfer = k.next_multiple_of(BLOCK);
-        if l.have + xfer > STREAM {
+        if l.have + k > STREAM {
             // A packet longer than any the C6 sends: the stream is lost.
-            l.dropped += 1;
+            l.flags.dropped += 1;
             event!(Warn, "wlan.stream_lost", have = l.have as u32, left = left);
             l.have = 0;
         }
-        let have = l.have;
-        rw_extended(CMD53_END_ADDR - left, Data::Read(&mut l.stream[have..have + xfer]))?;
-        l.have += k;
+        // The packets are passed on from where the DMA put them; only a
+        // packet the read cut is kept (doc/35 §2).
+        rw_extended(CMD53_END_ADDR - left, Data::ReadWith(xfer, &mut |data| take(l, &data[..k], sink)))?;
         left -= k as u32;
         l.rx_count = (l.rx_count + k as u32) % RX_BYTE_MAX;
-        split(l, sink);
     }
-    if l.send_config {
-        l.send_config = false;
+    if l.flags.send_config {
+        l.flags.send_config = false;
         // As the esp_hosted host after the INIT event (transport_drv.c:726-
         // 780, 945): host capabilities 0, the chip id it found, no raw
         // throughput test, flow control at 80 % / 60 % (TCC's values).
@@ -539,19 +538,36 @@ fn drain(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static s
     Ok(())
 }
 
-/// Passes on the whole packets at the start of the stream.
-fn split(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) {
+/// Passes on the whole packets in `data` (the next bytes of the stream)
+/// and keeps the rest.
+fn take(l: &mut Link, data: &[u8], sink: &mut dyn FnMut(u8, &[u8])) {
+    if l.have == 0 {
+        let used = split(&mut l.flags, data, sink);
+        l.stream[..data.len() - used].copy_from_slice(&data[used..]);
+        l.have = data.len() - used;
+    } else {
+        // After a cut packet: joined in the stream buffer.
+        l.stream[l.have..l.have + data.len()].copy_from_slice(data);
+        l.have += data.len();
+        let used = split(&mut l.flags, &l.stream[..l.have], sink);
+        l.stream.copy_within(used..l.have, 0);
+        l.have -= used;
+    }
+}
+
+/// Passes on the whole packets at the start of `buf`; returns the bytes
+/// used.
+fn split(flags: &mut RxFlags, buf: &[u8], sink: &mut dyn FnMut(u8, &[u8])) -> usize {
     let mut at = 0;
-    while l.have - at >= HEADER_LEN {
-        let p = &l.stream[at..l.have];
+    while buf.len() - at >= HEADER_LEN {
+        let p = &buf[at..];
         let len = u16::from_le_bytes([p[2], p[3]]) as usize;
         let offset = u16::from_le_bytes([p[4], p[5]]) as usize;
         if len == 0 || offset != HEADER_LEN || len > BUF_SIZE {
             // As esp_hosted: the rest of the stream cannot be decoded.
             event!(Warn, "wlan.bad_packet", len = len as u32, offset = offset as u32);
-            l.dropped += 1;
-            at = l.have;
-            break;
+            flags.dropped += 1;
+            return buf.len();
         }
         if p.len() < offset + len {
             break;
@@ -559,14 +575,13 @@ fn split(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) {
         let if_type = p[0] & 0xF;
         if if_type == IF_PRIV {
             log_packet(&p[..offset + len]);
-            l.send_config = true;
+            flags.send_config = true;
         } else {
             sink(if_type, &p[offset..offset + len]);
         }
         at += offset + len;
     }
-    l.stream.copy_within(at..l.have, 0);
-    l.have -= at;
+    at
 }
 
 /// Sends one payload on interface `if_type` (sdio_drv.c:586-770). `Err`
@@ -592,15 +607,13 @@ pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
         }
     }
     let xfer = total.next_multiple_of(BLOCK);
-    let h = &mut l.tx[..HEADER_LEN];
-    h.fill(0);
+    let mut h = [0u8; HEADER_LEN];
     h[0] = if_type & 0xF;
     h[2..4].copy_from_slice(&(payload.len() as u16).to_le_bytes());
     h[4..6].copy_from_slice(&(HEADER_LEN as u16).to_le_bytes());
     h[8..10].copy_from_slice(&l.tx_seq.to_le_bytes());
-    l.tx[HEADER_LEN..total].copy_from_slice(payload);
-    l.tx[total..xfer].fill(0);
-    rw_extended(CMD53_END_ADDR - total as u32, Data::Write(&l.tx[..xfer]))?;
+    // Gathered straight into the DMA's buffer (doc/35 §2).
+    rw_extended(CMD53_END_ADDR - total as u32, Data::WriteParts(&[&h, payload, &ZEROS[..xfer - total]]))?;
     l.tx_seq = l.tx_seq.wrapping_add(1);
     l.tx_count = (l.tx_count + 1) % TX_BUFFER_MAX;
     l.tx_free -= 1;

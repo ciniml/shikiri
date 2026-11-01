@@ -1213,9 +1213,13 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             n += 1;
         }
         let first_link = n;
-        let wifi = stack.eth[WLAN - 1].as_ref().and_then(|w| w.dev.port.handle());
-        for h in [stack.dev.host.as_ref(), wifi].into_iter().flatten() {
-            hs[n] = h.raw();
+        let (mut host_at, mut wifi_at) = (usize::MAX, usize::MAX);
+        if let Some(h) = &stack.dev.host {
+            (hs[n], host_at) = (h.raw(), n);
+            n += 1;
+        }
+        if let Some(h) = stack.eth[WLAN - 1].as_ref().and_then(|w| w.dev.port.handle()) {
+            (hs[n], wifi_at) = (h.raw(), n);
             n += 1;
         }
         let links = n;
@@ -1232,16 +1236,23 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         let ev = wait_raw(&hs[..n], timeout);
         // Requests below are handled at the time they came.
         tick();
-        // Frames may have come on any link meanwhile.
-        stack.dev.host_queued = true;
-        for e in stack.eth.iter_mut().flatten() {
-            e.dev.queued = true;
-        }
         let ev = match ev {
             Ok(ev) => ev,
             Err(Error::TimedOut) => continue,
             Err(_) => return Err(4),
         };
+        // Only the link that woke us is read: `wait` is level-triggered, so
+        // frames on another one end the next `wait` at once. Reading every
+        // link after each `wait` was most of the `READ`s, nearly all empty
+        // (doc/35 §3).
+        if ev.index == host_at {
+            stack.dev.host_queued = true;
+        }
+        if ev.index == wifi_at
+            && let Some(w) = stack.eth[WLAN - 1].as_mut()
+        {
+            w.dev.queued = true;
+        }
         if ev.index == ctl_at.0 {
             if let Some(c) = ctl_listener.as_ref().and_then(|cl| cl.accept().ok())
                 && ctl.is_none()

@@ -272,22 +272,22 @@ impl Process {
     /// (`read` of a device that queues frames, else 0), 0].
     fn io(&mut self, h: usize, ptr: usize, len: usize, write: bool) -> Result<[usize; 3], Error> {
         // The largest transfer of any object: SD sectors (4 KiB). Channels
-        // refuse messages over `chan::MSG_MAX` themselves. One buffer for
-        // every call (the kernel lock is held): clearing 4 KiB on the stack
-        // on each call showed in `net`'s profile (doc/34).
-        static mut IO_BUF: [u8; t5_abi::sd::MAX_IO] = [0; t5_abi::sd::MAX_IO];
-        let buf = unsafe { &mut *core::ptr::addr_of_mut!(IO_BUF) };
-        if write && len > buf.len() {
+        // refuse messages over `chan::MSG_MAX` themselves.
+        if write && len > t5_abi::sd::MAX_IO {
             return Err(Error::Size);
         }
-        let n = len.min(buf.len());
+        let n = len.min(t5_abi::sd::MAX_IO);
         self.check_user_range(ptr, n, !write)?;
+        // The objects copy to or from the caller's memory directly (doc/35
+        // §2); a kernel buffer in between cost a copy of every frame each
+        // way. The range is the process's own text or data (not shared
+        // memory), which nothing else touches while it is in this call.
         if write {
-            unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, buf.as_mut_ptr(), n) };
-            self.handles.write(h, &buf[..n]).map(|n| [n, 0, 0])
+            let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, n) };
+            self.handles.write(h, data).map(|n| [n, 0, 0])
         } else {
-            let got = self.handles.read(h, &mut buf[..n])?;
-            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, got) };
+            let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, n) };
+            let got = self.handles.read(h, out)?;
             Ok([got, self.handles.queued(h), 0])
         }
     }

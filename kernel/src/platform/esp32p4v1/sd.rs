@@ -360,16 +360,28 @@ fn set_card_clock_owned(slot: u32, div2: u32, khz: u32) -> Result<(), &'static s
 pub(super) enum Data<'a> {
     None,
     Read(&'a mut [u8]),
+    /// A read of this many bytes, handed to the closure where the DMA put
+    /// them (no copy; doc/35 §2).
+    ReadWith(usize, &'a mut dyn FnMut(&[u8])),
     Write(&'a [u8]),
+    /// A write of these pieces one after another, gathered straight into
+    /// the bounce buffer.
+    WriteParts(&'a [&'a [u8]]),
 }
 
 impl Data<'_> {
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         match self {
             Data::None => 0,
             Data::Read(b) => b.len(),
+            Data::ReadWith(n, _) => *n,
             Data::Write(b) => b.len(),
+            Data::WriteParts(parts) => parts.iter().map(|p| p.len()).sum(),
         }
+    }
+
+    pub(super) fn is_write(&self) -> bool {
+        matches!(self, Data::Write(_) | Data::WriteParts(_))
     }
 }
 
@@ -488,7 +500,7 @@ pub(super) fn finish_write() {
         release_host(claimed);
         return;
     }
-    let r = dma_finish(IDSTS_TI, UNLOCKED_WAIT_MIN, None).and_then(|_| {
+    let r = dma_finish(IDSTS_TI, UNLOCKED_WAIT_MIN).and_then(|_| {
         if wait(5_000_000, || unsafe { rd(STATUS) } & STATUS_DATA_BUSY == 0) { Ok(()) } else { Err("card stayed busy") }
     });
     unsafe { wr(RINTSTS, TRANSFER_INTS) };
@@ -515,9 +527,19 @@ fn command_timed(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Res
             let _ = wait(10_000, || rd(CTRL) & CTRL_FIFO_RESET == 0);
             wr(BLKSIZ, len.min(block) as u32);
             wr(BYTCNT, len as u32);
-            if let Data::Write(b) = &data {
-                let dst = core::ptr::addr_of_mut!(BOUNCE).cast::<u8>();
-                core::ptr::copy_nonoverlapping(b.as_ptr(), dst, len);
+            let mut dst = core::ptr::addr_of_mut!(BOUNCE).cast::<u8>();
+            let one;
+            let parts: &[&[u8]] = match &data {
+                Data::Write(b) => {
+                    one = [*b];
+                    &one
+                }
+                Data::WriteParts(parts) => parts,
+                _ => &[],
+            };
+            for p in parts {
+                core::ptr::copy_nonoverlapping(p.as_ptr(), dst, p.len());
+                dst = dst.add(p.len());
             }
             dma_start(len);
         }
@@ -544,13 +566,20 @@ fn command_timed(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Res
     let resp = unsafe { [rd(RESP0), rd(RESP0 + 4), rd(RESP0 + 8), rd(RESP0 + 12)] };
     match data {
         Data::None => {}
-        Data::Read(buf) => dma_finish(IDSTS_RI, len, Some(buf))?,
-        Data::Write(_) if slot == DEFER_SLOT => {
+        Data::Read(buf) => {
+            dma_finish(IDSTS_RI, len)?;
+            buf.copy_from_slice(bounce_read(len));
+        }
+        Data::ReadWith(_, f) => {
+            dma_finish(IDSTS_RI, len)?;
+            f(bounce_read(len));
+        }
+        Data::Write(_) | Data::WriteParts(_) if slot == DEFER_SLOT => {
             unsafe { WRITE_IN_FLIGHT = true };
             return Ok(resp);
         }
-        Data::Write(_) => {
-            dma_finish(IDSTS_TI, len, None)?;
+        Data::Write(_) | Data::WriteParts(_) => {
+            dma_finish(IDSTS_TI, len)?;
             // The card programs with D0 low (up to 250 ms per block by the
             // spec; 5 s as ESP-IDF allows).
             if !wait(5_000_000, || unsafe { rd(STATUS) } & STATUS_DATA_BUSY == 0) {
@@ -584,8 +613,8 @@ fn dma_start(len: usize) {
 }
 
 /// Waits for the DMA (`done_bit`: RI for a read, TI for a write) and the
-/// end of the data phase; for a read, copies the data out.
-fn dma_finish(done_bit: u32, len: usize, out: Option<&mut [u8]>) -> Result<(), &'static str> {
+/// end of the data phase.
+fn dma_finish(done_bit: u32, len: usize) -> Result<(), &'static str> {
     let unlocked = len >= UNLOCKED_WAIT_MIN && crate::smp::two_cores();
     let (done, ids, ints) = wait_dma(done_bit, unlocked);
     if !done || ids & IDSTS_ERRORS != 0 || ints & DATA_ERRORS != 0 {
@@ -599,13 +628,15 @@ fn dma_finish(done_bit: u32, len: usize, out: Option<&mut [u8]>) -> Result<(), &
         return Err("data error");
     }
     unsafe { wr(IDSTS, 0x3FF) };
-    if let Some(out) = out {
-        let buf = core::ptr::addr_of!(BOUNCE) as usize;
-        super::cache_invalidate(buf, out.len().next_multiple_of(64), false);
-        let src = core::ptr::addr_of!(BOUNCE).cast::<u8>();
-        unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len()) };
-    }
     Ok(())
+}
+
+/// The first `len` bytes a read's DMA put in the bounce buffer (valid
+/// until the host's next command).
+fn bounce_read(len: usize) -> &'static [u8] {
+    let buf = core::ptr::addr_of!(BOUNCE) as usize;
+    super::cache_invalidate(buf, len.next_multiple_of(64), false);
+    unsafe { core::slice::from_raw_parts(buf as *const u8, len) }
 }
 
 fn app_command(rca: u32, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {

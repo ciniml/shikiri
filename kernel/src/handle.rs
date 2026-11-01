@@ -317,7 +317,7 @@ impl Table {
         self.slots.iter().flatten().any(|s| matches!(s.object, Object::Display(_)))
     }
 
-    /// `write`: `buf` is the caller's data, already copied in.
+    /// `write`: `buf` is the caller's memory; each object reads it once.
     pub fn write(&mut self, h: usize, buf: &[u8]) -> Result<usize, Error> {
         match &mut self.get(h, rights::WRITE)?.object {
             Object::Channel(e) => e.write(buf),
@@ -329,7 +329,7 @@ impl Table {
         }
     }
 
-    /// `read` into `buf` (kernel memory, copied out by the caller).
+    /// `read` into `buf`, the caller's memory.
     pub fn read(&mut self, h: usize, buf: &mut [u8]) -> Result<usize, Error> {
         match &mut self.get(h, rights::READ)?.object {
             Object::Channel(e) => e.read(buf),
