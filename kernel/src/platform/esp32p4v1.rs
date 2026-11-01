@@ -8,6 +8,7 @@ use super::Platform;
 mod clock;
 mod display;
 mod i2c;
+mod kbd;
 mod psram;
 mod sd;
 mod sdio;
@@ -838,6 +839,10 @@ impl Platform for Esp32p4v1 {
 
     fn board_init() -> super::Panel {
         tab5::init()
+    }
+
+    fn kbd_poll(sink: &mut dyn FnMut(u8, u8)) -> Result<(), &'static str> {
+        kbd::poll(sink)
     }
 
     fn touch_read(out: &mut [super::TouchPoint; 5]) -> Result<usize, &'static str> {

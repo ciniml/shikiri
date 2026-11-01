@@ -100,7 +100,12 @@ impl Monitor<'_> {
         }
         while self.ready && !self.injected {
             let line = &self.commands[self.sent];
-            if let Some(ms) = wait_ms(line) {
+            if let Some(text) = keys(line) {
+                let now_ms = m.bus.ticks() * 1000 / periph::SYSTIMER_HZ;
+                if let Some(k) = &mut m.bus.periph.i2c0.kbd {
+                    k.type_text(&text, now_ms);
+                }
+            } else if let Some(ms) = wait_ms(line) {
                 if !self.pending.is_empty() {
                     break;
                 }
@@ -126,6 +131,12 @@ impl Monitor<'_> {
         }
         self.stop_at.is_none_or(|t| m.bus.cycles < t)
     }
+}
+
+/// `keys TEXT`: typed on the emulated keyboard (doc/39), not sent. `\n`
+/// is Enter.
+fn keys(line: &str) -> Option<String> {
+    line.strip_prefix("keys ").map(|t| t.replace("\\n", "\n"))
 }
 
 /// `wait-ms N`: a pause between commands (see `Monitor`), not sent.
@@ -240,7 +251,7 @@ fn parse_args() -> Result<Opts, String> {
             "--expect-reset" => o.expect_reset = true,
             "--ctl" => {
                 let v = val()?;
-                if wait_ms(&v).is_none() {
+                if wait_ms(&v).is_none() && keys(&v).is_none() {
                     t5log::ctl::frames(&v, &mut 0).map_err(|e| format!("--ctl {v}: {e}"))?;
                 }
                 o.ctl.push(v);
@@ -307,6 +318,7 @@ fn main() -> ExitCode {
 
     let mut bus = Bus::new(o.mhz * 1_000_000, o.cache, o.seed);
     bus.periph.warn_unmodelled = o.warn_unmodelled;
+    bus.periph.i2c0.kbd = Some(Default::default());
     bus.periph.reset_cause = periph::reset_reason::POWERON;
     if let Err(e) = load_image(&mut bus, &elf) {
         eprintln!("t5emu: {e}");

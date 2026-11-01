@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
 PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --permit shm --permit listen:shmt --permit svc:shmt
@@ -20,6 +20,9 @@ PERMIT_nettest := --permit svc:net --stack 32768
 PERMIT_wifi   := --permit wlan:ctl --stack 16384
 PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
 PERMIT_init   := --permit proc:spawn --permit svc:fs --stack 16384
+PERMIT_keylog := --permit kbd
+PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --stack 16384
+PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --stack 32768
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin
@@ -285,6 +288,18 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "run init 2" \
 	    --expect-event proc.spawned --expect-event hello.greet --expect-event proc.spawn_failed \
 	    --expect-event init.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# The keyboard (doc/39): keys typed on the emulated keyboard on ExtPort1
+	@# reach keylog (5 keys: press and release each, "aB\n" has Shift).
+	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run keylog 10 6" --ctl "wait-ms 500" --ctl "keys aB\n" \
+	    --expect-event kbd.found --expect-event keylog.key --expect-event keylog.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# The terminal and the shell (doc/39): term starts shell, and a line
+	@# typed on the keyboard runs.
+	$(T5EMU) --quiet --max-ms 40000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run term" --ctl "wait-ms 3000" --ctl "keys echo hi\n" --ctl "wait-ms 1000" \
+	    --expect-event term.ready --expect-event term.session --expect-event shell.exec \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Installing (M3d): the flash write path on a spare sector, an install,
 	@# running it, a rejected image, removal. Stops on any flash access the

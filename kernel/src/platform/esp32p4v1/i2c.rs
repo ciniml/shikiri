@@ -1,4 +1,4 @@
-//! I2C1 master on the Tab5's internal bus (SDA = GPIO31, SCL = GPIO32),
+//! I2C masters (I2C1 on the Tab5's internal bus, I2C0 on ExtPort1),
 //! polled, after ESP-IDF 6.0 `esp_hal_i2c` and `esp_driver_i2c`
 //! (doc/research/m6-panel-touch.md §1). One transfer is at most one command
 //! list: a write of up to 30 bytes, optionally followed by a read of up to
@@ -10,13 +10,9 @@ use crate::platform::Platform;
 
 // Clock and reset (hp_sys_clkrst_reg.h).
 const SOC_CLK_CTRL2: usize = 0x500E_601C;
-const I2C1_APB_CLK_EN: u32 = 1 << 13;
 const PERI_CLK_CTRL10: usize = 0x500E_6040;
-const I2C1_CLK_SRC_RC_FAST: u32 = 1 << 26;
-const I2C1_CLK_EN: u32 = 1 << 27;
 const PERI_CLK_CTRL11: usize = 0x500E_6044;
 const HP_RST_EN1: usize = 0x500E_60C4;
-const RST_EN_I2C1: u32 = 1 << 21;
 
 // Pins (gpio_reg.h, io_mux_reg.h, gpio_sig_map.h).
 const GPIO_OUT_W1TS: usize = 0x500E_0008;
@@ -26,11 +22,7 @@ const GPIO_ENABLE1_W1TS: usize = 0x500E_0030;
 const GPIO_PIN_PAD_DRIVER: u32 = 1 << 2;
 const IO_MUX_MCU_SEL_GPIO: u32 = 1 << 12;
 const IO_MUX_FUN_IE: u32 = 1 << 9;
-const SIG_I2C1_SCL: u32 = 70;
-const SIG_I2C1_SDA: u32 = 71;
 const GPIO_SIG_IN_SEL: u32 = 1 << 7;
-const SDA_PIN: usize = 31;
-const SCL_PIN: usize = 32;
 
 pub(super) const fn gpio_pin_reg(n: usize) -> usize {
     0x500E_0074 + 4 * n
@@ -45,26 +37,44 @@ pub(super) const fn func_in_sel(sig: u32) -> usize {
     0x500E_0158 + 4 * sig as usize
 }
 
-// I2C1 registers (i2c_reg.h; offsets are the same on v1 and v3).
-const BASE: usize = 0x500C_5000;
-const SCL_LOW_PERIOD: usize = BASE;
-const CTR: usize = BASE + 0x04;
-const SR: usize = BASE + 0x08;
-const TO: usize = BASE + 0x0C;
-const FIFO_CONF: usize = BASE + 0x18;
-const DATA: usize = BASE + 0x1C;
-const INT_RAW: usize = BASE + 0x20;
-const INT_CLR: usize = BASE + 0x24;
-const INT_ENA: usize = BASE + 0x28;
-const SDA_HOLD: usize = BASE + 0x30;
-const SDA_SAMPLE: usize = BASE + 0x34;
-const SCL_HIGH_PERIOD: usize = BASE + 0x38;
-const SCL_START_HOLD: usize = BASE + 0x40;
-const SCL_RSTART_SETUP: usize = BASE + 0x44;
-const SCL_STOP_HOLD: usize = BASE + 0x48;
-const SCL_STOP_SETUP: usize = BASE + 0x4C;
-const COMD0: usize = BASE + 0x58;
-const SCL_SP_CONF: usize = BASE + 0x80;
+/// One I2C controller and its pins.
+pub struct Bus {
+    base: usize,
+    sda: usize,
+    scl: usize,
+    sig_sda: u32,
+    sig_scl: u32,
+    /// APB clock enable in SOC_CLK_CTRL2, and reset in HP_RST_EN1.
+    apb_clk: u32,
+    rst: u32,
+}
+
+/// I2C1 on the Tab5's internal bus (SDA = GPIO31, SCL = GPIO32): the IO
+/// expanders, touch, RTC and the rest (doc/06 §1).
+pub const INTERNAL: Bus = Bus { base: 0x500C_5000, sda: 31, scl: 32, sig_sda: 71, sig_scl: 70, apb_clk: 1 << 13, rst: 1 << 21 };
+/// I2C0 on ExtPort1 (SDA = GPIO0, SCL = GPIO1): the clip-on keyboard
+/// (doc/39).
+pub const EXT1: Bus = Bus { base: 0x500C_4000, sda: 0, scl: 1, sig_sda: 69, sig_scl: 68, apb_clk: 1 << 12, rst: 1 << 22 };
+
+// Register offsets (i2c_reg.h; the same on v1 and v3).
+const SCL_LOW_PERIOD: usize = 0x00;
+const CTR: usize = 0x04;
+const SR: usize = 0x08;
+const TO: usize = 0x0C;
+const FIFO_CONF: usize = 0x18;
+const DATA: usize = 0x1C;
+const INT_RAW: usize = 0x20;
+const INT_CLR: usize = 0x24;
+const INT_ENA: usize = 0x28;
+const SDA_HOLD: usize = 0x30;
+const SDA_SAMPLE: usize = 0x34;
+const SCL_HIGH_PERIOD: usize = 0x38;
+const SCL_START_HOLD: usize = 0x40;
+const SCL_RSTART_SETUP: usize = 0x44;
+const SCL_STOP_HOLD: usize = 0x48;
+const SCL_STOP_SETUP: usize = 0x4C;
+const COMD0: usize = 0x58;
+const SCL_SP_CONF: usize = 0x80;
 
 const CTR_MS_MODE: u32 = 1 << 4;
 const CTR_TRANS_START: u32 = 1 << 5;
@@ -113,75 +123,105 @@ impl Error {
     }
 }
 
-/// Clocks, reset, pins and 100 kHz timing (m6-panel-touch.md §1.4).
+/// The internal bus.
 pub fn init() {
-    set_bits(SOC_CLK_CTRL2, I2C1_APB_CLK_EN);
-    clear_bits(PERI_CLK_CTRL10, I2C1_CLK_SRC_RC_FAST);
-    set_bits(PERI_CLK_CTRL10, I2C1_CLK_EN);
-    set_field(PERI_CLK_CTRL11, 0, 24, 0);
-    set_bits(HP_RST_EN1, RST_EN_I2C1);
-    clear_bits(HP_RST_EN1, RST_EN_I2C1);
+    init_on(&INTERNAL);
+}
+
+/// Clocks, reset, pins and 100 kHz timing (m6-panel-touch.md §1.4), from
+/// the 40 MHz crystal.
+pub fn init_on(b: &Bus) {
+    set_bits(SOC_CLK_CTRL2, b.apb_clk);
+    if b.base == INTERNAL.base {
+        // I2C1: source bit 26 (0 = XTAL), enable bit 27, divider in CTRL11.
+        clear_bits(PERI_CLK_CTRL10, 1 << 26);
+        set_bits(PERI_CLK_CTRL10, 1 << 27);
+        set_field(PERI_CLK_CTRL11, 0, 24, 0);
+    } else {
+        // I2C0: source bit 0, enable bit 1, divider bits 2-9.
+        clear_bits(PERI_CLK_CTRL10, 1 << 0);
+        set_bits(PERI_CLK_CTRL10, 1 << 1);
+        set_field(PERI_CLK_CTRL10, 0x3FC, 2, 0);
+    }
+    set_bits(HP_RST_EN1, b.rst);
+    clear_bits(HP_RST_EN1, b.rst);
     unsafe {
         // Pins: latch high, open drain, GPIO function with input, routed
         // through the matrix both ways.
-        wr(GPIO_OUT_W1TS, 1 << SDA_PIN);
-        wr(GPIO_OUT1_W1TS, 1 << (SCL_PIN - 32));
-        for (pin, sig) in [(SDA_PIN, SIG_I2C1_SDA), (SCL_PIN, SIG_I2C1_SCL)] {
+        for pin in [b.sda, b.scl] {
+            if pin < 32 {
+                wr(GPIO_OUT_W1TS, 1 << pin);
+            } else {
+                wr(GPIO_OUT1_W1TS, 1 << (pin - 32));
+            }
+        }
+        for (pin, sig) in [(b.sda, b.sig_sda), (b.scl, b.sig_scl)] {
             set_bits(gpio_pin_reg(pin), GPIO_PIN_PAD_DRIVER);
             wr(io_mux_reg(pin), IO_MUX_MCU_SEL_GPIO | IO_MUX_FUN_IE);
             wr(func_out_sel(pin), sig);
             wr(func_in_sel(sig), pin as u32 | GPIO_SIG_IN_SEL);
         }
-        wr(GPIO_ENABLE_W1TS, 1 << SDA_PIN);
-        wr(GPIO_ENABLE1_W1TS, 1 << (SCL_PIN - 32));
-
-        wr(CTR, CTR_MS_MODE);
-        wr(FIFO_CONF, 0);
-        // 100 kHz from 40 MHz (i2c_ll_master_cal_bus_clk, half = 200).
-        wr(SCL_LOW_PERIOD, 199);
-        wr(SCL_HIGH_PERIOD, 102 | (98 << 9));
-        wr(SDA_HOLD, 49);
-        wr(SDA_SAMPLE, 99);
-        for r in [SCL_START_HOLD, SCL_RSTART_SETUP, SCL_STOP_HOLD, SCL_STOP_SETUP] {
-            wr(r, 199);
+        for pin in [b.sda, b.scl] {
+            if pin < 32 {
+                wr(GPIO_ENABLE_W1TS, 1 << pin);
+            } else {
+                wr(GPIO_ENABLE1_W1TS, 1 << (pin - 32));
+            }
         }
-        wr(TO, TO_VALUE | TO_EN);
-        wr(INT_ENA, 0);
+
+        wr(b.base + CTR, CTR_MS_MODE);
+        wr(b.base + FIFO_CONF, 0);
+        // 100 kHz from 40 MHz (i2c_ll_master_cal_bus_clk, half = 200).
+        wr(b.base + SCL_LOW_PERIOD, 199);
+        wr(b.base + SCL_HIGH_PERIOD, 102 | (98 << 9));
+        wr(b.base + SDA_HOLD, 49);
+        wr(b.base + SDA_SAMPLE, 99);
+        for r in [SCL_START_HOLD, SCL_RSTART_SETUP, SCL_STOP_HOLD, SCL_STOP_SETUP] {
+            wr(b.base + r, 199);
+        }
+        wr(b.base + TO, TO_VALUE | TO_EN);
+        wr(b.base + INT_ENA, 0);
     }
-    update();
-    fifo_reset();
+    update(b);
+    fifo_reset(b);
 }
 
-fn update() {
-    set_bits(CTR, CTR_CONF_UPGATE);
+fn update(b: &Bus) {
+    set_bits(b.base + CTR, CTR_CONF_UPGATE);
 }
 
-fn fifo_reset() {
-    set_bits(FIFO_CONF, FIFO_RX_RST | FIFO_TX_RST);
-    clear_bits(FIFO_CONF, FIFO_RX_RST | FIFO_TX_RST);
-    unsafe { wr(INT_CLR, 0x3FFFF) };
+fn fifo_reset(b: &Bus) {
+    set_bits(b.base + FIFO_CONF, FIFO_RX_RST | FIFO_TX_RST);
+    clear_bits(b.base + FIFO_CONF, FIFO_RX_RST | FIFO_TX_RST);
+    unsafe { wr(b.base + INT_CLR, 0x3FFFF) };
 }
 
 /// After an error: reset the state machine and clock out 9 SCL pulses so a
 /// device stuck mid-byte lets SDA go (m6-panel-touch.md §1.6).
-fn recover() {
-    set_bits(CTR, CTR_FSM_RST);
-    unsafe { wr(SCL_SP_CONF, (9 << 1) | SP_RST_SLV_EN) };
-    update();
+fn recover(b: &Bus) {
+    set_bits(b.base + CTR, CTR_FSM_RST);
+    unsafe { wr(b.base + SCL_SP_CONF, (9 << 1) | SP_RST_SLV_EN) };
+    update(b);
     let end = Esp32p4v1::now() + 16 * 2000;
-    while unsafe { rd(SCL_SP_CONF) } & SP_RST_SLV_EN != 0 && Esp32p4v1::now() < end {}
-    clear_bits(SCL_SP_CONF, SP_RST_SLV_EN);
-    update();
-    fifo_reset();
+    while unsafe { rd(b.base + SCL_SP_CONF) } & SP_RST_SLV_EN != 0 && Esp32p4v1::now() < end {}
+    clear_bits(b.base + SCL_SP_CONF, SP_RST_SLV_EN);
+    update(b);
+    fifo_reset(b);
 }
 
-/// Writes `tx` to device `addr`, then (if `rx` is not empty) reads `rx`
-/// after a repeated start. An empty `tx` and `rx` only checks for an ACK.
+/// `transfer_on` the internal bus.
 pub fn transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
+    transfer_on(&INTERNAL, addr, tx, rx)
+}
+
+/// Writes `tx` to device `addr` on bus `b`, then (if `rx` is not empty)
+/// reads `rx` after a repeated start. An empty `tx` and `rx` only checks
+/// for an ACK.
+pub fn transfer_on(b: &Bus, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
     if tx.len() + 2 > FIFO_SIZE || rx.len() >= FIFO_SIZE {
         return Err(Error::TooLong);
     }
-    fifo_reset();
+    fifo_reset(b);
     let mut cmds = [0u32; 8];
     let mut n = 0;
     let mut push = |c: u32| {
@@ -189,15 +229,15 @@ pub fn transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
         n += 1;
     };
     unsafe {
-        wr(DATA, (addr as u32) << 1);
-        for &b in tx {
-            wr(DATA, b as u32);
+        wr(b.base + DATA, (addr as u32) << 1);
+        for &byte in tx {
+            wr(b.base + DATA, byte as u32);
         }
     }
     push(CMD_RSTART);
     push(CMD_WRITE_ACK | (1 + tx.len() as u32));
     if !rx.is_empty() {
-        unsafe { wr(DATA, ((addr as u32) << 1) | 1) };
+        unsafe { wr(b.base + DATA, ((addr as u32) << 1) | 1) };
         push(CMD_RSTART);
         push(CMD_WRITE_ACK | 1);
         if rx.len() > 1 {
@@ -207,14 +247,14 @@ pub fn transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
     }
     push(CMD_STOP);
     for (i, &c) in cmds[..n].iter().enumerate() {
-        unsafe { wr(COMD0 + 4 * i, c) };
+        unsafe { wr(b.base + COMD0 + 4 * i, c) };
     }
-    update();
-    set_bits(CTR, CTR_TRANS_START);
+    update(b);
+    set_bits(b.base + CTR, CTR_TRANS_START);
 
     let end = Esp32p4v1::now() + 16 * TRANSFER_US;
     let r = loop {
-        let raw = unsafe { rd(INT_RAW) };
+        let raw = unsafe { rd(b.base + INT_RAW) };
         if raw & INT_NACK != 0 {
             break Err(Error::Nack);
         }
@@ -227,13 +267,13 @@ pub fn transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
     };
     match r {
         Ok(()) => {
-            let count = (unsafe { rd(SR) } >> 8) as usize & 0x3F;
+            let count = (unsafe { rd(b.base + SR) } >> 8) as usize & 0x3F;
             if count < rx.len() {
-                recover();
+                recover(b);
                 return Err(Error::Bus);
             }
-            for b in rx.iter_mut() {
-                *b = unsafe { rd(DATA) } as u8;
+            for byte in rx.iter_mut() {
+                *byte = unsafe { rd(b.base + DATA) } as u8;
             }
             Ok(())
         }
@@ -243,23 +283,23 @@ pub fn transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
         // GT911 stop answering until its next reset (doc/17 §9).
         Err(Error::Nack) => {
             let end = Esp32p4v1::now() + 16 * TRANSFER_US;
-            while unsafe { rd(SR) } & SR_BUS_BUSY != 0 {
+            while unsafe { rd(b.base + SR) } & SR_BUS_BUSY != 0 {
                 if Esp32p4v1::now() > end {
-                    recover();
+                    recover(b);
                     break;
                 }
             }
-            fifo_reset();
+            fifo_reset(b);
             Err(Error::Nack)
         }
         Err(e) => {
-            recover();
+            recover(b);
             Err(e)
         }
     }
 }
 
-/// Whether anything acknowledges `addr`.
+/// Whether anything acknowledges `addr` on the internal bus.
 pub fn probe(addr: u8) -> bool {
     transfer(addr, &[], &mut []).is_ok()
 }

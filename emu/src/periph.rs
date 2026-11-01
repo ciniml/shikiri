@@ -13,7 +13,11 @@ pub const CLIC_CTRL_BASE: u32 = 0x2080_1000;
 /// CLIC interrupt lines (`CLIC_INT_INFO_NUM_INT` default 48).
 pub const CLIC_LINES: usize = 48;
 use crate::dsi::{GDMA_BASE, GDMA_SIZE, HOST_BASE, HOST_SIZE, SRC_GDMA};
-use crate::i2c::{I2C1_BASE, I2C1_SIZE};
+use crate::i2c::{I2C0_BASE, I2C1_BASE, I2C1_SIZE};
+
+/// GPIO_IN1: GPIO32-63; GPIO50 is the keyboard's INT (active low).
+const GPIO_IN1: u32 = 0x500E_0040;
+const KBD_INT_BIT: u32 = 1 << (50 - 32);
 /// The SYSTIMER counts at 16 MHz (esp_hw_support/port/esp32p4/systimer.c:20).
 pub const SYSTIMER_HZ: u64 = 16_000_000;
 
@@ -469,6 +473,8 @@ fn initial_value(addr: u32) -> u32 {
 #[derive(Default)]
 pub struct Peripherals {
     pub i2c: crate::i2c::I2c,
+    /// ExtPort1's bus; the machine puts the keyboard on it.
+    pub i2c0: crate::i2c::I2c,
     pub dsi: crate::dsi::Dsi,
     pub usj: Usj,
     pub systimer: Systimer,
@@ -499,6 +505,20 @@ impl Peripherals {
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.read(a - LP_WDT_BASE),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.read(a),
             a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.read(a - I2C1_BASE),
+            a if (I2C0_BASE..I2C0_BASE + I2C1_SIZE).contains(&a) => {
+                if let Some(k) = &mut self.i2c0.kbd {
+                    k.release(ticks * 1000 / SYSTIMER_HZ);
+                }
+                self.i2c0.read(a - I2C0_BASE)
+            }
+            GPIO_IN1 => {
+                let other = self.other.get(&GPIO_IN1).copied().unwrap_or(0) & !KBD_INT_BIT;
+                let low = self.i2c0.kbd.as_mut().is_some_and(|k| {
+                    k.release(ticks * 1000 / SYSTIMER_HZ);
+                    k.int_low()
+                });
+                if low { other } else { other | KBD_INT_BIT }
+            }
             a if (HOST_BASE..HOST_BASE + HOST_SIZE).contains(&a) => self.dsi.host_read(a - HOST_BASE),
             a if (GDMA_BASE..GDMA_BASE + GDMA_SIZE).contains(&a) => self.dsi.gdma_read(a - GDMA_BASE, ticks),
             LP_CLKRST_RESET_CAUSE => self.reset_cause << 7,
@@ -526,6 +546,7 @@ impl Peripherals {
             a if (LP_WDT_BASE..LP_WDT_BASE + 0x40).contains(&a) => self.lp_wdt.write(a - LP_WDT_BASE, v, now_ms),
             a if (CLIC_BASE..CLIC_BASE + 0x2000).contains(&a) => self.clic.write(a, v),
             a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.write(a - I2C1_BASE, v),
+            a if (I2C0_BASE..I2C0_BASE + I2C1_SIZE).contains(&a) => self.i2c0.write(a - I2C0_BASE, v),
             a if (HOST_BASE..HOST_BASE + HOST_SIZE).contains(&a) => self.dsi.host_write(a - HOST_BASE, v),
             a if (GDMA_BASE..GDMA_BASE + GDMA_SIZE).contains(&a) => self.dsi.gdma_write(a - GDMA_BASE, v, ticks),
             a if (HP_SYSTEM_CPU_INT_FROM_CPU_0..HP_SYSTEM_CPU_INT_FROM_CPU_0 + 16).contains(&a) => {

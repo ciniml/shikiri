@@ -9,6 +9,9 @@ use std::collections::VecDeque;
 
 pub const I2C1_BASE: u32 = 0x500C_5000;
 pub const I2C1_SIZE: u32 = 0x100;
+/// I2C0, on ExtPort1 with the clip-on keyboard (doc/39).
+pub const I2C0_BASE: u32 = 0x500C_4000;
+pub const KBD_ADDR: u8 = 0x6D;
 
 const CTR: u32 = 0x04;
 const SR: u32 = 0x08;
@@ -71,8 +74,101 @@ impl Gt911 {
     }
 }
 
+/// The clip-on keyboard in HID mode (doc/39): text typed with `type_text`
+/// comes out as press and release events, one key every 30 ms.
+#[derive(Default)]
+pub struct Keyboard {
+    reg: u8,
+    written: usize,
+    /// (due ms, modifier, usage), oldest first.
+    script: VecDeque<(u64, u8, u8)>,
+    queue: VecDeque<(u8, u8)>,
+    /// The event HID_EVENT (0x30) returned; 0x31 is its second byte.
+    current: (u8, u8),
+}
+
+impl Keyboard {
+    pub fn type_text(&mut self, text: &str, now_ms: u64) {
+        let mut t = self.script.back().map_or(now_ms, |e| e.0 + 20).max(now_ms);
+        for c in text.chars() {
+            if let Some((m, u)) = hid_usage(c) {
+                self.script.push_back((t, m, u));
+                self.script.push_back((t + 10, 0, 0));
+                t += 30;
+            }
+        }
+    }
+
+    /// Moves the events due by `now_ms` into the keyboard's queue.
+    pub fn release(&mut self, now_ms: u64) {
+        while self.script.front().is_some_and(|e| e.0 <= now_ms) {
+            let (_, m, u) = self.script.pop_front().unwrap();
+            self.queue.push_back((m, u));
+        }
+    }
+
+    /// INT is low while events wait.
+    pub fn int_low(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    fn read_byte(&mut self) -> u8 {
+        let v = match self.reg {
+            0x02 => self.queue.len().min(32) as u8,
+            0x30 => {
+                self.current = self.queue.pop_front().unwrap_or((0xFF, 0xFF));
+                self.current.0
+            }
+            0x31 => self.current.1,
+            0xFE => 0x10,
+            _ => 0,
+        };
+        self.reg = self.reg.wrapping_add(1);
+        v
+    }
+}
+
+/// The HID usage (and Shift) for an ASCII character.
+fn hid_usage(c: char) -> Option<(u8, u8)> {
+    const SHIFT: u8 = 1 << 1;
+    let plain = |u: u8| Some((0, u));
+    let shifted = |u: u8| Some((SHIFT, u));
+    match c {
+        'a'..='z' => plain(0x04 + (c as u8 - b'a')),
+        'A'..='Z' => shifted(0x04 + (c as u8 - b'A')),
+        '1'..='9' => plain(0x1E + (c as u8 - b'1')),
+        '0' => plain(0x27),
+        '\n' => plain(0x28),
+        '\x1b' => plain(0x29),
+        '\x08' => plain(0x2A),
+        '\t' => plain(0x2B),
+        ' ' => plain(0x2C),
+        '-' => plain(0x2D),
+        '=' => plain(0x2E),
+        '[' => plain(0x2F),
+        ']' => plain(0x30),
+        '\\' => plain(0x31),
+        ';' => plain(0x33),
+        '\'' => plain(0x34),
+        '`' => plain(0x35),
+        ',' => plain(0x36),
+        '.' => plain(0x37),
+        '/' => plain(0x38),
+        _ => {
+            let i = "!@#$%^&*()".find(c);
+            if let Some(i) = i {
+                return shifted(0x1E + i as u8);
+            }
+            let (from, to) = ("_+{}|:\"~<>?", [0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38]);
+            from.chars().position(|f| f == c).and_then(|i| shifted(to[i]))
+        }
+    }
+}
+
 pub struct I2c {
     regs: [u32; (I2C1_SIZE / 4) as usize],
+    /// On I2C0 only.
+    pub kbd: Option<Keyboard>,
     tx: VecDeque<u8>,
     rx: VecDeque<u8>,
     exp: [Expander; 2],
@@ -89,6 +185,7 @@ impl Default for I2c {
     fn default() -> I2c {
         I2c {
             regs: [0; (I2C1_SIZE / 4) as usize],
+            kbd: None,
             tx: VecDeque::new(),
             rx: VecDeque::new(),
             exp: [Expander::new(), Expander::new()],
@@ -192,6 +289,12 @@ impl I2c {
                 }
                 true
             }
+            KBD_ADDR if self.kbd.is_some() => {
+                if !read {
+                    self.kbd.as_mut().unwrap().written = 0;
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -211,6 +314,15 @@ impl I2c {
                     e.reg += 1;
                 }
                 e.written += 1;
+            }
+            Some(KBD_ADDR) => {
+                // Register, then data (mode and interrupt settings: taken
+                // as given).
+                let k = self.kbd.as_mut().unwrap();
+                if k.written == 0 {
+                    k.reg = b;
+                }
+                k.written += 1;
             }
             Some(0x14) => {
                 // Register (big-endian), then data: writing the status
@@ -235,6 +347,7 @@ impl I2c {
                 e.reg = e.reg.wrapping_add(1);
                 v
             }
+            Some(KBD_ADDR) => self.kbd.as_mut().unwrap().read_byte(),
             Some(0x14) => {
                 let v = self.touch.read_reg(self.touch.reg);
                 self.touch.reg = self.touch.reg.wrapping_add(1);

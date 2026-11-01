@@ -27,8 +27,8 @@ pub const ABI_MAJOR: u16 = 0;
 /// (M7c, doc/18 §3): the `sd` object. Minor 11 (N2a, doc/21): `netdev`.
 /// Minor 12 (N2b-3, doc/22): `netdev:wlan0` and `wlan:ctl`. Minor 13
 /// (doc/35 §5): `netdev`'s frame rings (`MAP_RING`, `KICK`). Minor 14
-/// (doc/38): `proc:spawn`.
-pub const ABI_MINOR: u16 = 14;
+/// (doc/38): `proc:spawn`. Minor 15 (doc/39): `kbd`.
+pub const ABI_MINOR: u16 = 15;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -335,6 +335,21 @@ pub mod touch {
     pub const POINT_SIZE: usize = 8;
     /// `wait` event: the touch changed (value = points now, 0 = released).
     pub const CHANGED: usize = 1;
+}
+
+/// The keyboard (doc/39): key events as the USB HID keyboard page has
+/// them. One process at a time. Opening works without a keyboard; events
+/// come once one is attached.
+pub mod kbd {
+    pub const NAME: &str = "kbd";
+    /// Bytes per event: the modifier byte (bit 0 left Ctrl, 1 left Shift,
+    /// 2 left Alt, 3 left GUI, 4-7 the right ones), then the usage (0 = all
+    /// keys released).
+    pub const EVENT_SIZE: usize = 2;
+    /// Events the kernel keeps; older ones are dropped.
+    pub const QUEUE: usize = 32;
+    /// `wait` event: events wait (value = how many).
+    pub const READABLE: usize = 1;
 }
 
 /// Error codes. A syscall returns `-(code as isize)` in a0 on failure.

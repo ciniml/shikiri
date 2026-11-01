@@ -136,6 +136,11 @@ pub trait Platform {
     fn board_init() -> Panel {
         Panel::None
     }
+    /// Passes the keyboard's queued key events (HID modifier byte, usage;
+    /// usage 0 = released) to `sink` (doc/39).
+    fn kbd_poll(_sink: &mut dyn FnMut(u8, u8)) -> Result<(), &'static str> {
+        Err("no keyboard")
+    }
     /// Reads the touch points into `out`; returns how many (0 = no touch).
     fn touch_read(_out: &mut [TouchPoint; 5]) -> Result<usize, &'static str> {
         Err("no touch")

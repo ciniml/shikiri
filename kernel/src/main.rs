@@ -17,6 +17,7 @@ mod channel;
 mod flash;
 mod handle;
 mod hostlink;
+mod kbd;
 mod wlan;
 mod kupdate;
 mod loader;
@@ -258,6 +259,7 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
         sched::run(&mut s, None, &mut |s| {
             settle_updates(s, store);
             spawn_requested(s, store);
+            kbd::poll();
             touch_log.poll();
             screen::poll();
             s.reap();
