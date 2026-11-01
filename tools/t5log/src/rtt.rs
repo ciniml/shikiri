@@ -103,19 +103,38 @@ pub fn stream(
     let mut session = probe
         .attach_with_registry(opts.chip.as_str(), Permissions::default(), &registry)
         .map_err(|e| format!("attaching to {}: {e}", opts.chip))?;
-    let mut core = session.core(0).map_err(|e| e.to_string())?;
+    let r = stream_on(&mut session, opts, &mut sink, &mut turn);
+    // Not dropped: probe-rs's `Session::drop` halts both harts (to clear
+    // the hardware breakpoints and to make each `Core`), and a halt can
+    // leave a process in M-mode (doc/36). The probe is let go when the
+    // process ends.
+    std::mem::forget(session);
+    r
+}
+
+fn stream_on(
+    session: &mut probe_rs::Session,
+    opts: &Options,
+    sink: &mut impl FnMut(&[u8]) -> bool,
+    turn: &mut impl FnMut() -> Turn,
+) -> Result<(), String> {
     if opts.reset {
+        let mut core = session.core(0).map_err(|e| e.to_string())?;
         // Wipe the control block's id first, so the data the previous boot
         // left unread is not shown as if it came from the new boot; the
         // kernel writes the id again once it has set up the block.
         core.write_8(opts.control_block, &[0u8; 16]).map_err(|e| format!("clearing the RTT id: {e}"))?;
         core.reset().map_err(|e| format!("reset: {e}"))?;
-    } else if core.core_halted().map_err(|e| e.to_string())? {
-        core.run().map_err(|e| e.to_string())?;
     }
     eprintln!("t5log: attached to {} via {}", opts.chip, opts.probe);
 
-    let target = RttTarget::from(&core);
+    // The log is read through the debug module's system bus only, so the
+    // hart is never halted: a halt that lands as the kernel `mret`s into a
+    // process can leave the process running in M-mode (doc/36). So no
+    // probe-rs `Core` (making one halts the hart to read `misa` and set
+    // `dcsr`), and only 32-bit accesses (`Words`).
+    let target = RttTarget { is_64_bit: false, memory_regions: session.target().memory_map.clone() };
+    let mut mem = Words(session.get_riscv_interface(0).map_err(|e| e.to_string())?);
     let mut rtt = None;
     let mut to_send: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 4096];
@@ -129,7 +148,7 @@ pub fn stream(
         // a reset wiped it) keep trying.
         if rtt.is_none() && last_try.elapsed() >= Duration::from_millis(200) {
             last_try = Instant::now();
-            match Rtt::attach_at(&mut core, &target, opts.control_block) {
+            match Rtt::attach_at(&mut mem, &target, opts.control_block) {
                 Ok(r) => {
                     eprintln!("t5log: RTT control block at {:#x}", opts.control_block);
                     rtt = Some(r);
@@ -155,7 +174,7 @@ pub fn stream(
         if !to_send.is_empty()
             && let Some(down) = r.down_channel(0)
         {
-            match down.write(&mut core, &to_send) {
+            match down.write(&mut mem, &to_send) {
                 Ok(n) => {
                     to_send.drain(..n);
                 }
@@ -163,7 +182,7 @@ pub fn stream(
             }
         }
         let channel = r.up_channel(opts.channel).ok_or(format!("no RTT up-channel {}", opts.channel))?;
-        let n = match channel.read(&mut core, &mut buf) {
+        let n = match channel.read(&mut mem, &mut buf) {
             Ok(n) => n,
             Err(e) => {
                 // The target reset and is rebuilding the control block.
@@ -180,5 +199,85 @@ pub fn stream(
             drained = true;
             std::thread::sleep(opts.poll);
         }
+    }
+}
+
+/// Memory through 32-bit accesses only. On the Tab5 (P4 v1.x) probe-rs
+/// reaches LP SRAM through the system bus for 32-bit accesses but through
+/// the program buffer for 8- and 16-bit ones, which halts the hart for each
+/// (doc/36); RTT writes the unaligned ends of a command with `write_8`.
+/// Narrow accesses become word reads, and word read-modify-writes. Only the
+/// host writes the down-channel's buffer, so rewriting the rest of a word
+/// there changes nothing.
+struct Words<M>(M);
+
+impl<M: MemoryInterface> Words<M> {
+    /// The aligned words that cover `len` bytes at `address`, read: (first
+    /// word's address, the bytes).
+    fn covering(&mut self, address: u64, len: usize) -> Result<(u64, Vec<u8>), probe_rs::Error> {
+        let start = address & !3;
+        let words = ((address - start) as usize + len).div_ceil(4);
+        let mut w = vec![0u32; words];
+        self.0.read_32(start, &mut w)?;
+        Ok((start, w.iter().flat_map(|v| v.to_le_bytes()).collect()))
+    }
+}
+
+impl<M: MemoryInterface> MemoryInterface for Words<M> {
+    fn supports_native_64bit_access(&mut self) -> bool {
+        false
+    }
+
+    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), probe_rs::Error> {
+        self.0.read_64(address, data)
+    }
+
+    fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), probe_rs::Error> {
+        self.0.read_32(address, data)
+    }
+
+    fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), probe_rs::Error> {
+        let (start, bytes) = self.covering(address, data.len() * 2)?;
+        let at = (address - start) as usize;
+        for (k, d) in data.iter_mut().enumerate() {
+            *d = u16::from_le_bytes([bytes[at + 2 * k], bytes[at + 2 * k + 1]]);
+        }
+        Ok(())
+    }
+
+    fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), probe_rs::Error> {
+        let (start, bytes) = self.covering(address, data.len())?;
+        let at = (address - start) as usize;
+        data.copy_from_slice(&bytes[at..at + data.len()]);
+        Ok(())
+    }
+
+    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), probe_rs::Error> {
+        self.0.write_64(address, data)
+    }
+
+    fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), probe_rs::Error> {
+        self.0.write_32(address, data)
+    }
+
+    fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), probe_rs::Error> {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        self.write_8(address, &bytes)
+    }
+
+    fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), probe_rs::Error> {
+        let (start, mut bytes) = self.covering(address, data.len())?;
+        let at = (address - start) as usize;
+        bytes[at..at + data.len()].copy_from_slice(data);
+        let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        self.0.write_32(start, &words)
+    }
+
+    fn supports_8bit_transfers(&self) -> Result<bool, probe_rs::Error> {
+        Ok(true)
+    }
+
+    fn flush(&mut self) -> Result<(), probe_rs::Error> {
+        self.0.flush()
     }
 }

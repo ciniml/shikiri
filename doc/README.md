@@ -32,7 +32,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [33](33-smp.md) | SMP の実装の記録。S1: Core1 の起動と待機（カーネル、t5emu の 2 つ目のコア、QEMU -smp 2）、実機で cores=2 |
 | [34](34-net-cpu.md) | `net` の CPU を減らす: プロファイラ、時刻の読み方、SDIO の書き込みを待たない、Wi-Fi の送信の待ち行列、鍵を放して DMA を待つ、`memcpy`/`memset` のアセンブリ |
 | [35](35-net-copies.md) | `net` の経路のコピーを減らす: ゼロコピーの検討、ABI を変えない Z0（直の読み書き、SDIO の bounce の上で分ける）、空の `READ` を減らす、Wi-Fi のフレームの輪（`MAP_RING`/`KICK`、ABI 小版 13） |
-| [36](36-mmode-escape.md) | プロセスが M モードで動いていた（未解決）: システムコールから `mret` で戻った後に M モードのまま、約 1 割の起動で。調べたこと、検出して止める対策、次に調べること |
+| [36](36-mmode-escape.md) | プロセスが M モードで動いていた: デバッガ（probe-rs）がハートを止めて再開したとき、カーネルからプロセスへの `mret` のところで。切り分け、`t5log` を止めない読み方に、カーネルの検出 |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |
