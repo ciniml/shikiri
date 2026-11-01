@@ -200,7 +200,7 @@ impl Process {
                 Ok(None) => return Next::Switch,
                 Err(e) => Err(e),
             },
-            sys::READ | sys::WRITE => self.io(a0, a1, a2, nr == sys::WRITE).map(|n| [n, 0, 0]),
+            sys::READ | sys::WRITE => self.io(a0, a1, a2, nr == sys::WRITE),
             _ => Err(Error::NoSupport),
         };
         self.set_result(result);
@@ -268,10 +268,15 @@ impl Process {
 
     /// `read`/`write` through a kernel buffer: the user range is checked,
     /// then copied in (write) or out (read).
-    fn io(&mut self, h: usize, ptr: usize, len: usize, write: bool) -> Result<usize, Error> {
+    /// `read` or `write` through the kernel buffer: [bytes, still queued
+    /// (`read` of a device that queues frames, else 0), 0].
+    fn io(&mut self, h: usize, ptr: usize, len: usize, write: bool) -> Result<[usize; 3], Error> {
         // The largest transfer of any object: SD sectors (4 KiB). Channels
-        // refuse messages over `chan::MSG_MAX` themselves.
-        let mut buf = [0u8; t5_abi::sd::MAX_IO];
+        // refuse messages over `chan::MSG_MAX` themselves. One buffer for
+        // every call (the kernel lock is held): clearing 4 KiB on the stack
+        // on each call showed in `net`'s profile (doc/34).
+        static mut IO_BUF: [u8; t5_abi::sd::MAX_IO] = [0; t5_abi::sd::MAX_IO];
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(IO_BUF) };
         if write && len > buf.len() {
             return Err(Error::Size);
         }
@@ -279,11 +284,11 @@ impl Process {
         self.check_user_range(ptr, n, !write)?;
         if write {
             unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, buf.as_mut_ptr(), n) };
-            self.handles.write(h, &buf[..n])
+            self.handles.write(h, &buf[..n]).map(|n| [n, 0, 0])
         } else {
             let got = self.handles.read(h, &mut buf[..n])?;
             unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr as *mut u8, got) };
-            Ok(got)
+            Ok([got, self.handles.queued(h), 0])
         }
     }
 

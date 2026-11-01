@@ -342,6 +342,23 @@ impl Table {
         }
     }
 
+    /// Frames or messages still queued on `h` after a `read` (devices that
+    /// queue frames; 0 for the rest), so a reader can stop before an empty
+    /// `read` (doc/34).
+    pub fn queued(&mut self, h: usize) -> usize {
+        let Ok(handle) = self.get(h, rights::READ) else { return 0 };
+        let ev = match &handle.object {
+            Object::NetDev(d) => d.poll(),
+            Object::WlanDev(d) => d.poll(),
+            Object::WlanCtl(c) => c.poll(),
+            _ => None,
+        };
+        match ev {
+            Some((netdev::READABLE, n)) => n,
+            _ => 0,
+        }
+    }
+
     /// Closes every handle (the process ended).
     pub fn close_all(&mut self) {
         self.slots = [const { None }; MAX_HANDLES];

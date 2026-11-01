@@ -23,6 +23,7 @@ mod loader;
 mod log;
 mod platform;
 mod process;
+mod prof;
 mod sched;
 mod screen;
 mod shm;
@@ -475,6 +476,24 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             kup.log_state();
             Ok(0)
         }
+        Command::Prof { op, a, b } => match op {
+            t5_abi::ctl::prof::START => match s.slots.iter().flatten().find(|p| p.pid == a && p.exit().is_none()) {
+                Some(p) => {
+                    prof::start(a, b, p.region.text.start);
+                    Ok(a)
+                }
+                None => Err("no such process"),
+            },
+            t5_abi::ctl::prof::STOP => {
+                prof::stop();
+                Ok(0)
+            }
+            t5_abi::ctl::prof::DUMP => {
+                prof::dump(a);
+                Ok(a)
+            }
+            _ => Err("bad prof operation"),
+        },
         Command::Clock { mhz } => Current::set_cpu_mhz(mhz),
         Command::Pvt { on } => Current::set_pvt(on),
         Command::Touch { seconds } => touch_log.start(seconds),

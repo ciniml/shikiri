@@ -39,6 +39,8 @@ struct Monitor<'a> {
     next_id: u32,
     /// End of the `wait-ms` in progress (cycles).
     wait_until: Option<u64>,
+    /// The host peer has finished: later `wait-ms` pauses are skipped.
+    peer_done: bool,
     cycles_per_ms: u64,
     ready: bool,
     injected: bool,
@@ -84,8 +86,13 @@ impl Monitor<'_> {
         if let Some(p) = &mut self.peer {
             let ms = (m.bus.ticks() * 1000 / periph::SYSTIMER_HZ) as i64;
             p.poll(&mut m.bus.periph.usj, ms);
+            // Commands still to come (e.g. reading results) are sent
+            // without their pauses.
             if p.finished() {
-                return false;
+                if self.commands.is_empty() || (self.injected && self.pending.is_empty()) {
+                    return false;
+                }
+                self.peer_done = true;
             }
         }
         if self.commands.is_empty() {
@@ -98,6 +105,7 @@ impl Monitor<'_> {
                     break;
                 }
                 match self.wait_until {
+                    _ if self.peer_done => self.wait_until = None,
                     None => self.wait_until = Some(m.bus.cycles + ms * self.cycles_per_ms),
                     Some(t) if m.bus.cycles >= t => self.wait_until = None,
                     Some(_) => break,
@@ -331,6 +339,7 @@ fn main() -> ExitCode {
         sent: 0,
         next_id: 1,
         wait_until: None,
+        peer_done: false,
         cycles_per_ms: o.mhz * 1000,
         ready: false,
         injected: false,

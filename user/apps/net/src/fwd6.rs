@@ -16,7 +16,7 @@
 //! on-link even when the RA says it is not.
 
 use smoltcp::wire::IpCidr;
-use t5_rt::{event, time_ns};
+use t5_rt::event;
 
 use crate::Stack;
 use crate::filter::{self, Action};
@@ -110,7 +110,7 @@ impl Neighbors {
         if ip == 0 || mac[0] & 1 != 0 {
             return;
         }
-        let n = Neighbor { link: link as u8, ip, mac, at: time_ns() };
+        let n = Neighbor { link: link as u8, ip, mac, at: crate::clock_ns() };
         if let Some(slot) = self.entries.iter_mut().find(|s| s.is_some_and(|s| s.link == link as u8 && s.ip == ip)) {
             *slot = Some(n);
             return;
@@ -120,7 +120,7 @@ impl Neighbors {
     }
 
     pub fn lookup(&self, link: usize, ip: u128) -> Option<[u8; 6]> {
-        let now = time_ns();
+        let now = crate::clock_ns();
         self.entries.iter().flatten().find(|n| n.link == link as u8 && n.ip == ip && now - n.at < NEIGHBOR_TTL_NS).map(|n| n.mac)
     }
 }
@@ -373,7 +373,7 @@ impl Stack {
         e.dev.port.write(&f[..n]);
         match self.v6.pending.iter_mut().find(|s| s.is_none()) {
             Some(slot) if p.len() <= MTU => {
-                let mut w = Pending { link, next_hop, since: time_ns(), len: p.len(), packet: [0; MTU] };
+                let mut w = Pending { link, next_hop, since: crate::clock_ns(), len: p.len(), packet: [0; MTU] };
                 w.packet[..p.len()].copy_from_slice(p);
                 *slot = Some(w);
             }
@@ -384,7 +384,7 @@ impl Stack {
     /// Packets that waited for a neighbor, the neighbor discovery messages
     /// that came, router advertisements downstream, the counters.
     pub fn after_forward6(&mut self) {
-        let now = time_ns();
+        let now = crate::clock_ns();
         for i in 0..PENDING {
             let Some(w) = &self.v6.pending[i] else { continue };
             if neighbors().lookup(w.link, w.next_hop).is_some() {
@@ -471,7 +471,7 @@ impl Stack {
         if !self.eth_present(WLAN) || self.upstream_prefix(WLAN).is_some() {
             return;
         }
-        let now = time_ns();
+        let now = crate::clock_ns();
         if now < self.v6.rs_at {
             return;
         }
@@ -495,7 +495,7 @@ impl Stack {
     fn advertise(&mut self) {
         let Some((up, down)) = self.proxy() else { return };
         let Some(prefix) = self.upstream_prefix(up) else { return };
-        let now = time_ns();
+        let now = crate::clock_ns();
         if !self.v6.ra_now && now < self.v6.ra_at {
             return;
         }

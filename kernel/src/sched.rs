@@ -23,6 +23,7 @@ use crate::platform::{Current, Platform};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::process::{Exit, Next, Process, State};
+use crate::prof;
 use crate::smp;
 use crate::time;
 
@@ -38,9 +39,11 @@ const NONE: u8 = 0xFF;
 /// made ready elsewhere wakes it sooner (`kick_if_ready`, doc/33 §10).
 const SECONDARY_IDLE_MS: u64 = 1000;
 /// After a system call, the other core is checked for at most once per
-/// this time per core: checking after every call cost `net` about 13% of
-/// a core, and Wi-Fi went from 8.9 to 7.8 Mbps (doc/33 §12).
-const KICK_CHECK_US: u64 = 1000;
+/// this many cycles per core (1 ms at 360 MHz): checking after every call
+/// cost `net` about 13% of a core, and Wi-Fi went from 8.9 to 7.8 Mbps
+/// (doc/33 §12). Counted in cycles because reading the SYSTIMER takes
+/// about 2 µs on the P4 (doc/34).
+const KICK_CHECK_CYCLES: u32 = 360_000;
 
 /// Counters the self-test checks to see that each path was exercised.
 #[derive(Clone, Copy, Debug, Default)]
@@ -87,8 +90,9 @@ pub struct Scheduler {
     /// At the last `ps`: the time and each core's idle total (ticks), so
     /// `ps` gives the use since then (doc/31).
     pub cpu_mark: (u64, [u64; CORES]),
-    /// Per core: the earliest time of its next check after a system call.
-    kick_check_at: [u64; CORES],
+    /// Per core: the cycle count (`mcycle`) of its next check after a
+    /// system call.
+    kick_check_at: [u32; CORES],
     /// Per core: when its sleep began, or 0 while it is awake. `ps` counts
     /// a sleep in progress up to now, so a window gets only its own part.
     pub asleep_since: [u64; CORES],
@@ -256,8 +260,7 @@ pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mu
             continue;
         };
         s.next = (i + 1) % MAX_PROCS;
-        Current::set_alarm(wake.min(now + time::ms_to_ticks(SLICE_MS)));
-        run_one(this, i);
+        run_one(this, i, wake.min(now + time::ms_to_ticks(SLICE_MS)));
     }
     // Wait until the other core has given up every process of this
     // scheduler, then withdraw it.
@@ -293,8 +296,9 @@ fn sleep(this: *mut Scheduler) {
     Current::clear_alarm();
 }
 
-/// Runs slot `i` for a slice on this core (lock held; the alarm is set).
-fn run_one(this: *mut Scheduler, i: usize) {
+/// Runs slot `i` for a slice on this core until `deadline` (lock held).
+fn run_one(this: *mut Scheduler, i: usize, deadline: u64) {
+    Current::set_alarm(deadline);
     let core = smp::hartid() & 1;
     let p: *mut Process = {
         let s = unsafe { &mut *this };
@@ -308,7 +312,7 @@ fn run_one(this: *mut Scheduler, i: usize) {
         // Another ready process for the other core, if it sleeps.
         kick_if_ready(s, core);
     }
-    run_slice(this, p, i, core);
+    run_slice(this, p, i, core, deadline);
     let s = unsafe { &mut *this };
     let p = unsafe { &mut *p };
     p.cpu += Current::now() - start;
@@ -341,16 +345,17 @@ fn kick_if_ready(s: &mut Scheduler, core: usize) {
     }
 }
 
-/// `kick_if_ready` after a system call, at most every `KICK_CHECK_US`.
+/// `kick_if_ready` after a system call, at most every
+/// `KICK_CHECK_CYCLES`.
 fn kick_after_syscall(s: &mut Scheduler, core: usize) {
     if !smp::other_asleep() {
         return;
     }
-    let now = Current::now();
-    if now < s.kick_check_at[core] {
+    let now = crate::arch::riscv32::cycles();
+    if (now.wrapping_sub(s.kick_check_at[core]) as i32) < 0 {
         return;
     }
-    s.kick_check_at[core] = now + time::ns_to_ticks(KICK_CHECK_US * 1000);
+    s.kick_check_at[core] = now.wrapping_add(KICK_CHECK_CYCLES);
     kick_if_ready(s, core);
 }
 
@@ -380,10 +385,7 @@ pub fn run_secondary() -> ! {
             i
         };
         match picked {
-            Some(i) => {
-                Current::set_alarm(now + time::ms_to_ticks(SLICE_MS));
-                run_one(this, i);
-            }
+            Some(i) => run_one(this, i, now + time::ms_to_ticks(SLICE_MS)),
             None => {
                 Current::set_alarm(wake);
                 if !this.is_null() {
@@ -421,12 +423,22 @@ fn log_exit(p: &mut Process, exit: Exit) {
     }
 }
 
-/// Runs process `p` (slot `i`) on `core` until it is preempted, gives up
-/// the CPU or ends. The lock is let go while it runs in U-mode.
-fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
+/// Runs process `p` (slot `i`) on `core` until it is preempted at
+/// `deadline`, gives up the CPU or ends. The lock is let go while it runs
+/// in U-mode. A profiled process also traps at each sample tick
+/// (`prof`).
+fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadline: u64) {
     let p = unsafe { &mut *p };
     pmp::set_process(&p.region);
+    // A sample that fell due while the process did not run is not taken
+    // when it comes back: it would look like kernel time.
+    prof::resumed(p.pid);
     loop {
+        let profiled = prof::next(p.pid);
+        if let Some(at) = profiled {
+            Current::set_alarm(deadline.min(at));
+        }
+        let entry_pc = p.frame.pc;
         let (owns_fpu, fs) = {
             let s = unsafe { &*this };
             let owns = s.fpu[core].owner == Some(i);
@@ -446,6 +458,14 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
         }
         match t {
             Trap::Interrupt { code } if code == Current::TIMER_IRQ => {
+                if profiled.is_some() && Current::now() < deadline {
+                    if Current::alarm_due() {
+                        prof::sample(p.frame.pc, p.frame.pc == entry_pc);
+                    } else {
+                        s.stats.spurious[core] += 1;
+                    }
+                    continue;
+                }
                 if !Current::alarm_due() {
                     s.stats.spurious[core] += 1;
                     continue;
@@ -464,7 +484,15 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
             Trap::Syscall => {
                 // ecall is always 4 bytes long.
                 p.frame.pc += 4;
-                let next = p.syscall();
+                let next = if profiled.is_some() {
+                    let nr = p.frame.regs[crate::arch::riscv32::trap::reg::A7];
+                    let c0 = crate::arch::riscv32::cycles();
+                    let next = p.syscall();
+                    prof::syscall(nr, crate::arch::riscv32::cycles().wrapping_sub(c0));
+                    next
+                } else {
+                    p.syscall()
+                };
                 kick_after_syscall(s, core);
                 match next {
                     Next::Resume => {}

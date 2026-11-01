@@ -9,7 +9,7 @@
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint, Ipv4Address};
-use t5_rt::{event, time_ns};
+use t5_rt::event;
 
 use crate::filter::DhcpServer;
 use crate::fwd::be32;
@@ -120,7 +120,7 @@ impl Server {
                 }
             }
         }
-        let now = time_ns();
+        let now = crate::clock_ns();
         let reply = match kind {
             DISCOVER => {
                 let ip = self.lease_of(&mac, now).or_else(|| (self.cfg.first..=self.cfg.last).find(|&ip| self.free(ip, &mac, own.0, now)))?;

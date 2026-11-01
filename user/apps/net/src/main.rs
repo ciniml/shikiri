@@ -87,8 +87,25 @@ pub fn link_local(mac: [u8; 6]) -> IpCidr {
 }
 
 
+/// The time of the current pass (`tick`), in ns. Reading the time is a
+/// system call; once per pass instead of once per smoltcp poll and per
+/// packet (filter, NAT, neighbour tables) took 300,000 calls per 16 MiB
+/// echo away (doc/34).
+static mut CLOCK_NS: u64 = 0;
+
+/// Reads the time for the pass that begins.
+pub fn tick() -> u64 {
+    let t = time_ns();
+    unsafe { CLOCK_NS = t };
+    t
+}
+
+pub fn clock_ns() -> u64 {
+    unsafe { CLOCK_NS }
+}
+
 pub fn now() -> Instant {
-    Instant::from_micros((time_ns() / 1000) as i64)
+    Instant::from_micros((clock_ns() / 1000) as i64)
 }
 
 // ---- socket storage (static: there is no allocator) ----
@@ -189,7 +206,7 @@ impl EthLink {
     /// `slaac`: take IPv6 addresses and the default route from router
     /// advertisements.
     fn new(link: usize, port: Port, mac: [u8; 6], slaac: bool) -> EthLink {
-        let mut dev = EthNic { link, port, mac, own: None, rx: 0, rx_unicast: 0, tx: 0, tx_dropped: 0 };
+        let mut dev = EthNic { link, port, mac, own: None, rx: 0, rx_unicast: 0, tx: 0, tx_dropped: 0, queued: true };
         let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
         config.slaac = slaac;
         config.random_seed = time_ns() ^ u64::from_le_bytes([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0, 0]);
@@ -205,7 +222,7 @@ impl EthLink {
             dns: None,
             router: None,
             dns_server: None,
-            report_at: time_ns() + 5_000_000_000,
+            report_at: clock_ns() + 5_000_000_000,
             changed: true,
             v6_logged: None,
         }
@@ -248,8 +265,8 @@ impl EthLink {
     fn dhcp(&mut self) {
         let name = LINK_NAMES[self.dev.link];
         self.log_ipv6();
-        if self.dev.own.is_none() && time_ns() >= self.report_at {
-            self.report_at = time_ns() + 5_000_000_000;
+        if self.dev.own.is_none() && clock_ns() >= self.report_at {
+            self.report_at = clock_ns() + 5_000_000_000;
             link::log_counters(name, &self.dev);
         }
         let Some(h) = self.dhcp else { return };
@@ -381,6 +398,7 @@ impl Stack {
     /// peer's answer).
     fn poll(&mut self) {
         for _ in 0..8 {
+            tick();
             self.sync_own6();
             let mut moved = false;
             for _ in 0..256 {
@@ -508,17 +526,36 @@ impl Stack {
 
     /// The earliest time an interface wants to be polled again.
     fn poll_delay(&mut self) -> Option<smoltcp::time::Duration> {
-        let mut delay = self.iface.poll_delay(now(), &self.sockets);
+        let d0 = self.iface.poll_delay(now(), &self.sockets);
+        let mut delay = d0;
+        let mut each = [u32::MAX; 1 + IFACES];
+        let us = |d: Option<smoltcp::time::Duration>| d.map_or(u32::MAX, |d| d.total_micros().min(u32::MAX as u64 - 1) as u32);
+        each[0] = us(d0);
         let mut min = |d: Option<smoltcp::time::Duration>| {
             if let Some(d) = d {
                 delay = Some(delay.map_or(d, |e| e.min(d)));
             }
         };
-        for e in self.eth.iter_mut().flatten() {
-            min(e.iface.poll_delay(now(), &e.sockets));
+        for (k, e) in self.eth.iter_mut().enumerate() {
+            if let Some(e) = e {
+                let d = e.iface.poll_delay(now(), &e.sockets);
+                each[1 + k] = us(d);
+                min(d);
+            }
         }
         if let Some(p) = &mut self.peer {
             min(p.poll_delay());
+        }
+        // Diagnosis (doc/34): which interface keeps the loop from waiting.
+        static mut ZERO_STREAK: u32 = 0;
+        let streak = unsafe { &mut *core::ptr::addr_of_mut!(ZERO_STREAK) };
+        if delay.is_some_and(|d| d.total_micros() == 0) {
+            *streak += 1;
+            if *streak == 1000 {
+                event!(Warn, "net.busy_poll", iface0_us = each[0], wlan_us = each[1], test_us = each[2]);
+            }
+        } else {
+            *streak = 0;
         }
         delay
     }
@@ -881,7 +918,7 @@ impl Stack {
                     self.unalloc(i);
                     return Err(status::UNREACHABLE);
                 }
-                self.slots[i].as_mut().unwrap().sent_ns = time_ns();
+                self.slots[i].as_mut().unwrap().sent_ns = clock_ns();
                 Ok((i as u32, 0))
             }
             op::PING_RESULT => {
@@ -896,7 +933,7 @@ impl Stack {
                         IpAddress::Ipv6(_) => 129,
                     };
                     if buf.len() >= 8 && buf[0] == reply && u16::from_be_bytes([buf[4], buf[5]]) == ping_ident(sock as usize) {
-                        return Ok((1, ((time_ns() - sent_ns) / 1000) as u32));
+                        return Ok((1, ((clock_ns() - sent_ns) / 1000) as u32));
                     }
                 }
                 Ok((0, 0))
@@ -1068,6 +1105,7 @@ fn reply6(status: u32, v0: u32, v1: u32, addr: [u8; 16]) -> [u8; proto::REPLY_SI
 /// `run net ADDR [ROUTER]` (ADDR an IPv4 address as a number, so ≥ 256):
 /// the Wi-Fi link uses ADDR/24 and ROUTER instead of DHCP (doc/22 §7).
 fn main(a0: usize, a1: usize) -> usize {
+    tick();
     let (flags, static_addr, static_router) = if a0 < 0x100 { (a0 as u32, 0, 0) } else { (0, a0 as u32, a1 as u32) };
     match run(flags, static_addr, static_router) {
         Ok(()) => 0,
@@ -1092,7 +1130,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let mut staging = rules::Staging::new();
 
     let host = Handle::open(netdev::HOST, rights::READ | rights::WRITE | rights::WAIT).ok();
-    let mut dev = Links { host, to_host: 0, from_host: 0 };
+    let mut dev = Links { host, host_queued: true, to_host: 0, from_host: 0 };
     let iface = Interface::new(Config::new(HardwareAddress::Ip), &mut dev, now());
     let mut stack = Stack {
         iface,
@@ -1148,10 +1186,10 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let mut msg = [0u8; chan::MSG_MAX];
     // Without Wi-Fi (started before the Wi-Fi service had the chip up, at
     // boot), try again every second.
-    let mut wifi_retry_at = time_ns() + 1_000_000_000;
+    let mut wifi_retry_at = clock_ns() + 1_000_000_000;
     loop {
-        if stack.eth[WLAN - 1].is_none() && static_addr == 0 && time_ns() >= wifi_retry_at {
-            wifi_retry_at = time_ns() + 1_000_000_000;
+        if stack.eth[WLAN - 1].is_none() && static_addr == 0 && clock_ns() >= wifi_retry_at {
+            wifi_retry_at = clock_ns() + 1_000_000_000;
             stack.eth[WLAN - 1] = open_wifi();
         }
         stack.poll();
@@ -1186,9 +1224,18 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
                 n += 1;
             }
         }
+        tick();
         let delay = stack.poll_delay();
         let timeout = delay.map_or(IDLE_NS, |d| (d.total_micros() * 1000).min(IDLE_NS)).max(1);
-        let ev = match wait_raw(&hs[..n], timeout) {
+        let ev = wait_raw(&hs[..n], timeout);
+        // Requests below are handled at the time they came.
+        tick();
+        // Frames may have come on any link meanwhile.
+        stack.dev.host_queued = true;
+        for e in stack.eth.iter_mut().flatten() {
+            e.dev.queued = true;
+        }
+        let ev = match ev {
             Ok(ev) => ev,
             Err(Error::TimedOut) => continue,
             Err(_) => return Err(4),

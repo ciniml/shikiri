@@ -57,7 +57,8 @@ pub mod sys {
     /// opened (`Error::Denied` otherwise).
     pub const OPEN: usize = 0x100;
     /// a0 = handle, a1/a2 = buffer. Returns the bytes read in a1
-    /// (channels: one whole message).
+    /// (channels: one whole message), and in a2 how many frames are still
+    /// queued (devices that queue frames: `netdev`, `wlan`; 0 otherwise).
     pub const READ: usize = 0x101;
     /// a0 = handle, a1/a2 = buffer. Returns the bytes written in a1
     /// (channels: one whole message).

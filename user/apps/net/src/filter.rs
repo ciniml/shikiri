@@ -16,7 +16,7 @@
 //! Addresses are kept as u128: IPv4 in the low 32 bits, told apart by the
 //! packet's (or the rule's) family.
 
-use t5_rt::{event, time_ns};
+use t5_rt::event;
 
 use crate::fwd::{IFACES, LINK_NAMES, be32};
 
@@ -206,7 +206,7 @@ pub fn log_stats() {
     for h in 0..3 {
         event!(Info, "net.policy_hits", hook = HOOK_NAMES[h], hits = f.hits[MAX_RULES + h]);
     }
-    let now = time_ns();
+    let now = crate::clock_ns();
     let live = f.table.iter().flatten().filter(|c| c.expires > now).count() as u32;
     event!(Info, "net.conntrack", live = live, tracked = f.tracked, table_full = f.table_full);
     let (mapped, full) = crate::nat::stats();
@@ -470,7 +470,7 @@ pub fn check(hook: u8, in_link: u8, out_link: u8, ip: &[u8]) -> Action {
         return Action::Pass;
     }
     let f = f();
-    let now = time_ns();
+    let now = crate::clock_ns();
     let (state, slot) = f.classify(&p, now);
     let rule = (0..f.rules.len).find(|&i| f.rules.rules[i].matches(hook, in_link, out_link, &p, state));
     let (action, log) = match rule {

@@ -10,3 +10,8 @@ codegen-units = 1
 
 [profile.dev]
 panic = "abort"
+
+# smoltcp with one fix (third_party/README.md, doc/34): SLAAC's poll_at
+# stays in the past after the last router solicitation.
+[patch.crates-io]
+smoltcp = { path = "../third_party/smoltcp-0.14.0" }

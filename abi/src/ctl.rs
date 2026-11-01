@@ -62,6 +62,17 @@ pub mod cmd {
     pub const SD_TEST: u8 = 24;
     /// Power the Wi-Fi chip and identify it on SDIO (N2b-1, doc/22).
     pub const WLAN_PROBE: u8 = 25;
+    /// `u32 op | u32 a | u32 b`: the sampling profiler (doc/34). op 1:
+    /// start on pid `a` every `b` µs; 2: stop and log the summary; 3: log
+    /// samples part `a`.
+    pub const PROF: u8 = 26;
+}
+
+/// `Command::Prof` operations.
+pub mod prof {
+    pub const START: u32 = 1;
+    pub const STOP: u32 = 2;
+    pub const DUMP: u32 = 3;
 }
 
 /// Data bytes per `install_data` frame: one flash page.
@@ -97,6 +108,7 @@ pub enum Command<'a> {
     SdRead { lba: u32 },
     SdTest,
     WlanProbe,
+    Prof { op: u32, a: u32, b: u32 },
 }
 
 impl Command<'_> {
@@ -127,6 +139,7 @@ impl Command<'_> {
             Command::SdRead { .. } => "sdread",
             Command::SdTest => "sdtest",
             Command::WlanProbe => "wlanprobe",
+            Command::Prof { .. } => "prof",
         }
     }
 }
@@ -164,6 +177,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::SD_READ if args.len() == 4 => Command::SdRead { lba: u32_at(args, 0)? },
         cmd::SD_TEST if args.is_empty() => Command::SdTest,
         cmd::WLAN_PROBE if args.is_empty() => Command::WlanProbe,
+        cmd::PROF if args.len() == 12 => Command::Prof { op: u32_at(args, 0)?, a: u32_at(args, 4)?, b: u32_at(args, 8)? },
         cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -219,6 +233,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::SdRead { .. } => put(&[cmd::SD_READ])?,
         Command::SdTest => put(&[cmd::SD_TEST])?,
         Command::WlanProbe => put(&[cmd::WLAN_PROBE])?,
+        Command::Prof { .. } => put(&[cmd::PROF])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -228,6 +243,11 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Rotate { degrees } => put(&degrees.to_le_bytes())?,
         Command::SdRead { lba } => put(&lba.to_le_bytes())?,
         Command::Pvt { on } => put(&(*on as u32).to_le_bytes())?,
+        Command::Prof { op, a, b } => {
+            put(&op.to_le_bytes())?;
+            put(&a.to_le_bytes())?;
+            put(&b.to_le_bytes())?;
+        }
         Command::Run { name, arg0, arg1 } => {
             if name.len() > 32 {
                 return None;
@@ -303,9 +323,18 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("wlanprobe") => Command::WlanProbe,
         Some("sdread") => Command::SdRead { lba: num(Some(w.next().ok_or("sdread LBA")?))? },
         Some("rotate") => Command::Rotate { degrees: num(Some(w.next().ok_or("rotate 0|90|180|270")?))? },
+        Some("prof") => match w.next() {
+            Some("start") => {
+                let pid = num(Some(w.next().ok_or("prof start PID US")?))?;
+                Command::Prof { op: prof::START, a: pid, b: num(Some(w.next().ok_or("prof start PID US")?))? }
+            }
+            Some("stop") => Command::Prof { op: prof::STOP, a: 0, b: 0 },
+            Some("dump") => Command::Prof { op: prof::DUMP, a: num(Some(w.next().ok_or("prof dump PART")?))?, b: 0 },
+            _ => return Err("prof start PID US | prof stop | prof dump PART"),
+        },
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART");
         }
     };
     if w.next().is_some() {
@@ -334,7 +363,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

@@ -22,9 +22,9 @@ use smoltcp::phy::{Device, DeviceCapabilities, Medium, TxToken};
 use smoltcp::socket::{dhcpv4, dns, icmp, tcp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, Ipv4Address};
-use t5_rt::{event, time_ns};
+use t5_rt::event;
 
-use crate::link::{ETH_FRAME, Rx, from_peer, to_peer};
+use crate::link::{ETH_FRAME, RX_PEER, Rx, from_peer, rx_frame, to_peer, tx_frame};
 use crate::now;
 
 pub const NET_ADDR: u32 = 0xC0A8_3201; // 192.168.50.1
@@ -51,7 +51,7 @@ struct PeerTx;
 
 impl TxToken for PeerTx {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut buf = [0u8; ETH_FRAME];
+        let buf = tx_frame();
         let r = f(&mut buf[..len]);
         from_peer().push(0, &buf[..len]);
         r
@@ -63,9 +63,8 @@ impl Device for PeerDev {
     type TxToken<'a> = PeerTx;
 
     fn receive(&mut self, _: Instant) -> Option<(Rx, PeerTx)> {
-        let mut out = Rx { frame: [0; ETH_FRAME], len: 0 };
-        out.len = to_peer().pop(&mut out.frame)?.1;
-        Some((out, PeerTx))
+        let len = to_peer().pop(rx_frame(RX_PEER))?.1;
+        Some((Rx { slot: RX_PEER, len }, PeerTx))
     }
 
     fn transmit(&mut self, _: Instant) -> Option<PeerTx> {
@@ -164,7 +163,7 @@ impl Peer {
             sockets,
             echo,
             probe,
-            probe_at: time_ns() + PROBE_NS,
+            probe_at: crate::clock_ns() + PROBE_NS,
             sent: [0; 2],
             answered: [0; 2],
             configured: dhcp.is_none(),
@@ -197,7 +196,7 @@ impl Peer {
                 let h = self.sockets.add(dns::Socket::new(&[IpAddress::Ipv4(*server)], &mut q[..]));
                 let cx = self.iface.context();
                 if let Ok(query) = self.sockets.get_mut::<dns::Socket>(h).start_query(cx, DNS_NAME, DnsQueryType::A) {
-                    self.dns = Some((h, query, time_ns()));
+                    self.dns = Some((h, query, crate::clock_ns()));
                 }
             }
             self.configured = true;
@@ -206,7 +205,7 @@ impl Peer {
                 let cx = self.iface.context();
                 let s = self.sockets.get_mut::<tcp::Socket>(self.http);
                 if s.connect(cx, (HTTP_SERVER, 80), 41000).is_ok() {
-                    self.http_since = Some(time_ns());
+                    self.http_since = Some(crate::clock_ns());
                 }
             }
         }
@@ -237,10 +236,10 @@ impl Peer {
             }
         }
         if n > 0 {
-            event!(Info, "net.peer_http", v6 = self.http_v6, status = core::str::from_utf8(&status[..n]).unwrap_or("?"), ms = ((time_ns() - since) / 1_000_000) as u32);
+            event!(Info, "net.peer_http", v6 = self.http_v6, status = core::str::from_utf8(&status[..n]).unwrap_or("?"), ms = ((crate::clock_ns() - since) / 1_000_000) as u32);
         }
         let ended = !s.may_recv() && self.http_bytes > 0;
-        if ended || time_ns() - since > HTTP_TIMEOUT_NS {
+        if ended || crate::clock_ns() - since > HTTP_TIMEOUT_NS {
             if !ended {
                 event!(Warn, "net.peer_http_failed", bytes = self.http_bytes);
             }
@@ -267,7 +266,7 @@ impl Peer {
                 self.answered[t] += 1;
             }
         }
-        let now = time_ns();
+        let now = crate::clock_ns();
         if now < self.probe_at {
             return;
         }
@@ -308,7 +307,7 @@ impl Peer {
                 _ => None,
             });
             event!(Info, "net.peer_slaac", addr = &addr.unwrap_or_default()[..]);
-            self.http_since = Some(time_ns());
+            self.http_since = Some(crate::clock_ns());
             self.http_sent = false;
             self.http_bytes = 0;
             self.http_v6 = true;
@@ -319,7 +318,7 @@ impl Peer {
     fn dns_result(&mut self) {
         let Some((h, q, since)) = self.dns else { return };
         let r = self.sockets.get_mut::<dns::Socket>(h).get_query_result(q);
-        let ms = ((time_ns() - since) / 1_000_000) as u32;
+        let ms = ((crate::clock_ns() - since) / 1_000_000) as u32;
         match r {
             Err(dns::GetQueryResultError::Pending) => return,
             Ok(addrs) => {

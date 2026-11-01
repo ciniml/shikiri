@@ -6,7 +6,7 @@
 //! ICMP Time Exceeded and Destination Unreachable (at most `ICMP_PER_S`
 //! a second).
 
-use t5_rt::{event, time_ns};
+use t5_rt::event;
 
 use crate::Stack;
 use crate::filter::{self, Action};
@@ -103,7 +103,7 @@ pub fn arp() -> &'static mut Arp {
 
 impl Arp {
     pub fn learn(&mut self, link: usize, ip: u32, mac: [u8; 6]) {
-        let e = ArpEntry { link: link as u8, ip, mac, at: time_ns() };
+        let e = ArpEntry { link: link as u8, ip, mac, at: crate::clock_ns() };
         if let Some(slot) = self.entries.iter_mut().find(|s| s.is_some_and(|s| s.link == link as u8 && s.ip == ip)) {
             *slot = Some(e);
             return;
@@ -114,7 +114,7 @@ impl Arp {
     }
 
     pub fn lookup(&self, link: usize, ip: u32) -> Option<[u8; 6]> {
-        let now = time_ns();
+        let now = crate::clock_ns();
         self.entries.iter().flatten().find(|e| e.link == link as u8 && e.ip == ip && now - e.at < ARP_TTL_NS).map(|e| e.mac)
     }
 }
@@ -203,8 +203,10 @@ impl Stack {
 
     /// Forwards what the devices put in the inbox, then what waited for ARP.
     pub fn forward(&mut self) {
-        let mut buf = [0u8; ETH_FRAME];
-        while let Some((link, len)) = inbox().pop(&mut buf) {
+        // Runs every poll pass: a static buffer, not one cleared each time.
+        static mut BUF: [u8; ETH_FRAME] = [0; ETH_FRAME];
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
+        while let Some((link, len)) = inbox().pop(buf) {
             let link = link as usize;
             let off = if link == IFACE0 { 0 } else { ETH_HDR };
             if len > off {
@@ -215,7 +217,7 @@ impl Stack {
                 }
             }
         }
-        while let Some((link, len)) = rejects().pop(&mut buf) {
+        while let Some((link, len)) = rejects().pop(buf) {
             let link = link as usize;
             let off = if link == IFACE0 { 0 } else { ETH_HDR };
             if len >= off + 20 {
@@ -277,7 +279,7 @@ impl Stack {
         }
         let Some(e) = self.eth[route.link - 1].as_mut() else { return };
         if let Some(mac) = arp().lookup(route.link, route.next_hop) {
-            let mut f = [0u8; ETH_FRAME];
+            let f = crate::link::tx_frame();
             f[..6].copy_from_slice(&mac);
             f[6..12].copy_from_slice(&e.dev.mac);
             f[12..14].copy_from_slice(&[0x08, 0x00]);
@@ -300,7 +302,7 @@ impl Stack {
         e.dev.port.write(&req);
         match self.fwd.pending.iter_mut().find(|s| s.is_none()) {
             Some(slot) if p.len() <= MTU => {
-                let mut w = Pending { link: route.link, next_hop: route.next_hop, since: time_ns(), len: p.len(), packet: [0; MTU] };
+                let mut w = Pending { link: route.link, next_hop: route.next_hop, since: crate::clock_ns(), len: p.len(), packet: [0; MTU] };
                 w.packet[..p.len()].copy_from_slice(p);
                 *slot = Some(w);
             }
@@ -309,7 +311,7 @@ impl Stack {
     }
 
     fn flush_pending(&mut self) {
-        let now = time_ns();
+        let now = crate::clock_ns();
         for i in 0..PENDING {
             let Some(w) = &self.fwd.pending[i] else { continue };
             if arp().lookup(w.link, w.next_hop).is_some() {
@@ -335,7 +337,7 @@ impl Stack {
             return;
         }
         let Some((own, _)) = self.link_addr(from) else { return };
-        let now = time_ns();
+        let now = crate::clock_ns();
         if now >= self.fwd.icmp_until {
             self.fwd.icmp_until = now + 1_000_000_000;
             self.fwd.icmp_left = ICMP_PER_S;
@@ -367,7 +369,7 @@ impl Stack {
     }
 
     fn log_stats(&mut self) {
-        let now = time_ns();
+        let now = crate::clock_ns();
         if now < self.fwd.stats_at {
             return;
         }

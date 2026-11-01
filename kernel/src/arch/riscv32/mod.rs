@@ -62,6 +62,15 @@ unsafe extern "C" {
     static __stack_top: u32;
 }
 
+/// This core's cycle counter (low 32 bits of `mcycle`): cheap, unlike the
+/// SYSTIMER, but per core and at the CPU clock.
+#[inline(always)]
+pub fn cycles() -> u32 {
+    let c: u32;
+    unsafe { core::arch::asm!("csrr {0}, mcycle", out(reg) c) };
+    c
+}
+
 /// The kernel stack's size and the most of it used so far (bytes): how far
 /// down from the top the boot-time paint has been overwritten.
 pub fn stack_usage() -> (u32, u32) {

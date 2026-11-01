@@ -8,7 +8,6 @@
 //! ICMP errors about a masqueraded packet (a router's Time Exceeded) are
 //! not translated yet.
 
-use t5_rt::time_ns;
 
 use crate::filter::{self, PROTO_ICMP, PROTO_TCP, PROTO_UDP};
 use crate::fwd::be32;
@@ -137,7 +136,7 @@ pub fn outbound(ip: &mut [u8], link: u8, addr: u32) {
     let dport = if proto == PROTO_ICMP { 0 } else { u16::from_be_bytes([l4[2], l4[3]]) };
     let (inside, remote) = ((src, sport), (be32(&ip[16..20]), dport));
     let n = nat();
-    let now = time_ns();
+    let now = crate::clock_ns();
     let live = |m: &Map| m.expires > now;
     let found = n.maps.iter_mut().flatten().find(|m| live(m) && m.proto == proto && m.link == link && m.inside == inside && m.remote == remote);
     let port = match found {
@@ -186,7 +185,7 @@ pub fn inbound(ip: &mut [u8], link: u8) -> bool {
     let dport = u16::from_be_bytes([l4[port_at], l4[port_at + 1]]);
     let sport = if proto == PROTO_ICMP { 0 } else { u16::from_be_bytes([l4[0], l4[1]]) };
     let (dst, remote) = (be32(&ip[16..20]), (be32(&ip[12..16]), sport));
-    let now = time_ns();
+    let now = crate::clock_ns();
     let Some(m) = nat().maps.iter_mut().flatten().find(|m| m.expires > now && m.proto == proto && m.link == link && m.outside == (dst, dport) && m.remote == remote) else {
         return false;
     };

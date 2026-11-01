@@ -262,6 +262,9 @@ pub(super) fn host_up() -> Result<(), &'static str> {
         wr(CTYPE, 0); // one data line on every slot
         wr(CLKENA, 0);
         // IDMAC: reset, then on (sdmmc_ll_init_dma); polled through IDSTS.
+        // IDSTS stays 0 unless IDINTEN enables the bits (seen: with 0 every
+        // transfer timed out), so they also raise the host interrupt once
+        // it is on; a deferred write is finished there (`finish_write`).
         wr(CTRL, rd(CTRL) | CTRL_DMA_ENABLE | CTRL_USE_IDMAC);
         wr(BMOD, BMOD_SWR);
         wr(IDINTEN, IDSTS_TI | IDSTS_RI | (1 << 8));
@@ -301,11 +304,13 @@ fn slot0_up() -> Result<(), &'static str> {
 
 /// `slot`'s data bus: 4 lines or 1 (CTYPE bit `slot`).
 pub(super) fn set_wide(slot: u32, four: bool) {
+    finish_write();
     unsafe { wr(CTYPE, if four { rd(CTYPE) | 1 << slot } else { rd(CTYPE) & !(1 << slot) }) };
 }
 
 /// Sends the "update clock registers" command for `slot`.
 fn update_clock(slot: u32) -> Result<(), &'static str> {
+    finish_write();
     unsafe {
         wr(CMDARG, 0);
         wr(CMD, UPDATE_CLOCK | slot << 16);
@@ -384,7 +389,36 @@ pub(super) fn command_on(slot: u32, block: usize, cmd: u32, arg: u32, data: Data
     r
 }
 
+/// The slot whose writes end without waiting for their data phase: the
+/// C6 (`sdio.rs`). A Wi-Fi frame then goes out while the caller goes on
+/// (doc/34). The SD card's writes stay whole, so a write that returns is
+/// on the card.
+const DEFER_SLOT: u32 = 1;
+
+/// A write of `DEFER_SLOT` whose data phase may still run: the card took
+/// the command and the IDMAC moves the data from the bounce buffer.
+static mut WRITE_IN_FLIGHT: bool = false;
+
+/// Ends a deferred write before the host is used again, or when its DMA
+/// raised the host interrupt (TI): waits for its DMA and for the card to
+/// finish taking the data, and clears TI. A failure is logged; the frame
+/// it carried is lost.
+pub(super) fn finish_write() {
+    if !core::mem::replace(unsafe { &mut *core::ptr::addr_of_mut!(WRITE_IN_FLIGHT) }, false) {
+        return;
+    }
+    let r = dma_finish(IDSTS_TI, None).and_then(|_| {
+        if wait(5_000_000, || unsafe { rd(STATUS) } & STATUS_DATA_BUSY == 0) { Ok(()) } else { Err("card stayed busy") }
+    });
+    unsafe { wr(RINTSTS, TRANSFER_INTS) };
+    if let Err(e) = r {
+        event!(Warn, "sd.write_failed", slot = DEFER_SLOT, error = e);
+    }
+}
+
 fn command_timed(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
+    // The bounce buffer and the host are free again.
+    finish_write();
     if !wait(1_000_000, || unsafe { rd(CMD) } & CMD_START == 0) {
         return Err("SDMMC busy");
     }
@@ -429,6 +463,10 @@ fn command_timed(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Res
     match data {
         Data::None => {}
         Data::Read(buf) => dma_finish(IDSTS_RI, Some(buf))?,
+        Data::Write(_) if slot == DEFER_SLOT => {
+            unsafe { WRITE_IN_FLIGHT = true };
+            return Ok(resp);
+        }
         Data::Write(_) => {
             dma_finish(IDSTS_TI, None)?;
             // The card programs with D0 low (up to 250 ms per block by the

@@ -112,6 +112,13 @@ impl Handle {
         result(ret, v).map(|v| v[0])
     }
 
+    /// `read`, and how many frames are still queued after it (devices that
+    /// queue frames; 0 for the rest).
+    pub fn read_queued(&self, buf: &mut [u8]) -> Result<(usize, usize), Error> {
+        let (ret, v) = unsafe { syscall4(sys::READ, [self.0 as usize, buf.as_mut_ptr() as usize, buf.len(), 0]) };
+        result(ret, v).map(|v| (v[0], v[1]))
+    }
+
     /// Writes `buf` (a channel: as one message).
     pub fn write(&self, buf: &[u8]) -> Result<usize, Error> {
         let (ret, v) = unsafe { syscall4(sys::WRITE, [self.0 as usize, buf.as_ptr() as usize, buf.len(), 0]) };

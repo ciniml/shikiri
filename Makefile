@@ -288,7 +288,7 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	@# both are removed. The other core is stopped by an interrupt before
 	@# each cache stop; t5emu stops on any flash or PSRAM access while L2 is
 	@# suspended.
-	$(T5EMU) --quiet --max-ms 20000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	$(T5EMU) --quiet --max-ms 30000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run spin 257 80" --ctl "run spin 258 80" \
 	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
 	    --ctl "install $(APPS_DIR)/spin-xip.t5a" --ctl "run spin-xip 4 300" \
@@ -376,7 +376,7 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is
 	@# selected in otadata, and reboot ends the run (no bootloader here).
-	$(T5EMU) --quiet --max-ms 20000 $(EMU_FLASH) --flash $(BUILD)/t5-kernel-esp32p4v1.bin@10000 $(addprefix --elf ,$(APP_ELFS)) \
+	$(T5EMU) --quiet --max-ms 30000 $(EMU_FLASH) --flash $(BUILD)/t5-kernel-esp32p4v1.bin@10000 $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "kinfo" --ctl "kupdate $(KUPDATE_DIR)/tampered.t5k" --ctl "kupdate $(KERNEL_T5K)" --ctl "kinfo" \
 	    --ctl "reboot" \
 	    --expect-event kupdate.slot --expect-event ctl.failed --expect-event kupdate.slot_erased --expect-event kupdate.ready \

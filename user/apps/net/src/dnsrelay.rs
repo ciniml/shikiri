@@ -8,7 +8,7 @@
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::udp;
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint, Ipv4Address};
-use t5_rt::{event, time_ns};
+use t5_rt::event;
 
 const PORT: u16 = 53;
 /// The relay's own port upstream.
@@ -64,7 +64,7 @@ impl Relay {
         let up = up_set.add(socket(core::ptr::addr_of_mut!(UP_RX), core::ptr::addr_of_mut!(UP_TX), 2));
         let _ = up_set.get_mut::<udp::Socket>(up).bind(UP_PORT);
         event!(Info, "net.dns_relay", link = crate::fwd::LINK_NAMES[link as usize]);
-        Relay { link, down, up, pending: [None; PENDING], next_id: (time_ns() as u16) | 1, relayed: 0, dropped: 0 }
+        Relay { link, down, up, pending: [None; PENDING], next_id: (crate::clock_ns() as u16) | 1, relayed: 0, dropped: 0 }
     }
 
     pub fn remove(self, down_set: &mut SocketSet<'static>, up_set: &mut SocketSet<'static>) {
@@ -74,7 +74,7 @@ impl Relay {
 
     /// Moves queries up and answers down. `server`: Wi-Fi's DNS server.
     pub fn poll(&mut self, down_set: &mut SocketSet<'static>, up_set: &mut SocketSet<'static>, server: Option<u32>) {
-        let now = time_ns();
+        let now = crate::clock_ns();
         for q in self.pending.iter_mut() {
             if q.is_some_and(|q| now - q.at > TIMEOUT_NS) {
                 *q = None;

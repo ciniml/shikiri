@@ -415,8 +415,12 @@ fn d1_low() -> bool {
 /// From the interrupt handler: the card interrupt came. It stays masked
 /// until `poll` has asked the C6 (the line stays low until then).
 pub fn on_irq() {
-    sd::card_int_enable(SLOT, false);
-    link().irqs += 1;
+    // The host interrupt is also the end of a deferred write's DMA.
+    sd::finish_write();
+    if sd::card_int_came(SLOT) {
+        sd::card_int_enable(SLOT, false);
+        link().irqs += 1;
+    }
 }
 
 /// Whether the C6 has something to say: the scheduler does not sleep then.
@@ -454,6 +458,9 @@ pub fn poll(sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static str> {
     if !l.up {
         return Ok(());
     }
+    // A frame's write may have ended: its DMA interrupt (TI) stays raised
+    // until the write is finished, and would keep waking this core.
+    sd::finish_write();
     let now = Esp32p4v1::now();
     let signalled = sd::card_int_take(SLOT);
     if !signalled && !l.again && now < l.next_poll {
