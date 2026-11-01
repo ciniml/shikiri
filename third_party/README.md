@@ -4,4 +4,4 @@
 
 | クレート | 元 | 変更 |
 |---|---|---|
-| `smoltcp-0.14.0` | crates.io の smoltcp 0.14.0（0BSD） | `src/iface/slaac.rs` の `Slaac::poll_at` だけ。ルータ要請（RS）を送り切った後、`retry_rs_at` が過去のまま返り、`Interface::poll_delay` が 0 になり続ける。ルータ広告（RA）が来るまで呼び出し側が回り続けた（`net` が Wi-Fi の接続待ちの間に約 7 秒の CPU を使った、doc/34）。送り切った後は時刻を返さない。上流の main も同じ（2026-11-01 に確認） |
+| `smoltcp-0.14.0` | crates.io の smoltcp 0.14.0（0BSD） | `src/iface/slaac.rs` の `Slaac::poll_at` だけ。ルータ要請（RS）を送り切った後、`retry_rs_at` が過去のまま返り、`Interface::poll_delay` が 0 になり続ける。ルータ広告（RA）が来るまで呼び出し側が回り続けた（`net` が Wi-Fi の接続待ちの間に約 7 秒の CPU を使った、doc/34）。送り切った後は時刻を返さない。上流の main も同じ（2026-11-01 に確認）。<br>`src/wire/ip.rs` の `checksum::data`。揃った 32 ビットの語を 64 ビットで足す（前の端数が偶数バイトのとき。そうでなければ元のまま）。RV32 ではバイトずつの読み出しが遅く、`net` の 4% だった（doc/34 §10）。元の実装と、ずれ 0〜7、長さ 0〜1599 のすべてで同じ値になることを確かめた |

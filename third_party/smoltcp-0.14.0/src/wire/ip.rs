@@ -770,7 +770,31 @@ pub mod checksum {
     }
 
     /// Compute an RFC 1071 compliant checksum (without the final complement).
+    #[allow(unsafe_code)]
     pub fn data(data: &[u8]) -> u16 {
+        // tab5-os (doc/34 §10): aligned 32-bit words summed into 64 bits,
+        // when the bytes before the first one are even in number (so the
+        // 16-bit pairs line up; IP and TCP in an Ethernet frame start 2
+        // bytes past a word). On RV32 the byte-by-byte reads below were
+        // 4% of `net`. The rest, and short data, as before.
+        // SAFETY: u32 has no invalid bit patterns.
+        let (prefix, words, suffix) = unsafe { data.align_to::<u32>() };
+        if prefix.len() % 2 == 0 && words.len() >= 2 {
+            let mut wide: u64 = 0;
+            for &w in words {
+                wide += w as u64;
+            }
+            let w = (wide & 0xffff_ffff) + (wide >> 32);
+            let w = (w & 0xffff_ffff) + (w >> 32);
+            let w = (w & 0xffff) + (w >> 16);
+            let accum = sum_native(prefix) + sum_native(suffix) + w as u32;
+            return u16::to_be(propagate_carries(accum));
+        }
+        u16::to_be(propagate_carries(sum_native(data)))
+    }
+
+    /// The native-endian sum of `data`'s 16-bit pairs, carries not folded.
+    fn sum_native(data: &[u8]) -> u32 {
         // We calculate the sum in native-endian before converting to big-endian at the end
         // see RFC 1071 section 2.(B) for details
         let mut accum: u32 = 0;
@@ -799,8 +823,7 @@ pub mod checksum {
             accum += u16::from_ne_bytes([value, 0]) as u32;
         }
 
-        let collapsed = propagate_carries(accum);
-        u16::to_be(collapsed)
+        accum
     }
 
     /// Combine several RFC 1071 compliant checksums.

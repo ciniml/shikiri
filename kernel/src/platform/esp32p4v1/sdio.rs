@@ -115,14 +115,18 @@ const TAG_SDIO_MODE: u8 = 0x18;
 const CHIP_ESP32C6: u8 = 0x0D;
 
 fn ms(n: u64) {
-    // In 100 ms steps, feeding the watchdog (power-up waits are 1.5 s).
-    let mut left = n;
-    while left > 0 {
-        let step = left.min(100);
-        delay_us(step * 1000);
-        Esp32p4v1::feed_watchdog();
-        left -= step;
+    // Power-up waits are 1.5 s: the watchdog is fed every 100 ms, and the
+    // kernel lock is let go after each millisecond (`smp::pause`), so the
+    // other core's processes go on meanwhile. Held for the whole wait, it
+    // kept `fs` spinning on the lock for 1.5 s at boot (doc/34 §12).
+    for k in 0..n {
+        delay_us(1000);
+        if k % 100 == 99 {
+            Esp32p4v1::feed_watchdog();
+        }
+        crate::smp::pause();
     }
+    Esp32p4v1::feed_watchdog();
 }
 
 fn cmd(c: u32, arg: u32) -> Result<u32, &'static str> {

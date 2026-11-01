@@ -18,6 +18,12 @@ const IF_SERIAL: u8 = 3;
 // Sized by the kernel RAM that is left (internal SRAM; doc/22 §6).
 const CTL_QUEUE: usize = 3;
 const STA_QUEUE: usize = 5;
+/// Frames written on core 1, waiting for core 0 to send them (doc/34 §11).
+/// QEMU has no Wi-Fi, and less RAM.
+#[cfg(not(feature = "platform-virt"))]
+const TX_QUEUE: usize = 8;
+#[cfg(feature = "platform-virt")]
+const TX_QUEUE: usize = 1;
 /// How often the counters are logged.
 const STATS_MS: u64 = 30_000;
 
@@ -63,6 +69,18 @@ impl<const N: usize, const S: usize> Queue<N, S> {
     fn clear(&mut self) {
         self.count = 0;
     }
+
+    /// The oldest item, left in place.
+    fn front(&self) -> Option<&[u8]> {
+        (self.count > 0).then(|| &self.items[self.head][..self.lens[self.head]])
+    }
+
+    fn drop_front(&mut self) {
+        if self.count > 0 {
+            self.head = (self.head + 1) % N;
+            self.count -= 1;
+        }
+    }
 }
 
 struct Wlan {
@@ -71,6 +89,8 @@ struct Wlan {
     dev_open: bool,
     ctl: Queue<CTL_QUEUE, { wlan::MSG_MAX }>,
     sta: Queue<STA_QUEUE, { netdev::ETH_FRAME }>,
+    /// The station's frames to send (written on core 1).
+    tx: Queue<TX_QUEUE, { netdev::ETH_FRAME }>,
     /// The station's MAC address (set by the Wi-Fi service), 0 = unknown.
     mac: u64,
     other: u32,
@@ -91,6 +111,7 @@ static mut WLAN: Wlan = Wlan {
     dev_open: false,
     ctl: Queue::new(),
     sta: Queue::new(),
+    tx: Queue::new(),
     mac: 0,
     other: 0,
     errors: 0,
@@ -105,10 +126,26 @@ fn w() -> &'static mut Wlan {
     unsafe { &mut *core::ptr::addr_of_mut!(WLAN) }
 }
 
-/// Whether the chip has signalled something the next `poll` reads.
+/// Whether the chip has signalled something the next `poll` reads, or
+/// frames wait to be sent.
 pub fn pending() -> bool {
     let w = w();
-    w.up && (w.ctl_open || w.dev_open) && Current::wlan_pending()
+    w.up && (w.ctl_open || w.dev_open) && (Current::wlan_pending() || w.tx.count > 0)
+}
+
+/// Sends the queued frames, oldest first, until the chip takes no more
+/// (`Busy`: they stay for the next call). Core 0 does this; a frame that
+/// fails otherwise is dropped and counted.
+pub fn flush_tx() {
+    let w = w();
+    while let Some(f) = w.tx.front() {
+        match send(IF_STA, f) {
+            Ok(_) => w.sta_tx += 1,
+            Err(Error::Busy) => return,
+            Err(_) => w.tx.dropped += 1,
+        }
+        w.tx.drop_front();
+    }
 }
 
 /// Reads what the chip has sent (from the scheduler loop).
@@ -117,6 +154,7 @@ pub fn poll() {
     if !w.up || !(w.ctl_open || w.dev_open) {
         return;
     }
+    flush_tx();
     let (ctl, sta, dev_open) = (&mut w.ctl, &mut w.sta, w.dev_open);
     let (mut other, mut sta_rx) = (0, 0);
     let r = Current::wlan_poll(&mut |if_type, p| match if_type {
@@ -246,9 +284,36 @@ impl WlanDev {
         w().sta.pop(out)
     }
 
+    /// On core 1 (with two cores) the frame is queued for core 0, which
+    /// owns the SDIO transfers then: the caller does not wait for the bus
+    /// (doc/34 §11). On core 0 the queue is sent first, then the frame.
     pub fn write(&mut self, frame: &[u8]) -> Result<usize, Error> {
         let w = w();
         if !w.up {
+            return Err(Error::Busy);
+        }
+        if frame.len() > netdev::ETH_FRAME {
+            return Err(Error::Size);
+        }
+        if crate::smp::two_cores() && crate::smp::hartid() & 1 == 1 {
+            if w.tx.count == TX_QUEUE {
+                // Full: send here rather than drop.
+                flush_tx();
+                if w.tx.count == TX_QUEUE {
+                    return Err(Error::Busy);
+                }
+            }
+            let was_empty = w.tx.count == 0;
+            w.tx.push(frame);
+            if was_empty {
+                // Core 0 sends it from its loop, or from the interrupt if
+                // it runs a process.
+                Current::ipi_send(0);
+            }
+            return Ok(frame.len());
+        }
+        flush_tx();
+        if w.tx.count > 0 {
             return Err(Error::Busy);
         }
         let r = send(IF_STA, frame);
@@ -281,6 +346,7 @@ impl Drop for WlanDev {
     fn drop(&mut self) {
         let w = w();
         w.dev_open = false;
-        event!(Info, "wlan.dev_closed", rx = w.sta_rx, tx = w.sta_tx, dropped = w.sta.dropped);
+        w.tx.clear();
+        event!(Info, "wlan.dev_closed", rx = w.sta_rx, tx = w.sta_tx, dropped = w.sta.dropped, tx_dropped = w.tx.dropped);
     }
 }

@@ -22,7 +22,7 @@ use crate::time;
 #[cfg(not(feature = "platform-virt"))]
 const SAMPLES: usize = 8192;
 #[cfg(feature = "platform-virt")]
-const SAMPLES: usize = 512;
+const SAMPLES: usize = 256;
 /// Samples per `prof dump`, and per event.
 pub const DUMP: usize = 512;
 const PER_EVENT: usize = 16;

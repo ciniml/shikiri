@@ -397,8 +397,10 @@ impl Stack {
     /// nothing moves (a forwarded packet may need another round: ARP, the
     /// peer's answer).
     fn poll(&mut self) {
+        // The time is read after each `wait` and before the next one's
+        // timeout (`tick`), not here: requests make this run several times
+        // per wake-up (doc/34 §10).
         for _ in 0..8 {
-            tick();
             self.sync_own6();
             let mut moved = false;
             for _ in 0..256 {

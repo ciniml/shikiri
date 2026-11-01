@@ -478,6 +478,10 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadl
             Trap::Interrupt { code } if code == Current::IPI_IRQ => {
                 Current::ipi_clear();
                 s.stats.ipis[core] += 1;
+                // Core 1 queued Wi-Fi frames for this core to send.
+                if core == 0 {
+                    crate::wlan::flush_tx();
+                }
             }
             Trap::Interrupt { code } if Current::handle_irq(code) => {}
             Trap::Interrupt { code } => panic!("unexpected interrupt {code}"),

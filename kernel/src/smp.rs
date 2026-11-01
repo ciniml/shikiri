@@ -43,6 +43,9 @@ static SERVING: AtomicU32 = AtomicU32::new(0);
 static WAITING: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 /// Whether core 1 runs (and so takes part in locking).
 static TWO_CORES: AtomicU32 = AtomicU32::new(0);
+/// Per hart: cycles (`mcycle`, low 32 bits per wait) spent waiting for the
+/// lock in `lock` (doc/34 §8).
+static LOCK_WAIT: [AtomicU64Pair; 2] = [AtomicU64Pair::new(), AtomicU64Pair::new()];
 /// Per hart: it sleeps in `idle` (set and cleared with the lock held, so
 /// a core holding the lock sees it exactly).
 static ASLEEP: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
@@ -89,8 +92,39 @@ pub fn start() -> usize {
 pub fn lock() {
     let me = hartid() & 1;
     WAITING[me].store(1, Ordering::Release);
+    let c0 = crate::arch::riscv32::cycles();
     take();
+    LOCK_WAIT[me].add(crate::arch::riscv32::cycles().wrapping_sub(c0));
     WAITING[me].store(0, Ordering::Relaxed);
+}
+
+/// Cycles each hart has waited for the lock in `lock` (not in `idle`).
+pub fn lock_wait_cycles() -> [u64; 2] {
+    [LOCK_WAIT[0].get(), LOCK_WAIT[1].get()]
+}
+
+/// A 64-bit total in two words, written only by its own hart with the
+/// lock held (read with it held too), so plain loads and stores do.
+struct AtomicU64Pair(AtomicU32, AtomicU32);
+
+impl AtomicU64Pair {
+    const fn new() -> Self {
+        AtomicU64Pair(AtomicU32::new(0), AtomicU32::new(0))
+    }
+
+    #[inline(always)]
+    fn add(&self, v: u32) {
+        let lo = self.0.load(Ordering::Relaxed);
+        let (sum, carry) = lo.overflowing_add(v);
+        self.0.store(sum, Ordering::Relaxed);
+        if carry {
+            self.1.store(self.1.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+        }
+    }
+
+    fn get(&self) -> u64 {
+        (self.1.load(Ordering::Relaxed) as u64) << 32 | self.0.load(Ordering::Relaxed) as u64
+    }
 }
 
 #[unsafe(link_section = ".ram_text")]
@@ -132,6 +166,26 @@ pub fn idle() {
     // The lock is held, so no flash operation runs: flash code is fine.
     // Cleared before the caller looks for work, so a later kick is seen.
     Current::ipi_clear();
+}
+
+/// For a RAM function that waits for a device without the lock (doc/34
+/// §9): lets go of it, marked as waiting, so the other core may run kernel
+/// code meanwhile (flash work too). Only RAM code may run until
+/// `relock_after_wait`, which waits for the lock again.
+#[inline(always)]
+#[allow(dead_code)] // Only the P4 waits for devices this way.
+pub fn unlock_for_wait() {
+    let me = hartid() & 1;
+    WAITING[me].store(1, Ordering::Release);
+    SERVING.store(SERVING.load(Ordering::Relaxed).wrapping_add(1), Ordering::Release);
+}
+
+#[inline(always)]
+#[allow(dead_code)] // Only the P4 waits for devices this way.
+pub fn relock_after_wait() {
+    let me = hartid() & 1;
+    take();
+    WAITING[me].store(0, Ordering::Relaxed);
 }
 
 /// Lets the other core have the lock if it waits for it (a ticket lock

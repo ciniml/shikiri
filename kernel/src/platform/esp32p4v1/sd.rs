@@ -10,6 +10,8 @@
 //! Register addresses, values and the order are from
 //! doc/research/m7-sdcard.md §2-§4 and §8 (ESP-IDF 6.0 esp_driver_sdmmc).
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use t5_abi::event;
 
 use super::i2c::{func_out_sel, io_mux_reg};
@@ -305,7 +307,9 @@ fn slot0_up() -> Result<(), &'static str> {
 /// `slot`'s data bus: 4 lines or 1 (CTYPE bit `slot`).
 pub(super) fn set_wide(slot: u32, four: bool) {
     finish_write();
+    let claimed = claim_host();
     unsafe { wr(CTYPE, if four { rd(CTYPE) | 1 << slot } else { rd(CTYPE) & !(1 << slot) }) };
+    release_host(claimed);
 }
 
 /// Sends the "update clock registers" command for `slot`.
@@ -325,6 +329,13 @@ fn update_clock(slot: u32) -> Result<(), &'static str> {
 /// 0 = 40 MHz) on the first stage; `khz` (what that gives) sets the data
 /// timeout (m7-sdcard.md §3.2). The other slot's clock keeps running.
 pub(super) fn set_card_clock(slot: u32, div2: u32, khz: u32) -> Result<(), &'static str> {
+    let claimed = claim_host();
+    let r = set_card_clock_owned(slot, div2, khz);
+    release_host(claimed);
+    r
+}
+
+fn set_card_clock_owned(slot: u32, div2: u32, khz: u32) -> Result<(), &'static str> {
     let bit = 1 << slot;
     unsafe { wr(CLKENA, rd(CLKENA) & !bit) };
     update_clock(slot)?;
@@ -362,6 +373,68 @@ impl Data<'_> {
     }
 }
 
+/// The core using the host (1 + hart), or 0. A command keeps it while its
+/// data phase is waited for without the kernel lock (`wait_dma`); the
+/// other core, wanting the host meanwhile, lets the lock go until it is
+/// free (doc/34 §9). Changed only with the kernel lock held.
+static HOST_OWNER: AtomicU32 = AtomicU32::new(0);
+
+/// Takes the host for this core; true if it was not already this core's
+/// (the caller then gives it back with `release_host`).
+fn claim_host() -> bool {
+    let me = (crate::smp::hartid() & 1) as u32 + 1;
+    loop {
+        match HOST_OWNER.load(Ordering::Acquire) {
+            o if o == me => return false,
+            0 => {
+                HOST_OWNER.store(me, Ordering::Release);
+                return true;
+            }
+            _ => crate::smp::pause(),
+        }
+    }
+}
+
+fn release_host(claimed: bool) {
+    if claimed {
+        HOST_OWNER.store(0, Ordering::Release);
+    }
+}
+
+/// Data phases at least this long are waited for without the kernel lock.
+const UNLOCKED_WAIT_MIN: usize = 512;
+/// How long a data phase may take: 1 s at 360 MHz (longer at a lower clock).
+const DMA_TIMEOUT_CYCLES: u32 = 360_000_000;
+
+/// Waits for the DMA of a data phase: `done_bit` in IDSTS and the end of
+/// the data (DTO), or an error; returns (ended, IDSTS, RINTSTS). With
+/// `unlocked` the kernel lock is let go meanwhile: a 1.5 KB frame takes
+/// about 80 µs, which the other core spent waiting for the lock (doc/34
+/// §9). So it runs from RAM and reads only the host's registers.
+#[unsafe(link_section = ".ram_text")]
+#[inline(never)]
+fn wait_dma(done_bit: u32, unlocked: bool) -> (bool, u32, u32) {
+    if unlocked {
+        crate::smp::unlock_for_wait();
+    }
+    let start = crate::arch::riscv32::cycles();
+    let (mut ids, mut ints);
+    let done = loop {
+        ids = unsafe { core::ptr::read_volatile(IDSTS as *const u32) };
+        ints = unsafe { core::ptr::read_volatile(RINTSTS as *const u32) };
+        if ids & (done_bit | IDSTS_ERRORS) != 0 && ints & (DTO | DATA_ERRORS) != 0 || ints & DATA_ERRORS != 0 {
+            break true;
+        }
+        if crate::arch::riscv32::cycles().wrapping_sub(start) > DMA_TIMEOUT_CYCLES {
+            break false;
+        }
+    };
+    if unlocked {
+        crate::smp::relock_after_wait();
+    }
+    (done, ids, ints)
+}
+
 /// `command_on` for the SD card's slot.
 fn command(cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
     command_on(0, SECTOR, cmd, arg, data)
@@ -379,8 +452,10 @@ pub(super) fn busy(slot: u32) -> (u64, u32) {
 }
 
 pub(super) fn command_on(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
+    let claimed = claim_host();
     let start = Esp32p4v1::now();
     let r = command_timed(slot, block, cmd, arg, data);
+    release_host(claimed);
     unsafe {
         let b = &mut (*core::ptr::addr_of_mut!(BUSY))[slot as usize & 1];
         b.0 += Esp32p4v1::now() - start;
@@ -404,13 +479,20 @@ static mut WRITE_IN_FLIGHT: bool = false;
 /// finish taking the data, and clears TI. A failure is logged; the frame
 /// it carried is lost.
 pub(super) fn finish_write() {
-    if !core::mem::replace(unsafe { &mut *core::ptr::addr_of_mut!(WRITE_IN_FLIGHT) }, false) {
+    if !unsafe { WRITE_IN_FLIGHT } {
         return;
     }
-    let r = dma_finish(IDSTS_TI, None).and_then(|_| {
+    let claimed = claim_host();
+    // Another core may have finished it while this one waited for the host.
+    if !core::mem::replace(unsafe { &mut *core::ptr::addr_of_mut!(WRITE_IN_FLIGHT) }, false) {
+        release_host(claimed);
+        return;
+    }
+    let r = dma_finish(IDSTS_TI, UNLOCKED_WAIT_MIN, None).and_then(|_| {
         if wait(5_000_000, || unsafe { rd(STATUS) } & STATUS_DATA_BUSY == 0) { Ok(()) } else { Err("card stayed busy") }
     });
     unsafe { wr(RINTSTS, TRANSFER_INTS) };
+    release_host(claimed);
     if let Err(e) = r {
         event!(Warn, "sd.write_failed", slot = DEFER_SLOT, error = e);
     }
@@ -462,13 +544,13 @@ fn command_timed(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Res
     let resp = unsafe { [rd(RESP0), rd(RESP0 + 4), rd(RESP0 + 8), rd(RESP0 + 12)] };
     match data {
         Data::None => {}
-        Data::Read(buf) => dma_finish(IDSTS_RI, Some(buf))?,
+        Data::Read(buf) => dma_finish(IDSTS_RI, len, Some(buf))?,
         Data::Write(_) if slot == DEFER_SLOT => {
             unsafe { WRITE_IN_FLIGHT = true };
             return Ok(resp);
         }
         Data::Write(_) => {
-            dma_finish(IDSTS_TI, None)?;
+            dma_finish(IDSTS_TI, len, None)?;
             // The card programs with D0 low (up to 250 ms per block by the
             // spec; 5 s as ESP-IDF allows).
             if !wait(5_000_000, || unsafe { rd(STATUS) } & STATUS_DATA_BUSY == 0) {
@@ -503,14 +585,9 @@ fn dma_start(len: usize) {
 
 /// Waits for the DMA (`done_bit`: RI for a read, TI for a write) and the
 /// end of the data phase; for a read, copies the data out.
-fn dma_finish(done_bit: u32, out: Option<&mut [u8]>) -> Result<(), &'static str> {
-    let mut ids = 0;
-    let mut ints = 0;
-    let done = wait(1_000_000, || {
-        ids = unsafe { rd(IDSTS) };
-        ints = unsafe { rd(RINTSTS) };
-        ids & (done_bit | IDSTS_ERRORS) != 0 && ints & (DTO | DATA_ERRORS) != 0 || ints & DATA_ERRORS != 0
-    });
+fn dma_finish(done_bit: u32, len: usize, out: Option<&mut [u8]>) -> Result<(), &'static str> {
+    let unlocked = len >= UNLOCKED_WAIT_MIN && crate::smp::two_cores();
+    let (done, ids, ints) = wait_dma(done_bit, unlocked);
     if !done || ids & IDSTS_ERRORS != 0 || ints & DATA_ERRORS != 0 {
         event!(Warn, "sd.dma_error", idsts = ids, rintsts = ints, status = unsafe { rd(STATUS) }, done = done);
         unsafe {

@@ -433,6 +433,8 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
                 kicks1 = s.stats.kicks[1],
                 ipis0 = s.stats.ipis[0],
                 ipis1 = s.stats.ipis[1],
+                lockwait0_ms = (smp::lock_wait_cycles()[0] / 360_000) as u32,
+                lockwait1_ms = (smp::lock_wait_cycles()[1] / 360_000) as u32,
                 idle_total_ms = (time::ticks_to_ns(s.stats.idle_ticks[0] + s.stats.idle_ticks[1]) / 1_000_000) as u32
             );
             let (size, used) = rv::stack_usage();
