@@ -120,12 +120,16 @@ fn serve_many(clients: usize) -> Result<(), u32> {
 /// Connects to `name`, which may not be listening yet: with two cores the
 /// server starts at the same time as its clients (doc/33 §5). Up to 1 s.
 fn connect(name: &str) -> Option<Channel> {
+    let start = t5_rt::time_ns();
+    let mut last = Error::Off;
     for _ in 0..1000 {
-        if let Ok(c) = Channel::connect(name) {
-            return Some(c);
+        match Channel::connect(name) {
+            Ok(c) => return Some(c),
+            Err(e) => last = e,
         }
         sleep_ms(1);
     }
+    event!(Warn, "echo.connect_gave_up", ms = ((t5_rt::time_ns() - start) / 1_000_000) as u32, error = last as u32);
     None
 }
 

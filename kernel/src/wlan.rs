@@ -77,6 +77,10 @@ struct Wlan {
     errors: u32,
     sta_rx: u32,
     sta_tx: u32,
+    /// Sends refused for want of a C6 buffer, and while the C6 asked us to
+    /// hold back (flow control).
+    tx_busy: u32,
+    tx_throttled: u32,
     /// When to log the counters next (ticks).
     stats_at: u64,
 }
@@ -92,6 +96,8 @@ static mut WLAN: Wlan = Wlan {
     errors: 0,
     sta_rx: 0,
     sta_tx: 0,
+    tx_busy: 0,
+    tx_throttled: 0,
     stats_at: 0,
 };
 
@@ -132,7 +138,7 @@ pub fn poll() {
     if now >= w.stats_at {
         if w.stats_at != 0 {
             let (irqs, d1_low, bus_ms, bus_cmds) = Current::wlan_irq_stats();
-            event!(Debug, "wlan.stats", irqs = irqs, d1_low = d1_low, sta_rx = w.sta_rx, sta_tx = w.sta_tx, errors = w.errors, bus_ms = bus_ms, bus_cmds = bus_cmds);
+            event!(Debug, "wlan.stats", irqs = irqs, d1_low = d1_low, sta_rx = w.sta_rx, sta_tx = w.sta_tx, tx_busy = w.tx_busy, tx_throttled = w.tx_throttled, errors = w.errors, bus_ms = bus_ms, bus_cmds = bus_cmds);
         }
         w.stats_at = now + crate::time::ms_to_ticks(STATS_MS);
     }
@@ -148,7 +154,14 @@ pub fn poll() {
 fn send(if_type: u8, data: &[u8]) -> Result<usize, Error> {
     match Current::wlan_send(if_type, data) {
         Ok(()) => Ok(data.len()),
-        Err("busy") => Err(Error::Busy),
+        Err("busy") => {
+            w().tx_busy += 1;
+            Err(Error::Busy)
+        }
+        Err("throttled") => {
+            w().tx_throttled += 1;
+            Err(Error::Busy)
+        }
         Err("too long") => Err(Error::Size),
         Err(e) => {
             event!(Warn, "wlan.send_failed", error = e, len = data.len() as u32);

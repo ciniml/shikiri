@@ -559,7 +559,8 @@ fn split(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) {
 }
 
 /// Sends one payload on interface `if_type` (sdio_drv.c:586-770). `Err`
-/// "busy" when the C6 has no free buffer or asked to pause.
+/// "busy" when the C6 has no free buffer, "throttled" while it asked us to
+/// pause.
 pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
     let l = link();
     if !l.up {
@@ -570,7 +571,7 @@ pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
         return Err("too long");
     }
     if l.throttled {
-        return Err("busy");
+        return Err("throttled");
     }
     if l.tx_free == 0 {
         let token = read_reg(SLC_TOKEN_RDATA)?;

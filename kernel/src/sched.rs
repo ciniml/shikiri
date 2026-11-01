@@ -37,6 +37,10 @@ const NONE: u8 = 0xFF;
 /// How long core 1 sleeps at most when it has nothing to run. A process
 /// made ready elsewhere wakes it sooner (`kick_if_ready`, doc/33 §10).
 const SECONDARY_IDLE_MS: u64 = 1000;
+/// After a system call, the other core is checked for at most once per
+/// this time per core: checking after every call cost `net` about 13% of
+/// a core, and Wi-Fi went from 8.9 to 7.8 Mbps (doc/33 §12).
+const KICK_CHECK_US: u64 = 1000;
 
 /// Counters the self-test checks to see that each path was exercised.
 #[derive(Clone, Copy, Debug, Default)]
@@ -83,6 +87,8 @@ pub struct Scheduler {
     /// At the last `ps`: the time and each core's idle total (ticks), so
     /// `ps` gives the use since then (doc/31).
     pub cpu_mark: (u64, [u64; CORES]),
+    /// Per core: the earliest time of its next check after a system call.
+    kick_check_at: [u64; CORES],
     /// Per core: when its sleep began, or 0 while it is awake. `ps` counts
     /// a sleep in progress up to now, so a window gets only its own part.
     pub asleep_since: [u64; CORES],
@@ -106,6 +112,7 @@ impl Scheduler {
             next: 0,
             cpu_mark: (Current::now(), [0; CORES]),
             asleep_since: [0; CORES],
+            kick_check_at: [0; CORES],
         }
     }
 
@@ -322,8 +329,8 @@ fn run_one(this: *mut Scheduler, i: usize) {
 }
 
 /// Wakes the other core if it sleeps and a process no core runs is ready
-/// (lock held). Called when this core starts a process and after each
-/// system call, which may have given a waiting process its event.
+/// (lock held). Called when this core starts a process and after system
+/// calls (`kick_after_syscall`), which may give a waiting process its event.
 fn kick_if_ready(s: &mut Scheduler, core: usize) {
     if !smp::other_asleep() {
         return;
@@ -332,6 +339,19 @@ fn kick_if_ready(s: &mut Scheduler, core: usize) {
     if s.pick().is_some() && smp::kick() {
         s.stats.kicks[core] += 1;
     }
+}
+
+/// `kick_if_ready` after a system call, at most every `KICK_CHECK_US`.
+fn kick_after_syscall(s: &mut Scheduler, core: usize) {
+    if !smp::other_asleep() {
+        return;
+    }
+    let now = Current::now();
+    if now < s.kick_check_at[core] {
+        return;
+    }
+    s.kick_check_at[core] = now + time::ns_to_ticks(KICK_CHECK_US * 1000);
+    kick_if_ready(s, core);
 }
 
 /// Core 1's loop (doc/33 §5): runs ready processes of the published
@@ -445,7 +465,7 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
                 // ecall is always 4 bytes long.
                 p.frame.pc += 4;
                 let next = p.syscall();
-                kick_if_ready(s, core);
+                kick_after_syscall(s, core);
                 match next {
                     Next::Resume => {}
                     Next::Switch => return,
