@@ -75,6 +75,15 @@ pub fn run_user(frame: &mut TrapFrame, fs: usize) -> Trap {
     ms &= !(mstatus::MPP_MASK | mstatus::MPRV | mstatus::FS_MASK);
     ms |= mstatus::MPIE | fs;
     super::csr::write_csr!("mstatus", ms);
+    // Read both back before `mret` (doc/36): a process was seen to go on
+    // in M-mode after a system call, now and then, although MPP read back
+    // here was U. With `mcause` read as well it was seen less often. The
+    // cause is not known (the CLIC's aliased mcause.mpp, guessed). Should
+    // MPP ever not be U here, stop.
+    let (back, mc) = (read_csr!("mstatus"), read_csr!("mcause"));
+    if back & mstatus::MPP_MASK != 0 || (mc >> 28) & 3 != 0 {
+        panic!("MPP not U before mret: mstatus={:#x} mcause={:#x}", back, mc);
+    }
     unsafe { switch_to_user_asm(frame) };
     frame.trap()
 }

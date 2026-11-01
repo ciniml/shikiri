@@ -19,6 +19,9 @@
 //! | 7     | shm.start        | OFF (bottom) |
 //! | 8     | shm.end          | TOR, RW- (only with mapped shared memory,
 //! |       |                  | doc/19 §2) |
+//! | 9     | rings.start      | OFF (bottom) |
+//! | 10    | rings.end        | TOR, RW- (only with a netdev's frame rings,
+//! |       |                  | doc/35 §5) |
 
 use super::csr::{read_csr, write_csr};
 
@@ -94,6 +97,8 @@ pub struct Region {
     pub shared: Option<core::ops::Range<usize>>,
     /// Mapped shared memory (RW-).
     pub shm: Option<core::ops::Range<usize>>,
+    /// A netdev's frame rings (RW-).
+    pub rings: Option<core::ops::Range<usize>>,
 }
 
 /// Grants U-mode R-X on `text` and RW- on `data`.
@@ -122,7 +127,15 @@ pub fn set_process(r: &Region) {
         }
         None => 0,
     };
-    write_csr!("pmpcfg2", u32::from_le_bytes([shm, 0, 0, 0]) as usize);
+    let rings = match &r.rings {
+        Some(s) => {
+            write_csr!("pmpaddr9", s.start >> 2);
+            write_csr!("pmpaddr10", s.end >> 2);
+            A_TOR | R | W
+        }
+        None => 0,
+    };
+    write_csr!("pmpcfg2", u32::from_le_bytes([shm, 0, rings, 0]) as usize);
     let cfg0 = u32::from_le_bytes([0, 0, A_TOR | R | X, 0]);
     let cfg1 = u32::from_le_bytes([A_TOR | R | W, 0, shared, 0]);
     write_csr!("pmpcfg0", cfg0 as usize);

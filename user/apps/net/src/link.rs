@@ -10,9 +10,12 @@
 //! Packets for the Tab5 pass the filter's IN hook here, and packets from
 //! its stack the OUT hook (doc/24).
 
+use core::cell::Cell;
+
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
-use t5_rt::{Error, Handle, event, netdev, sleep_ms};
+use t5_rt::netdev::ring::Rings;
+use t5_rt::{Error, Handle, event, netdev, sleep_ms, yield_now};
 
 use crate::filter::{self, ANY_LINK, Action, IN, OUT};
 use crate::fwd::{self, IFACE0};
@@ -112,15 +115,24 @@ pub fn tx_frame() -> &'static mut [u8; ETH_FRAME] {
     unsafe { &mut *core::ptr::addr_of_mut!(TX_FRAME) }
 }
 
-/// A received frame: `len` bytes of `rx_frame(slot)`.
+/// A received frame: `len` bytes of `rx_frame(slot)`, or with `ring` the
+/// oldest frame of that receive ring, given back once consumed.
 pub struct Rx {
     pub slot: usize,
     pub len: usize,
+    pub ring: Option<Rings>,
 }
 
 impl RxToken for Rx {
     fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&rx_frame(self.slot)[..self.len])
+        match self.ring {
+            Some(g) => {
+                let r = f(g.rx_peek().map_or(&[][..], |b| &b[..self.len.min(b.len())]));
+                g.rx_pop();
+                r
+            }
+            None => f(&rx_frame(self.slot)[..self.len]),
+        }
     }
 }
 
@@ -197,7 +209,7 @@ impl Device for Links {
     fn receive(&mut self, _: Instant) -> Option<(Rx, LinkTx<'_>)> {
         let frame = rx_frame(RX_LINKS);
         if let Some((_, n)) = lo().pop(frame) {
-            return Some((Rx { slot: RX_LINKS, len: n }, LinkTx(self)));
+            return Some((Rx { slot: RX_LINKS, len: n, ring: None }, LinkTx(self)));
         }
         let h = self.host.as_ref()?;
         loop {
@@ -220,7 +232,7 @@ impl Device for Links {
                 continue;
             }
             match filter::check(IN, IFACE0 as u8, ANY_LINK, ip) {
-                Action::Pass => return Some((Rx { slot: RX_LINKS, len }, LinkTx(self))),
+                Action::Pass => return Some((Rx { slot: RX_LINKS, len, ring: None }, LinkTx(self))),
                 Action::Drop => {}
                 Action::Reject => {
                     fwd::rejects().push(IFACE0 as u8, ip);
@@ -256,15 +268,32 @@ pub fn from_peer() -> &'static mut Ring<TEST_RING> {
     unsafe { &mut *core::ptr::addr_of_mut!(FROM_PEER) }
 }
 
+/// Frames queued on the transmit ring before the kernel is told.
+const KICK_EVERY: u32 = 4;
+
 /// Where an Ethernet link's frames go.
 pub enum Port {
-    /// A kernel `netdev` object.
+    /// A kernel `netdev` object, through `read`/`write`.
     Dev(Handle),
+    /// A kernel `netdev` object, through its frame rings (doc/35 §5).
+    /// `unsent`: frames queued since the last `KICK`.
+    Ring { h: Handle, rings: Rings, unsent: Cell<u32> },
     /// The test LAN.
     Test,
 }
 
 impl Port {
+    /// The device's frame rings if it has them, else `read`/`write`.
+    pub fn open(h: Handle) -> Port {
+        match h.ctl(netdev::MAP_RING, 0) {
+            Ok(base) => {
+                event!(Info, "net.rings", base = t5_rt::log::Addr(base as u32));
+                Port::Ring { h, rings: Rings(base), unsent: Cell::new(0) }
+            }
+            Err(_) => Port::Dev(h),
+        }
+    }
+
     /// A frame, and whether more may be queued.
     pub fn read(&self, out: &mut [u8]) -> Option<(usize, bool)> {
         match self {
@@ -272,11 +301,43 @@ impl Port {
             // Filled by the peer within the same pass, not signalled by
             // `wait`: always looked at.
             Port::Test => from_peer().pop(out).map(|(_, n)| (n, true)),
+            Port::Ring { .. } => None,
         }
     }
 
     fn signalled(&self) -> bool {
         matches!(self, Port::Dev(_))
+    }
+
+    /// A free transmit slot of the rings, waiting while they are full.
+    /// On Core1 a `KICK` only asks Core0 to send, which frees a slot about
+    /// every 80 µs: so first a few `yield`s, then 1 ms sleeps (as `write`
+    /// does for `Busy`).
+    fn tx_slot(h: &Handle, rings: &Rings) -> Option<&'static mut [u8; netdev::ring::SLOT]> {
+        if let Some(s) = rings.tx_slot() {
+            return Some(s);
+        }
+        let _ = h.ctl(netdev::KICK, 0);
+        for i in 0..64 {
+            if let Some(s) = rings.tx_slot() {
+                return Some(s);
+            }
+            if i < 44 { yield_now() } else { sleep_ms(1) }
+        }
+        None
+    }
+
+    /// Counts a frame queued on the rings; every `KICK_EVERY` the kernel
+    /// is told at once, so the ring does not fill up within one smoltcp
+    /// pass (a TCP window is about 22 frames).
+    fn queued(h: &Handle, unsent: &Cell<u32>) {
+        let n = unsent.get() + 1;
+        if n >= KICK_EVERY {
+            let _ = h.ctl(netdev::KICK, 0);
+            unsent.set(0);
+        } else {
+            unsent.set(n);
+        }
     }
 
     /// Sends one frame; false if it was dropped.
@@ -292,13 +353,30 @@ impl Port {
                 }
                 false
             }
+            Port::Ring { h, rings, unsent } => {
+                let Some(slot) = Self::tx_slot(h, rings).filter(|_| f.len() <= netdev::ring::SLOT) else { return false };
+                slot[..f.len()].copy_from_slice(f);
+                rings.tx_push(f.len());
+                Self::queued(h, unsent);
+                true
+            }
             Port::Test => to_peer().push(0, f),
+        }
+    }
+
+    /// Has the kernel send what was queued on the rings (once per pass,
+    /// before `wait`).
+    pub fn kick(&self) {
+        if let Port::Ring { h, unsent, .. } = self
+            && unsent.replace(0) > 0
+        {
+            let _ = h.ctl(netdev::KICK, 0);
         }
     }
 
     pub fn handle(&self) -> Option<&Handle> {
         match self {
-            Port::Dev(h) => Some(h),
+            Port::Dev(h) | Port::Ring { h, .. } => Some(h),
             Port::Test => None,
         }
     }
@@ -324,11 +402,30 @@ pub struct EthTx<'a>(&'a mut EthNic);
 
 impl TxToken for EthTx<'_> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let buf = tx_frame();
-        let r = f(&mut buf[..len]);
         let nic = self.0;
+        // With rings, smoltcp builds the frame in the transmit slot.
+        let slot = match &nic.port {
+            Port::Ring { h, rings, .. } if len <= netdev::ring::SLOT => Port::tx_slot(h, rings),
+            _ => None,
+        };
+        let in_slot = slot.is_some();
+        let buf: &mut [u8] = match slot {
+            Some(s) => s,
+            None => tx_frame(),
+        };
+        let r = f(&mut buf[..len]);
         let ip = buf[12..14] == ETHERTYPE_IPV4 || buf[12..14] == ETHERTYPE_IPV6;
         if len > ETH_HDR && ip && filter::check(OUT, ANY_LINK, nic.link as u8, &buf[ETH_HDR..len]) != Action::Pass {
+            return r;
+        }
+        if let Port::Ring { h, rings, unsent } = &nic.port {
+            if in_slot {
+                rings.tx_push(len);
+                Port::queued(h, unsent);
+                nic.tx += 1;
+            } else {
+                nic.tx_dropped += 1;
+            }
             return r;
         }
         if nic.port.write(&buf[..len]) {
@@ -345,61 +442,32 @@ impl Device for EthNic {
     type TxToken<'a> = EthTx<'a>;
 
     fn receive(&mut self, _: Instant) -> Option<(Rx, EthTx<'_>)> {
-        let frame = rx_frame(RX_ETH);
         loop {
-            if !self.queued {
-                return None;
-            }
-            let Some((n, more)) = self.port.read(frame) else {
-                self.queued = !self.port.signalled();
-                return None;
+            // With rings, the frame is looked at (and changed by NAT) in
+            // its slot, which goes back once used (doc/35 §5).
+            let (frame, n, ring) = if let Port::Ring { rings, .. } = &self.port {
+                let f = rings.rx_peek()?;
+                let n = f.len();
+                (f, n, Some(*rings))
+            } else {
+                let frame = rx_frame(RX_ETH);
+                if !self.queued {
+                    return None;
+                }
+                let Some((n, more)) = self.port.read(frame) else {
+                    self.queued = !self.port.signalled();
+                    return None;
+                };
+                self.queued = more || !self.port.signalled();
+                (&mut frame[..], n, None)
             };
-            self.queued = more || !self.port.signalled();
-            self.rx += 1;
-            if n > ETH_HDR && frame[..6] == self.mac && frame[12..14] == ETHERTYPE_IPV4 && nat::inbound(&mut frame[ETH_HDR..n], self.link as u8) {
-                self.rx_unicast += 1;
-                fwd::inbox().push(self.link as u8, &frame[..n]);
+            if !self.keep(&mut frame[..n]) {
+                if let Some(g) = ring {
+                    g.rx_pop();
+                }
                 continue;
             }
-            let f = &frame[..n];
-            if f.len() < ETH_HDR {
-                continue;
-            }
-            let ethertype = [f[12], f[13]];
-            if ethertype == ETHERTYPE_ARP && f.len() >= ETH_HDR + 28 {
-                // Sender's address pair (RFC 826), for forwarding.
-                let ip = fwd::be32(&f[28..32]);
-                if ip != 0 {
-                    fwd::arp().learn(self.link, ip, f[22..28].try_into().unwrap());
-                }
-            }
-            let to_me = f[..6] == self.mac;
-            if ethertype == ETHERTYPE_IPV6 {
-                fwd6::snoop(self.link, f);
-                if to_me && fwd6::transit(&f[ETH_HDR..]) {
-                    self.rx_unicast += 1;
-                    fwd::inbox().push(self.link as u8, f);
-                    continue;
-                }
-            }
-            if to_me {
-                self.rx_unicast += 1;
-            }
-            if (ethertype == ETHERTYPE_IPV4 || ethertype == ETHERTYPE_IPV6) && (to_me || f[0] & 1 != 0) {
-                if to_me && ethertype == ETHERTYPE_IPV4 && transit(&f[ETH_HDR..], self.own) {
-                    fwd::inbox().push(self.link as u8, f);
-                    continue;
-                }
-                match filter::check(IN, self.link as u8, ANY_LINK, &f[ETH_HDR..]) {
-                    Action::Pass => {}
-                    Action::Drop => continue,
-                    Action::Reject => {
-                        fwd::rejects().push(self.link as u8, f);
-                        continue;
-                    }
-                }
-            }
-            return Some((Rx { slot: RX_ETH, len: n }, EthTx(self)));
+            return Some((Rx { slot: RX_ETH, len: n, ring }, EthTx(self)));
         }
     }
 
@@ -412,6 +480,59 @@ impl Device for EthNic {
         c.medium = Medium::Ethernet;
         c.max_transmission_unit = ETH_FRAME;
         c
+    }
+}
+
+impl EthNic {
+    /// Counts a received frame and decides where it goes: false if it was
+    /// forwarded, rejected or dropped here, true if it is for smoltcp.
+    fn keep(&mut self, frame: &mut [u8]) -> bool {
+        let n = frame.len();
+        self.rx += 1;
+        if n > ETH_HDR && frame[..6] == self.mac && frame[12..14] == ETHERTYPE_IPV4 && nat::inbound(&mut frame[ETH_HDR..n], self.link as u8) {
+            self.rx_unicast += 1;
+            fwd::inbox().push(self.link as u8, &frame[..n]);
+            return false;
+        }
+        let f = &frame[..n];
+        if f.len() < ETH_HDR {
+            return false;
+        }
+        let ethertype = [f[12], f[13]];
+        if ethertype == ETHERTYPE_ARP && f.len() >= ETH_HDR + 28 {
+            // Sender's address pair (RFC 826), for forwarding.
+            let ip = fwd::be32(&f[28..32]);
+            if ip != 0 {
+                fwd::arp().learn(self.link, ip, f[22..28].try_into().unwrap());
+            }
+        }
+        let to_me = f[..6] == self.mac;
+        if ethertype == ETHERTYPE_IPV6 {
+            fwd6::snoop(self.link, f);
+            if to_me && fwd6::transit(&f[ETH_HDR..]) {
+                self.rx_unicast += 1;
+                fwd::inbox().push(self.link as u8, f);
+                return false;
+            }
+        }
+        if to_me {
+            self.rx_unicast += 1;
+        }
+        if (ethertype == ETHERTYPE_IPV4 || ethertype == ETHERTYPE_IPV6) && (to_me || f[0] & 1 != 0) {
+            if to_me && ethertype == ETHERTYPE_IPV4 && transit(&f[ETH_HDR..], self.own) {
+                fwd::inbox().push(self.link as u8, f);
+                return false;
+            }
+            match filter::check(IN, self.link as u8, ANY_LINK, &f[ETH_HDR..]) {
+                Action::Pass => {}
+                Action::Drop => return false,
+                Action::Reject => {
+                    fwd::rejects().push(self.link as u8, f);
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 

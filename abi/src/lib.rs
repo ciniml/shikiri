@@ -25,8 +25,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// display and touch objects. Minor 8 (N0a, doc/19): service channels
 /// (`listen:`/`svc:`). Minor 9 (N0b, doc/19 §2): shared memory. Minor 10
 /// (M7c, doc/18 §3): the `sd` object. Minor 11 (N2a, doc/21): `netdev`.
-/// Minor 12 (N2b-3, doc/22): `netdev:wlan0` and `wlan:ctl`.
-pub const ABI_MINOR: u16 = 12;
+/// Minor 12 (N2b-3, doc/22): `netdev:wlan0` and `wlan:ctl`. Minor 13
+/// (doc/35 §5): `netdev`'s frame rings (`MAP_RING`, `KICK`).
+pub const ABI_MINOR: u16 = 13;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -160,6 +161,90 @@ pub mod netdev {
     /// 4-5 (little-endian; `Busy` until the Wi-Fi service has set it).
     pub const MAC_LO: usize = 1;
     pub const MAC_HI: usize = 2;
+    /// `ctl`: maps the device's frame rings (`ring`) into the caller and
+    /// returns their address; `NoSupport` where the device has none,
+    /// `NoMem` while another process has them. `read`/`write` go on
+    /// working beside them. Closing the handle unmaps them.
+    pub const MAP_RING: usize = 3;
+    /// `ctl`: frames were added to the transmit ring: send them.
+    pub const KICK: usize = 4;
+
+    /// Frame rings shared by the kernel and the process that has the
+    /// device (doc/35 §5): frames pass without `read`/`write`. Each ring
+    /// has `SLOTS` fixed slots and two free-running counters, one written
+    /// by each side; the slot of count `c` is `c % SLOTS`. Receive: the
+    /// kernel fills slots and advances `RX_HEAD`, the process takes them
+    /// and advances `RX_TAIL`. Transmit: the other way round, with
+    /// `TX_HEAD` (process) and `TX_TAIL` (kernel). A slot's length is set
+    /// before its counter moves. The kernel keeps its own counters in its
+    /// own memory and checks the process's, so a process that writes
+    /// nonsense here only loses its frames.
+    pub mod ring {
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        pub const SLOTS: u32 = 16;
+        /// Room for one frame (`ETH_FRAME` rounded up).
+        pub const SLOT: usize = 1536;
+        pub const RX_HEAD: usize = 0;
+        pub const RX_TAIL: usize = 4;
+        pub const TX_HEAD: usize = 8;
+        pub const TX_TAIL: usize = 12;
+        /// `[u32; SLOTS]`: the length of the frame in each slot.
+        pub const RX_LEN: usize = 64;
+        pub const TX_LEN: usize = RX_LEN + 4 * SLOTS as usize;
+        pub const RX_DATA: usize = 256;
+        pub const TX_DATA: usize = RX_DATA + SLOTS as usize * SLOT;
+        /// The whole area (a multiple of the PMP's 128 bytes).
+        pub const SIZE: usize = TX_DATA + SLOTS as usize * SLOT;
+
+        /// The rings at `base`, as the process sees them.
+        #[derive(Clone, Copy)]
+        pub struct Rings(pub usize);
+
+        impl Rings {
+            /// The counter or length word at `off`.
+            pub fn word(&self, off: usize) -> &AtomicU32 {
+                unsafe { &*((self.0 + off) as *const AtomicU32) }
+            }
+
+            /// Slot `i` (mod `SLOTS`) of the ring whose data is at `data`.
+            pub fn slot(&self, data: usize, i: u32) -> *mut u8 {
+                (self.0 + data + (i % SLOTS) as usize * SLOT) as *mut u8
+            }
+
+            /// The oldest received frame, until `rx_pop`.
+            pub fn rx_peek(&self) -> Option<&'static mut [u8]> {
+                let tail = self.word(RX_TAIL).load(Ordering::Relaxed);
+                if self.word(RX_HEAD).load(Ordering::Acquire) == tail {
+                    return None;
+                }
+                let len = (self.word(RX_LEN + (tail % SLOTS) as usize * 4).load(Ordering::Relaxed) as usize).min(SLOT);
+                Some(unsafe { core::slice::from_raw_parts_mut(self.slot(RX_DATA, tail), len) })
+            }
+
+            /// Gives the oldest received frame's slot back.
+            pub fn rx_pop(&self) {
+                let tail = self.word(RX_TAIL).load(Ordering::Relaxed);
+                self.word(RX_TAIL).store(tail.wrapping_add(1), Ordering::Release);
+            }
+
+            /// A free transmit slot (whole), if any; `tx_push` sends it.
+            pub fn tx_slot(&self) -> Option<&'static mut [u8; SLOT]> {
+                let head = self.word(TX_HEAD).load(Ordering::Relaxed);
+                if head.wrapping_sub(self.word(TX_TAIL).load(Ordering::Acquire)) >= SLOTS {
+                    return None;
+                }
+                Some(unsafe { &mut *(self.slot(TX_DATA, head) as *mut [u8; SLOT]) })
+            }
+
+            /// Queues the slot `tx_slot` gave with `len` bytes of frame.
+            pub fn tx_push(&self, len: usize) {
+                let head = self.word(TX_HEAD).load(Ordering::Relaxed);
+                self.word(TX_LEN + (head % SLOTS) as usize * 4).store(len as u32, Ordering::Relaxed);
+                self.word(TX_HEAD).store(head.wrapping_add(1), Ordering::Release);
+            }
+        }
+    }
 }
 
 /// The Wi-Fi chip's control path (doc/22), for the Wi-Fi service: `read`

@@ -447,6 +447,8 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadl
         smp::sync_fetch();
         smp::unlock();
         let t = trap::run_user(&mut p.frame, fs);
+        // Where the trap came from (doc/36): never M-mode for a process.
+        let from_m = crate::arch::riscv32::csr::read_csr!("mstatus") & mstatus::MPP_MASK != 0;
         smp::lock();
         let s = unsafe { &mut *this };
         if owns_fpu && fpu::dirty() {
@@ -454,6 +456,13 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadl
         }
         if p.exit().is_some() {
             // Killed from the other core while it ran.
+            return;
+        }
+        if from_m {
+            // It ran in M-mode since it was last resumed: nothing it did
+            // was checked. Stop it, and say so loudly.
+            event!(Error, "proc.mmode", pid = p.pid, core = core, entry_pc = Addr(entry_pc as u32), pc = Addr(p.frame.pc as u32), mcause = p.frame.mcause);
+            p.state = State::Exited(Exit::Fault { code: p.frame.mcause & cause::CODE_MASK, pc: p.frame.pc, tval: p.frame.mtval });
             return;
         }
         match t {

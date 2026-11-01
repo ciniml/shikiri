@@ -312,6 +312,13 @@ impl Table {
             .is_some_and(|s| matches!(s, Some(Handle { object: Object::Display(_), .. })))
     }
 
+    /// Whether `h` is `netdev:wlan0`.
+    pub fn is_wlan_dev(&self, h: usize) -> bool {
+        h.checked_sub(1)
+            .and_then(|i| self.slots.get(i))
+            .is_some_and(|s| matches!(s, Some(Handle { object: Object::WlanDev(_), .. })))
+    }
+
     /// Whether any handle is the display.
     pub fn has_display(&self) -> bool {
         self.slots.iter().flatten().any(|s| matches!(s.object, Object::Display(_)))

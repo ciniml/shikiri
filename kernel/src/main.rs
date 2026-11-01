@@ -165,6 +165,11 @@ pub extern "C" fn kmain() -> ! {
             let shm_base = window + size - FB_RESERVE - SHM_RESERVE;
             set_pool(window..shm_base);
             shm::init(shm_base, SHM_RESERVE);
+            // The L2MEM pool apps used before is free now: the Wi-Fi
+            // frame rings (doc/35 §5).
+            if Current::APP_POOL.len() >= t5_abi::netdev::ring::SIZE {
+                wlan::set_ring_area(Current::APP_POOL.start);
+            }
             Some(window + size - FB_RESERVE)
         }
         Ok((window, size)) => {

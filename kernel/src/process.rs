@@ -31,6 +31,8 @@ pub struct Process {
     pub pending: Option<(u64, u16)>,
     /// The `shm` handle whose window is mapped, if any.
     shm_mapped: Option<usize>,
+    /// The `netdev` handle whose frame rings are mapped, if any.
+    ring_mapped: Option<usize>,
     /// Time (ticks) in its slices, the kernel's work on its system calls
     /// included, and the total at the last `ps` (doc/31).
     pub cpu: u64,
@@ -92,6 +94,7 @@ impl Process {
             xip_extents: None,
             pending: None,
             shm_mapped: None,
+            ring_mapped: None,
             cpu: 0,
             cpu_mark: 0,
         }
@@ -164,6 +167,11 @@ impl Process {
                     self.region.shm = None;
                     pmp::set_process(&self.region);
                 }
+                if self.ring_mapped == Some(a0) {
+                    self.ring_mapped = None;
+                    self.region.rings = None;
+                    pmp::set_process(&self.region);
+                }
                 let r = self.handles.close(a0);
                 if self.region.shared.is_some() && !self.handles.has_display() {
                     self.region.shared = None;
@@ -181,6 +189,16 @@ impl Process {
                 self.handles.take_shm(a0).map(|h| [h, 0, 0])
             }
             sys::CTL if a1 == t5_abi::shm::MAP && self.handles.is_shm(a0) => self.map_shm(a0).map(|v| [v, 0, 0]),
+            sys::CTL if a1 == t5_abi::netdev::MAP_RING && self.handles.is_wlan_dev(a0) => {
+                self.handles.ctl(a0, a1, 0).map(|base| {
+                    // The rings are the process's until it closes the
+                    // handle (doc/35 §5).
+                    self.region.rings = Some(base..base + t5_abi::netdev::ring::SIZE);
+                    self.ring_mapped = Some(a0);
+                    pmp::set_process(&self.region);
+                    [base, 0, 0]
+                })
+            }
             sys::CTL => {
                 let r = self.handles.ctl(a0, a1, ((a3 as u64) << 32) | a2 as u64);
                 if let Ok(fb) = r
@@ -266,8 +284,8 @@ impl Process {
         Ok(addr)
     }
 
-    /// `read`/`write` through a kernel buffer: the user range is checked,
-    /// then copied in (write) or out (read).
+    /// `read`/`write`: the user range is checked, then the object copies to
+    /// or from it.
     /// `read` or `write` through the kernel buffer: [bytes, still queued
     /// (`read` of a device that queues frames, else 0), 0].
     fn io(&mut self, h: usize, ptr: usize, len: usize, write: bool) -> Result<[usize; 3], Error> {

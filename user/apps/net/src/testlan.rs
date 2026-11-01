@@ -64,7 +64,7 @@ impl Device for PeerDev {
 
     fn receive(&mut self, _: Instant) -> Option<(Rx, PeerTx)> {
         let len = to_peer().pop(rx_frame(RX_PEER))?.1;
-        Some((Rx { slot: RX_PEER, len }, PeerTx))
+        Some((Rx { slot: RX_PEER, len, ring: None }, PeerTx))
     }
 
     fn transmit(&mut self, _: Instant) -> Option<PeerTx> {

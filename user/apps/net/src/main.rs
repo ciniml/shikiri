@@ -323,7 +323,7 @@ fn open_wifi() -> Option<EthLink> {
         event!(Warn, "net.no_wifi_mac");
         return None;
     };
-    let mut l = EthLink::new(WLAN, Port::Dev(h), mac, true);
+    let mut l = EthLink::new(WLAN, Port::open(h), mac, true);
     l.dhcp = Some(l.sockets.add(dhcpv4::Socket::new()));
     event!(Info, "net.link", link = "wlan0", addr = "dhcp", mtu = netdev::MTU as u32);
     Some(l)
@@ -1229,6 +1229,9 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
                 who[n] = i;
                 n += 1;
             }
+        }
+        for e in stack.eth.iter().flatten() {
+            e.dev.port.kick();
         }
         tick();
         let delay = stack.poll_delay();

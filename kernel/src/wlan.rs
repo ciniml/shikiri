@@ -7,6 +7,9 @@
 //! The chip is started by the first `wlan:ctl` open and then read from the
 //! scheduler loop (`poll`) while either object is open.
 
+use core::sync::atomic::Ordering;
+
+use t5_abi::netdev::ring::{self, Rings};
 use t5_abi::{Error, event, netdev, wlan};
 
 use crate::platform::{Current, Platform};
@@ -83,6 +86,69 @@ impl<const N: usize, const S: usize> Queue<N, S> {
     }
 }
 
+/// `netdev:wlan0`'s frame rings while a process has them mapped (doc/35
+/// §5). The kernel's counters live here, in its own memory; the process's
+/// (`RX_TAIL`, `TX_HEAD`) and the lengths it writes are read once and
+/// checked. Only station frames are copied in: the chip's other packets
+/// (the Wi-Fi service's) never reach the shared memory.
+struct KRings {
+    at: Rings,
+    rx_head: u32,
+    tx_tail: u32,
+    rx_dropped: u32,
+}
+
+impl KRings {
+    /// Copies a received frame into the next free slot; false if none is
+    /// (or the process's counter makes no sense).
+    fn rx_push(&mut self, f: &[u8]) -> bool {
+        let tail = self.at.word(ring::RX_TAIL).load(Ordering::Acquire);
+        if f.len() > ring::SLOT || self.rx_head.wrapping_sub(tail) >= ring::SLOTS {
+            self.rx_dropped += 1;
+            return false;
+        }
+        let i = self.rx_head;
+        unsafe { core::ptr::copy_nonoverlapping(f.as_ptr(), self.at.slot(ring::RX_DATA, i), f.len()) };
+        self.at.word(ring::RX_LEN + (i % ring::SLOTS) as usize * 4).store(f.len() as u32, Ordering::Relaxed);
+        self.rx_head = i.wrapping_add(1);
+        self.at.word(ring::RX_HEAD).store(self.rx_head, Ordering::Release);
+        true
+    }
+
+    /// Received frames the process has not taken.
+    fn rx_waiting(&self) -> usize {
+        let n = self.rx_head.wrapping_sub(self.at.word(ring::RX_TAIL).load(Ordering::Acquire));
+        n.min(ring::SLOTS) as usize
+    }
+
+    /// The oldest frame to send, left in place. The process may change
+    /// the slot meanwhile; that garbles only its own frame.
+    fn tx_front(&self) -> Option<&[u8]> {
+        let head = self.at.word(ring::TX_HEAD).load(Ordering::Acquire);
+        let n = head.wrapping_sub(self.tx_tail);
+        if n == 0 || n > ring::SLOTS {
+            return None;
+        }
+        let len = self.at.word(ring::TX_LEN + (self.tx_tail % ring::SLOTS) as usize * 4).load(Ordering::Relaxed) as usize;
+        Some(unsafe { core::slice::from_raw_parts(self.at.slot(ring::TX_DATA, self.tx_tail), len.min(ring::SLOT)) })
+    }
+
+    fn tx_drop_front(&mut self) {
+        self.tx_tail = self.tx_tail.wrapping_add(1);
+        self.at.word(ring::TX_TAIL).store(self.tx_tail, Ordering::Release);
+    }
+}
+
+/// Where the rings go: set at boot when there is room (`set_ring_area`).
+static mut RING_AREA: Option<usize> = None;
+
+/// Memory for `netdev:wlan0`'s rings (`ring::SIZE` bytes at `base`), which
+/// no process may otherwise reach.
+pub fn set_ring_area(base: usize) {
+    unsafe { RING_AREA = Some(base) };
+    event!(Info, "wlan.ring_area", base = t5_abi::log::Addr(base as u32), size = ring::SIZE as u32);
+}
+
 struct Wlan {
     up: bool,
     ctl_open: bool,
@@ -103,6 +169,7 @@ struct Wlan {
     tx_throttled: u32,
     /// When to log the counters next (ticks).
     stats_at: u64,
+    rings: Option<KRings>,
 }
 
 static mut WLAN: Wlan = Wlan {
@@ -120,6 +187,7 @@ static mut WLAN: Wlan = Wlan {
     tx_busy: 0,
     tx_throttled: 0,
     stats_at: 0,
+    rings: None,
 };
 
 fn w() -> &'static mut Wlan {
@@ -130,7 +198,7 @@ fn w() -> &'static mut Wlan {
 /// frames wait to be sent.
 pub fn pending() -> bool {
     let w = w();
-    w.up && (w.ctl_open || w.dev_open) && (Current::wlan_pending() || w.tx.count > 0)
+    w.up && (w.ctl_open || w.dev_open) && (Current::wlan_pending() || w.tx.count > 0 || w.rings.as_ref().is_some_and(|r| r.tx_front().is_some()))
 }
 
 /// Sends the queued frames, oldest first, until the chip takes no more
@@ -146,6 +214,17 @@ pub fn flush_tx() {
         }
         w.tx.drop_front();
     }
+    // Then the transmit ring.
+    let Some(r) = w.rings.as_mut() else { return };
+    while let Some(f) = r.tx_front() {
+        let sent = if f.len() > netdev::ETH_FRAME || f.is_empty() { Err(Error::Size) } else { send(IF_STA, f) };
+        match sent {
+            Ok(_) => w.sta_tx += 1,
+            Err(Error::Busy) => return,
+            Err(_) => w.tx.dropped += 1,
+        }
+        r.tx_drop_front();
+    }
 }
 
 /// Reads what the chip has sent (from the scheduler loop).
@@ -155,7 +234,7 @@ pub fn poll() {
         return;
     }
     flush_tx();
-    let (ctl, sta, dev_open) = (&mut w.ctl, &mut w.sta, w.dev_open);
+    let (ctl, sta, dev_open, rings) = (&mut w.ctl, &mut w.sta, w.dev_open, &mut w.rings);
     let (mut other, mut sta_rx) = (0, 0);
     let r = Current::wlan_poll(&mut |if_type, p| match if_type {
         IF_SERIAL => ctl.push(p),
@@ -164,7 +243,9 @@ pub fn poll() {
                 event!(Debug, "wlan.sta_rx", len = p.len() as u32, open = dev_open, head = &p[..p.len().min(48)]);
             }
             sta_rx += 1;
-            if dev_open {
+            if let Some(r) = rings.as_mut() {
+                r.rx_push(p);
+            } else if dev_open {
                 sta.push(p);
             }
         }
@@ -327,17 +408,38 @@ impl WlanDev {
     }
 
     pub fn ctl(&mut self, op: usize, _arg: u64) -> Result<usize, Error> {
-        let mac = w().mac;
+        let w = w();
+        let mac = w.mac;
         match op {
             _ if mac == 0 && (op == netdev::MAC_LO || op == netdev::MAC_HI) => Err(Error::Busy),
             netdev::MAC_LO => Ok(mac as u32 as usize),
             netdev::MAC_HI => Ok((mac >> 32) as usize),
+            netdev::MAP_RING => {
+                let base = unsafe { RING_AREA }.ok_or(Error::NoSupport)?;
+                if w.rings.is_none() {
+                    // Nothing an earlier owner left may show.
+                    unsafe { core::ptr::write_bytes(base as *mut u8, 0, ring::SIZE) };
+                    w.rings = Some(KRings { at: Rings(base), rx_head: 0, tx_tail: 0, rx_dropped: 0 });
+                    event!(Info, "wlan.rings_mapped", base = t5_abi::log::Addr(base as u32));
+                }
+                Ok(base)
+            }
+            netdev::KICK => {
+                if crate::smp::two_cores() && crate::smp::hartid() & 1 == 1 {
+                    // Core 0 sends them, as `write`'s queue.
+                    Current::ipi_send(0);
+                } else {
+                    flush_tx();
+                }
+                Ok(0)
+            }
             _ => Err(Error::NoSupport),
         }
     }
 
     pub fn poll(&self) -> Option<(usize, usize)> {
-        let n = w().sta.count;
+        let w = w();
+        let n = w.rings.as_ref().map_or(w.sta.count, KRings::rx_waiting);
         (n > 0).then_some((netdev::READABLE, n))
     }
 }
@@ -347,6 +449,7 @@ impl Drop for WlanDev {
         let w = w();
         w.dev_open = false;
         w.tx.clear();
-        event!(Info, "wlan.dev_closed", rx = w.sta_rx, tx = w.sta_tx, dropped = w.sta.dropped, tx_dropped = w.tx.dropped);
+        let ring_dropped = w.rings.take().map_or(0, |r| r.rx_dropped);
+        event!(Info, "wlan.dev_closed", rx = w.sta_rx, tx = w.sta_tx, dropped = w.sta.dropped + ring_dropped, tx_dropped = w.tx.dropped);
     }
 }
