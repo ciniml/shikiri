@@ -27,6 +27,7 @@
   - Zcmp/Zcmt はビルド対象から外されている（`components/soc/project_include.cmake:44-57`）。
 - **ESP-IDF 2nd stage bootloader 経由で起動すると、PMP/PMA の一部エントリがロック済みで渡される**（§3.4 参照）。ロック済みエントリは U モードにも同じ権限を与えるので、**CLIC/CLINT 領域（0x2000_0000–）と CPU 周辺 (0x3FF0_0000–) に U モードから RW できる状態が固定される**おそれがあります。`CONFIG_BOOTLOADER_REGION_PROTECTION_ENABLE=n` にするか、自前のブートローダを使う必要があります（要実機確認）。
 - **ネストした例外は CPU を lock-up させる**: トラップハンドラの中（MRET 前）でさらに例外が起きると CPU が停止します。例外は ecall/ebreak だけです（TRM §2.13.5 p.178; mexstatus.EXPT_VLD/LOCKUP, Reg 2.67 p.106）。カーネルのトラップ入口では、スタック切り替えなどで絶対に fault しないことが必須です。
+- **実機で見つけた注意: デバッガがハートを止めて再開すると、`mret` の後もプロセスが M モードのまま動くことがある**（Tab5、v1.x、2026-11-01）。カーネルが U へ `mret` するあたりで止まったときに起きた。`mret` の直前の `mstatus.MPP` は U だった。デバッガをつないでいなければ起きない。仕組みは未確認で、TRM にも書かれていない。そのため、デバッガで止めた後のふるまいでは隔離を信用しない。カーネルは `mret` の前に MPP を確かめ、プロセスからのトラップでは MPP を見て M なら止める（doc/36）。
 - **ESP32-C3 の「特権分離」は ESP Privilege Separation（2022, Beta、C3/S3 対象）でした。学会論文や arXiv は見つかっていません**（§7）。この実装は **RISC-V の U モードではなく、C3 独自の World Controller（World0/World1）+ PMS** で分離しています。user_app も CPU の M モードで動き、syscall は M モードからの ecall（mcause=11）です。C3 の PMP は 16 領域で優先順位がなく、DMA も守れないことを、C3 の TRM 自身が PMS を必要とする理由として挙げています。**P4 には World Controller がない**ので、P4 では本物の U モード + PMP（+ APM の UM ビット）で組むことになります。syscall テーブルの自動生成、タスクごとのカーネルスタック、user ISR のディスパッチャタスクでの遅延実行、VFS 風のドライバ公開、esp_image 形式の user イメージを単体で OTA/再起動する、といった設計要素は流用できます。v1.x の 16 エントリでも「カーネル + 1 アプリ」の構成は成り立つ見込みです（推測）。
 - **参考実装**: ESP-TEE（`components/esp_tee`）は「TEE = M モード、REE = U モード」を ecall で切り替える実在の実装です。ただし対象は **C6/H2/C5/C61 だけで、P4 には対応していません**（IDF6/IDFm `components/esp_tee/Kconfig.projbuild:2`、`subproject/main/soc/` に esp32p4 がない）。CLIC 版のベクタ (`esp_tee_vectors_clic.S`) は C5 用ですが、P4 v3.x の設計とほぼ同じ構造なので参考になります。
 
@@ -304,6 +305,14 @@ ESP-TEE の実装もこの流れで、ハンドラ先頭で mcause を 8 (U ecal
 - action=0 ならブレークポイント例外（mcause=3）。`tcontrol.mte/mpte` で M モードのトラップ中の再発火を抑止します（§2.11.3.3–2.11.3.4 p.161–162; Reg 2.130 p.165）。デバッガでユーザアプリをデバッグするなら、コンテキストスイッチ時にトリガ設定を切り替える必要があります（推測）。
 - dcsr/dpc/dscratch は Debug Mode からしかアクセスできません（p.73）。
 - JTAG: HP 用と LP 用の DTM がデイジーチェーンでつながっています。HP コアと LP コアを同時にはデバッグできません（§2.11.1.1 p.152）。デバッガのシステムバスアクセス (SBA) は Core0 のデータバス経由です（p.70）。PMP をロックするとデバッガのメモリ書き込みも制限されます（IDF が OCD 接続時に SRAM を RWX にするのはそのため, `cpu_region_protect.c:127-133`）。
+- **デバッガの停止と `mret`（実機、doc/36）**: probe-rs がハートを止めて再開すると、カーネルがプロセスへ `mret` した後もプロセスが M モードで動くことがあった。`mcause`=0x3800000B（M モードからの `ecall`、MPP=3）で見つかる。PMP はロックしていないので、その間 M モードのプロセスには効かない。
+  - 止めていたのは次の 3 つ（いずれも probe-rs）:
+    - `Core` を作るとき（`misa` と `dcsr`）
+    - 8/16 ビットのメモリアクセス（v1.x ではプログラムバッファを使う）
+    - `Session` を捨てるとき
+  - デバッガをつながずに 60 回の echo を流しても起きなかった。
+  - 推測: 例外の処理中（EXPT_VLD、§5.2）に停止要求を受けたときの `dcsr.prv`/`dpc` の扱いが関係している。
+  - 対策: RTT はハートを止めずに読む（`t5log rtt`）。止める使い方（`t5log status`、probe-rs の CLI、GDB）をした後は、再起動するまで隔離を信用しない。
 
 ---
 
@@ -472,6 +481,7 @@ ESP-TEE の実装もこの流れで、ハンドラ先頭で mcause を 8 (U ecal
 - [ ] ROM / ブートローダが pma_cfg・pmpcfg をロックした状態でカーネルに制御を渡すか（`CONFIG_BOOTLOADER_REGION_PROTECTION_ENABLE=n` の効果を含めて）。
 - [ ] mscratchcsw/mscratchcswl が v1.x にあるか。
 - [ ] ミスアラインのロード/ストアの扱い（mcause 4 が存在しない）。→ **一部確認（11 §2.3）**: PMP で禁止された領域へのミスアラインのストアは 7（アクセスフォールト）になった（6 ではない）。ハードウェアがミスアラインを処理するという推測と矛盾しない。PMP の境界をまたぐミスアラインアクセスの挙動（C6/H2 には `SOC_CPU_MISALIGNED_ACCESS_ON_PMP_MISMATCH_ISSUE` があるが、P4 には定義なし）。
+- [ ] デバッガの停止・再開の後、`mret` しても U モードに入らないことがある仕組み（§5.4、doc/36）。再現は doc/36 §2。Espressif に問い合わせる候補。v3.x でも起きるか。
 - [ ] U モードから fxcr / cpu_gpio_* / jvt / uhwloop* / hpmcounter にアクセスできるか（CSR の特権チェック）。
 - [ ] CLINT の mtime のクロック周波数と、`time` CSR の源。
 - [ ] clicintattr.MODE が書き込み可能か（TRM は R/W、IDF ヘッダは RO 固定）。
