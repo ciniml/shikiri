@@ -83,6 +83,9 @@ pub struct Scheduler {
     /// At the last `ps`: the time and each core's idle total (ticks), so
     /// `ps` gives the use since then (doc/31).
     pub cpu_mark: (u64, [u64; CORES]),
+    /// Per core: when its sleep began, or 0 while it is awake. `ps` counts
+    /// a sleep in progress up to now, so a window gets only its own part.
+    pub asleep_since: [u64; CORES],
 }
 
 /// The scheduler core 0 is running, for core 1 (null: none).
@@ -102,6 +105,7 @@ impl Scheduler {
             stats: Stats::default(),
             next: 0,
             cpu_mark: (Current::now(), [0; CORES]),
+            asleep_since: [0; CORES],
         }
     }
 
@@ -134,6 +138,24 @@ impl Scheduler {
             if self.on_core[i] == NONE && self.slots[i].as_ref().is_some_and(|p| p.exit().is_some()) {
                 self.slots[i] = None;
             }
+        }
+    }
+
+    /// Counts the sleeps in progress up to `now` (`ps`).
+    pub fn settle_idle(&mut self, now: u64) {
+        for c in 0..CORES {
+            if self.asleep_since[c] != 0 {
+                self.stats.idle_ticks[c] += now.saturating_sub(self.asleep_since[c]);
+                self.asleep_since[c] = now;
+            }
+        }
+    }
+
+    /// Ends this core's sleep in the counts.
+    fn woke(&mut self, core: usize) {
+        let since = core::mem::take(&mut self.asleep_since[core]);
+        if since != 0 {
+            self.stats.idle_ticks[core] += Current::now().saturating_sub(since);
         }
     }
 
@@ -256,10 +278,10 @@ pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mu
 /// Sleeps with the lock let go (the alarm is set), counting the time.
 fn sleep(this: *mut Scheduler) {
     let core = smp::hartid() & 1;
-    let asleep = Current::now();
+    unsafe { (*this).asleep_since[core] = Current::now() };
     smp::idle();
     let s = unsafe { &mut *this };
-    s.stats.idle_ticks[core] += Current::now() - asleep;
+    s.woke(core);
     s.stats.idle_waits += 1;
     Current::clear_alarm();
 }
@@ -344,12 +366,16 @@ pub fn run_secondary() -> ! {
             }
             None => {
                 Current::set_alarm(wake);
-                let asleep = Current::now();
+                if !this.is_null() {
+                    unsafe { (*this).asleep_since[1] = Current::now() };
+                }
                 smp::idle();
                 Current::clear_alarm();
-                let this = ACTIVE.load(Ordering::Acquire);
-                if !this.is_null() {
-                    unsafe { (*this).stats.idle_ticks[1] += Current::now() - asleep };
+                // Only if the same scheduler is still published (the
+                // self-test makes a new one per case; a new one has 0).
+                let now_active = ACTIVE.load(Ordering::Acquire);
+                if !this.is_null() && now_active == this {
+                    unsafe { (*this).woke(1) };
                 }
             }
         }

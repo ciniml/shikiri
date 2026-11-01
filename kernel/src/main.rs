@@ -380,6 +380,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             // CPU use since the last `ps` (doc/31), in per mille.
             let now = Current::now();
             let window = (now - s.cpu_mark.0).max(1);
+            s.settle_idle(now);
             let pm = |t: u64| (t * 1000 / window) as u32;
             let mut procs = 0u64;
             let mut n = 0;
