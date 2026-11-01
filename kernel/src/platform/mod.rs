@@ -27,6 +27,8 @@ pub trait Platform {
     const TIMER_HZ: u64;
     /// mcause exception code of the alarm interrupt.
     const TIMER_IRQ: usize;
+    /// mcause code of the interrupt from the other core (doc/33 §10).
+    const IPI_IRQ: usize = usize::MAX;
 
     /// Early hardware setup: watchdogs, console, the timer and its interrupt.
     /// Interrupts stay globally disabled in M-mode (MIE=0).
@@ -37,6 +39,10 @@ pub trait Platform {
     }
     /// The second core's own setup (its interrupt controller), on it.
     fn init_secondary() {}
+    /// Raises the interrupt from the other core (`IPI_IRQ`) on `hart`.
+    fn ipi_send(_hart: usize) {}
+    /// Clears this core's interrupt from the other core.
+    fn ipi_clear() {}
     /// Raw byte output for log frames (doc/12 §2.4). Never blocks for long.
     /// Returns false if some bytes were dropped (no reader).
     fn console_write(bytes: &[u8]) -> bool;

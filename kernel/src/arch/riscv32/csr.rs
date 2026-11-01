@@ -32,6 +32,7 @@ pub mod mstatus {
 /// Machine interrupt-enable bits (standard `mie`; unused in CLIC mode).
 #[allow(dead_code)]
 pub mod mie {
+    pub const MSIE: usize = 1 << 3;
     pub const MTIE: usize = 1 << 7;
 }
 

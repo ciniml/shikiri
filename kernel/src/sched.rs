@@ -34,9 +34,9 @@ pub const SLICE_MS: u64 = 10;
 pub const CORES: usize = 2;
 /// `on_core` value of a process no core is running.
 const NONE: u8 = 0xFF;
-/// How long core 1 sleeps at most when it has nothing to run (it is not
-/// woken when core 0 makes a process ready; doc/33 §5).
-const SECONDARY_IDLE_MS: u64 = 10;
+/// How long core 1 sleeps at most when it has nothing to run. A process
+/// made ready elsewhere wakes it sooner (`kick_if_ready`, doc/33 §10).
+const SECONDARY_IDLE_MS: u64 = 1000;
 
 /// Counters the self-test checks to see that each path was exercised.
 #[derive(Clone, Copy, Debug, Default)]
@@ -51,6 +51,11 @@ pub struct Stats {
     pub slices: [u32; CORES],
     /// Timer interrupts before the alarm time, per core (doc/33 §8).
     pub spurious: [u32; CORES],
+    /// Interrupts each core sent to wake the other (doc/33 §10).
+    pub kicks: [u32; CORES],
+    /// Interrupts from the other core each core took while running a
+    /// process (a kick that came late, or `smp::quiesce`).
+    pub ipis: [u32; CORES],
 }
 
 /// A core's FPU registers: whose state they hold (see `arch::riscv32::fpu`).
@@ -234,7 +239,17 @@ pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mu
     Current::clear_alarm();
     if limit.is_some() {
         let st = unsafe { (*this).stats };
-        event!(Debug, "sched.done", slices0 = st.slices[0], slices1 = st.slices[1], preemptions = st.preemptions);
+        event!(
+            Debug,
+            "sched.done",
+            slices0 = st.slices[0],
+            slices1 = st.slices[1],
+            preemptions = st.preemptions,
+            kicks0 = st.kicks[0],
+            kicks1 = st.kicks[1],
+            ipis0 = st.ipis[0],
+            ipis1 = st.ipis[1]
+        );
     }
 }
 
@@ -258,7 +273,12 @@ fn run_one(this: *mut Scheduler, i: usize) {
         s.slots[i].as_mut().unwrap()
     };
     let start = Current::now();
-    unsafe { (*this).stats.slices[core] += 1 };
+    {
+        let s = unsafe { &mut *this };
+        s.stats.slices[core] += 1;
+        // Another ready process for the other core, if it sleeps.
+        kick_if_ready(s, core);
+    }
     run_slice(this, p, i, core);
     let s = unsafe { &mut *this };
     let p = unsafe { &mut *p };
@@ -279,8 +299,22 @@ fn run_one(this: *mut Scheduler, i: usize) {
     }
 }
 
+/// Wakes the other core if it sleeps and a process no core runs is ready
+/// (lock held). Called when this core starts a process and after each
+/// system call, which may have given a waiting process its event.
+fn kick_if_ready(s: &mut Scheduler, core: usize) {
+    if !smp::other_asleep() {
+        return;
+    }
+    s.wake(Current::now(), u64::MAX);
+    if s.pick().is_some() && smp::kick() {
+        s.stats.kicks[core] += 1;
+    }
+}
+
 /// Core 1's loop (doc/33 §5): runs ready processes of the published
-/// scheduler; sleeps `SECONDARY_IDLE_MS` when there are none.
+/// scheduler; sleeps when there are none until a wake-up, a kick from core
+/// 0 or `SECONDARY_IDLE_MS`.
 pub fn run_secondary() -> ! {
     loop {
         let this = ACTIVE.load(Ordering::Acquire);
@@ -352,6 +386,7 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
             let owns = s.fpu[core].owner == Some(i);
             (owns, if owns { mstatus::FS_CLEAN } else { mstatus::FS_OFF })
         };
+        smp::sync_fetch();
         smp::unlock();
         let t = trap::run_user(&mut p.frame, fs);
         smp::lock();
@@ -372,12 +407,20 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize) {
                 s.stats.preemptions += 1;
                 return;
             }
+            // The process goes on; a quiesce was over once the lock was
+            // taken above.
+            Trap::Interrupt { code } if code == Current::IPI_IRQ => {
+                Current::ipi_clear();
+                s.stats.ipis[core] += 1;
+            }
             Trap::Interrupt { code } if Current::handle_irq(code) => {}
             Trap::Interrupt { code } => panic!("unexpected interrupt {code}"),
             Trap::Syscall => {
                 // ecall is always 4 bytes long.
                 p.frame.pc += 4;
-                match p.syscall() {
+                let next = p.syscall();
+                kick_if_ready(s, core);
+                match next {
                     Next::Resume => {}
                     Next::Switch => return,
                 }

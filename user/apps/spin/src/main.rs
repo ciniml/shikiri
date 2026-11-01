@@ -8,6 +8,11 @@
 //!
 //! Exit 1: FP registers changed. Exit 2: never saw a gap in time, i.e. was
 //! never preempted.
+//!
+//! With `BURN` set in `id`, it makes no system call while it spins (it
+//! counts `duration_ms` × `BURN_PER_MS` loop rounds instead of reading the
+//! time), so the core stays in U-mode until an interrupt comes: another
+//! core's flash work has to stop it (SMP S3, doc/33 §10). No gap check.
 
 use t5_rt::{event, time_ns};
 
@@ -15,6 +20,9 @@ t5_rt::entry!(main);
 
 /// A jump in `time_ns()` this large means another process ran in between.
 const GAP_NS: u64 = 2_000_000;
+const BURN: usize = 0x100;
+/// Loop rounds per "millisecond" in `BURN` mode (rough, at 360 MHz).
+const BURN_PER_MS: u32 = 100_000;
 
 fn main(id: usize, duration_ms: usize) -> usize {
     let mut want = [0u32; 32];
@@ -24,6 +32,16 @@ fn main(id: usize, duration_ms: usize) -> usize {
     let mut got = [0u32; 32];
 
     unsafe { load_fregs(&want) };
+    if id & BURN != 0 {
+        let mut n = 0u32;
+        while n < duration_ms as u32 * BURN_PER_MS {
+            n = core::hint::black_box(n + 1);
+        }
+        unsafe { store_fregs(&mut got) };
+        let bad = want.iter().zip(got.iter()).filter(|(w, g)| w != g).count();
+        event!(Info, "spin.done", id = id, iterations = n, gaps = 0u32, fp_mismatches = bad);
+        return (bad != 0) as usize;
+    }
     let start = time_ns();
     let mut last = start;
     let mut gaps = 0u32;

@@ -168,6 +168,7 @@ pub unsafe fn load(bytes: &'static [u8], slot: &Slot) -> Result<Loaded, LoadErro
     if info.xip_data.is_none() {
         <Current as Platform>::sync_code(text, data_end - text);
     }
+    crate::smp::code_changed();
 
     Ok(Loaded {
         name: info.name,

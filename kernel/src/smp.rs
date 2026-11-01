@@ -10,6 +10,11 @@
 //!   `WAITING` set: before a flash or MMU operation suspends the cache that
 //!   kernel text and process memory are read through (doc/14 §5), core 0,
 //!   which holds the lock then, waits until core 1 is there (`quiesce`).
+//! - S3 (doc/33 §10): an interrupt from the other core (IPI) wakes a
+//!   sleeping core when a process is ready for it (`kick`), and brings a
+//!   core running a process into the lock wait before a flash or MMU
+//!   operation (`quiesce`). After new code is loaded, each core runs
+//!   `fence.i` before its next process (`sync_fetch`).
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -38,6 +43,12 @@ static SERVING: AtomicU32 = AtomicU32::new(0);
 static WAITING: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 /// Whether core 1 runs (and so takes part in locking).
 static TWO_CORES: AtomicU32 = AtomicU32::new(0);
+/// Per hart: it sleeps in `idle` (set and cleared with the lock held, so
+/// a core holding the lock sees it exactly).
+static ASLEEP: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+/// Bumped when code was loaded; per hart, the value at its last `fence.i`.
+static CODE_GEN: AtomicU32 = AtomicU32::new(0);
+static FETCH_GEN: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 
 unsafe extern "C" {
     fn _start_secondary();
@@ -104,16 +115,23 @@ fn take() {
 }
 
 /// Lets go of the lock, sleeps until an interrupt is pending (the alarm the
-/// caller has set), and takes the lock again; all in RAM.
+/// caller has set, or `kick` from the other core), and takes the lock
+/// again; all in RAM. A kick sent before the `wfi` stays pending, so it is
+/// not lost.
 #[unsafe(link_section = ".ram_text")]
 #[inline(never)]
 pub fn idle() {
     let me = hartid() & 1;
     WAITING[me].store(1, Ordering::Release);
+    ASLEEP[me].store(1, Ordering::Relaxed);
     SERVING.store(SERVING.load(Ordering::Relaxed).wrapping_add(1), Ordering::Release);
     unsafe { core::arch::asm!("wfi") };
     take();
+    ASLEEP[me].store(0, Ordering::Relaxed);
     WAITING[me].store(0, Ordering::Relaxed);
+    // The lock is held, so no flash operation runs: flash code is fine.
+    // Cleared before the caller looks for work, so a later kick is seen.
+    Current::ipi_clear();
 }
 
 /// Lets the other core have the lock if it waits for it (a ticket lock
@@ -123,16 +141,35 @@ pub fn pause() {
     lock();
 }
 
+/// Whether the other core sleeps in `idle` (lock held).
+pub fn other_asleep() -> bool {
+    TWO_CORES.load(Ordering::Acquire) != 0 && ASLEEP[1 - (hartid() & 1)].load(Ordering::Relaxed) != 0
+}
+
+/// Wakes the other core if it sleeps (lock held): it has a process to run.
+/// Whether an interrupt was sent.
+pub fn kick() -> bool {
+    if !other_asleep() {
+        return false;
+    }
+    Current::ipi_send(1 - (hartid() & 1));
+    true
+}
+
 /// Called with the lock held, before the cache is suspended (flash and MMU
-/// operations): waits until the other core is in RAM, waiting for the lock
-/// or asleep. It cannot leave while the lock is held. False if it did not
-/// get there in 100 ms (logged).
+/// operations): brings the other core into RAM, waiting for the lock or
+/// asleep. A core running a process is interrupted (the IPI); it then waits
+/// for the lock, which it cannot get while this core holds it. False if it
+/// did not get there in 100 ms (logged).
 #[allow(dead_code)] // Only the P4 suspends its cache.
 pub fn quiesce() -> bool {
     if TWO_CORES.load(Ordering::Acquire) == 0 {
         return true;
     }
     let other = 1 - (hartid() & 1);
+    if WAITING[other].load(Ordering::Acquire) == 0 {
+        Current::ipi_send(other);
+    }
     let end = Current::now() + time::ms_to_ticks(100);
     while WAITING[other].load(Ordering::Acquire) == 0 {
         if Current::now() > end {
@@ -141,6 +178,25 @@ pub fn quiesce() -> bool {
         }
     }
     true
+}
+
+/// New code was loaded (or mapped): every core runs `fence.i` before it
+/// next runs a process. The I-caches of both cores are invalidated by the
+/// platform (`sync_code`, `map_xip`); `fence.i` covers what this core's
+/// pipeline fetched already.
+pub fn code_changed() {
+    CODE_GEN.fetch_add(1, Ordering::Release);
+}
+
+/// Before a process runs on this core: `fence.i` if code changed since.
+#[inline]
+pub fn sync_fetch() {
+    let me = hartid() & 1;
+    let latest = CODE_GEN.load(Ordering::Acquire);
+    if FETCH_GEN[me].load(Ordering::Relaxed) != latest {
+        FETCH_GEN[me].store(latest, Ordering::Relaxed);
+        unsafe { core::arch::asm!("fence.i") };
+    }
 }
 
 /// Whether core 1 is running.

@@ -4,6 +4,7 @@
 //!     -bios none -nographic -kernel t5-kernel
 
 use super::Platform;
+use crate::arch::riscv32::csr::mie;
 
 const UART0: usize = 0x1000_0000;
 const UART_THR: usize = 0;
@@ -14,6 +15,7 @@ const SIFIVE_TEST: usize = 0x0010_0000;
 /// default 128 MiB) holds an image of the flash layout.
 const FLASH_IMAGE: usize = 0x8400_0000;
 // CLINT (hw/riscv/virt.c, hw/intc/riscv_aclint.c): 10 MHz mtime.
+const CLINT_MSIP: usize = 0x0200_0000;
 const CLINT_MTIMECMP: usize = 0x0200_4000;
 const CLINT_MTIME: usize = 0x0200_BFF8;
 
@@ -28,17 +30,28 @@ impl Platform for Virt {
     const SERVE: bool = false;
     const TIMER_HZ: u64 = 10_000_000;
     const TIMER_IRQ: usize = 7; // machine timer interrupt
+    const IPI_IRQ: usize = 3; // machine software interrupt (the hart's msip)
 
     fn init() {
         Self::clear_alarm();
-        crate::arch::riscv32::csr::write_csr!("mie", crate::arch::riscv32::csr::mie::MTIE);
+        Self::ipi_clear();
+        crate::arch::riscv32::csr::write_csr!("mie", mie::MTIE | mie::MSIE);
     }
 
     /// Hart 1 waits in `_start` (QEMU starts every hart there); with
     /// `-smp 1` there is none and `smp::start` times out.
     fn init_secondary() {
         Self::clear_alarm();
-        crate::arch::riscv32::csr::write_csr!("mie", crate::arch::riscv32::csr::mie::MTIE);
+        Self::ipi_clear();
+        crate::arch::riscv32::csr::write_csr!("mie", mie::MTIE | mie::MSIE);
+    }
+
+    fn ipi_send(hart: usize) {
+        unsafe { core::ptr::write_volatile((CLINT_MSIP + 4 * hart) as *mut u32, 1) };
+    }
+
+    fn ipi_clear() {
+        unsafe { core::ptr::write_volatile((CLINT_MSIP + 4 * crate::smp::hartid()) as *mut u32, 0) };
     }
 
     fn start_secondary(_entry: usize) -> bool {

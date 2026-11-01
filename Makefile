@@ -282,6 +282,20 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
 	    --expect-event spin.done --expect-event hello.greet \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Flash work while both cores run processes (SMP S3, doc/33 §10): two
+	@# spins without system calls (id 0x101, 0x102) keep both cores in
+	@# U-mode while an app is installed, an XIP app is mapped and run, and
+	@# both are removed. The other core is stopped by an interrupt before
+	@# each cache stop; t5emu stops on any flash or PSRAM access while L2 is
+	@# suspended.
+	$(T5EMU) --quiet --max-ms 20000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run spin 257 80" --ctl "run spin 258 80" \
+	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
+	    --ctl "install $(APPS_DIR)/spin-xip.t5a" --ctl "run spin-xip 4 300" \
+	    --ctl "remove spin-xip" --ctl "remove greeter" --ctl "wait-ms 3000" --ctl "ps" \
+	    --expect-event store.installed --expect-event hello.greet --expect-event store.removed \
+	    --expect-event spin.done --expect-event kernel.cpu \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# App update (M5b, doc/16 §4.3): over a valid greeter, 0.2 goes in
 	@# pending and its normal end confirms it; a version that faults is rolled
 	@# back and the next run is 0.2 again; an XIP update is confirmed after

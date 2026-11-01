@@ -142,6 +142,15 @@ const INTMTX_CORE1_BASE: usize = 0x500D_6800;
 const TIMER_CPU_LINE: usize = 1;
 const CLIC_EXT_INTR_NUM_OFFSET: usize = 16;
 const TIMER_CLIC_INDEX: usize = TIMER_CPU_LINE + CLIC_EXT_INTR_NUM_OFFSET;
+// Interrupts between the cores (doc/32 §1, doc/33 §10): writing 1 to
+// HP_SYSTEM CPU_INT_FROM_CPU_n raises source FROM_CPU_INTRn until 0 is
+// written (hp_system_reg.h:37-60, crosscore_int_ll.h). As in ESP-IDF, n is
+// the core it is for: source 79 goes to core 0, 80 to core 1
+// (interrupts.h:100-101), both to CPU line 5.
+const HP_SYSTEM_CPU_INT_FROM_CPU_0: usize = 0x500E_5010;
+const FROM_CPU_INTR0_SOURCE: usize = 79;
+const IPI_CPU_LINE: usize = 5;
+const IPI_CLIC_INDEX: usize = IPI_CPU_LINE + CLIC_EXT_INTR_NUM_OFFSET;
 
 // CLIC, rev v1.x layout (soc/esp32p4/include/soc/clic_reg.h, doc/01 §4.1).
 // One word per interrupt: [31:24] ctl (priority in the top NLBITS=3 bits),
@@ -431,6 +440,7 @@ impl Platform for Esp32p4v1 {
     const SERVE: bool = true;
     const TIMER_HZ: u64 = 16_000_000;
     const TIMER_IRQ: usize = TIMER_CLIC_INDEX;
+    const IPI_IRQ: usize = IPI_CLIC_INDEX;
 
     fn start_secondary(entry: usize) -> bool {
         unsafe {
@@ -459,7 +469,25 @@ impl Platform for Esp32p4v1 {
             wr(SYSTIMER_INT_ENA, rd(SYSTIMER_INT_ENA) | SYSTIMER_TARGET1_INT);
             wr(INTMTX_CORE1_BASE + 4 * SYSTIMER_TARGET1_SOURCE, TIMER_CLIC_INDEX as u32);
             wr(CLIC_CTRL_BASE + 4 * TIMER_CLIC_INDEX, CLIC_TIMER_CTRL);
+            Self::ipi_clear();
+            wr(INTMTX_CORE1_BASE + 4 * (FROM_CPU_INTR0_SOURCE + 1), IPI_CLIC_INDEX as u32);
+            wr(CLIC_CTRL_BASE + 4 * IPI_CLIC_INDEX, CLIC_TIMER_CTRL);
             wr(CLIC_INT_THRESH, 0);
+        }
+    }
+
+    fn ipi_send(hart: usize) {
+        unsafe { wr(HP_SYSTEM_CPU_INT_FROM_CPU_0 + 4 * hart, 1) };
+    }
+
+    fn ipi_clear() {
+        unsafe {
+            wr(HP_SYSTEM_CPU_INT_FROM_CPU_0 + 4 * (crate::smp::hartid() & 1), 0);
+            // As for the alarm, the clear reaches the CLIC a little later.
+            let mut n = 0;
+            while rd(CLIC_CTRL_BASE + 4 * IPI_CLIC_INDEX) & CLIC_IP != 0 && n < 256 {
+                n += 1;
+            }
         }
     }
 
@@ -492,6 +520,10 @@ impl Platform for Esp32p4v1 {
             // The SDMMC host: routed now, unmasked in the host by `sdio`.
             wr(INTMTX_CORE0_BASE + 4 * SDIO_SOURCE, SDIO_IRQ as u32);
             wr(CLIC_CTRL_BASE + 4 * SDIO_IRQ, CLIC_TIMER_CTRL);
+            // From core 1: routed, cleared.
+            Self::ipi_clear();
+            wr(INTMTX_CORE0_BASE + 4 * FROM_CPU_INTR0_SOURCE, IPI_CLIC_INDEX as u32);
+            wr(CLIC_CTRL_BASE + 4 * IPI_CLIC_INDEX, CLIC_TIMER_CTRL);
             wr(CLIC_INT_THRESH, 0);
         }
     }

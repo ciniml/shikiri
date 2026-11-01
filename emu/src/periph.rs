@@ -272,6 +272,10 @@ impl Default for Intmtx {
 
 /// Interrupt source numbers (soc/esp32p4/include/soc/interrupts.h).
 pub const SRC_SYSTIMER_TARGET0: usize = 53;
+/// FROM_CPU_INTR0..3: raised while HP_SYSTEM CPU_INT_FROM_CPU_n holds 1
+/// (hp_system_reg.h:37-76; doc/33 §10).
+pub const SRC_FROM_CPU0: usize = 79;
+pub const HP_SYSTEM_CPU_INT_FROM_CPU_0: u32 = 0x500E_5010;
 
 /// The rev v1.x CLIC (clic_reg.h). One control word per line:
 /// [31:24] ctl (priority in the top NLBITS = 3 bits, the rest read as 1),
@@ -476,6 +480,8 @@ pub struct Peripherals {
     /// The core running now: which interrupt matrix routes into `clic`.
     pub core: usize,
     pub lp_wdt: LpWdt,
+    /// CPU_INT_FROM_CPU_0..3 (bit 0 each).
+    pub from_cpu: [bool; 4],
     /// HPCORE0 reset cause reported by LP_CLKRST.
     pub reset_cause: u32,
     other: std::collections::HashMap<u32, u32>,
@@ -496,6 +502,9 @@ impl Peripherals {
             a if (HOST_BASE..HOST_BASE + HOST_SIZE).contains(&a) => self.dsi.host_read(a - HOST_BASE),
             a if (GDMA_BASE..GDMA_BASE + GDMA_SIZE).contains(&a) => self.dsi.gdma_read(a - GDMA_BASE, ticks),
             LP_CLKRST_RESET_CAUSE => self.reset_cause << 7,
+            a if (HP_SYSTEM_CPU_INT_FROM_CPU_0..HP_SYSTEM_CPU_INT_FROM_CPU_0 + 16).contains(&a) => {
+                self.from_cpu[((a - HP_SYSTEM_CPU_INT_FROM_CPU_0) / 4) as usize] as u32
+            }
             a => {
                 self.warn(a, "read");
                 self.other.get(&a).copied().unwrap_or_else(|| initial_value(a))
@@ -519,6 +528,9 @@ impl Peripherals {
             a if (I2C1_BASE..I2C1_BASE + I2C1_SIZE).contains(&a) => self.i2c.write(a - I2C1_BASE, v),
             a if (HOST_BASE..HOST_BASE + HOST_SIZE).contains(&a) => self.dsi.host_write(a - HOST_BASE, v),
             a if (GDMA_BASE..GDMA_BASE + GDMA_SIZE).contains(&a) => self.dsi.gdma_write(a - GDMA_BASE, v, ticks),
+            a if (HP_SYSTEM_CPU_INT_FROM_CPU_0..HP_SYSTEM_CPU_INT_FROM_CPU_0 + 16).contains(&a) => {
+                self.from_cpu[((a - HP_SYSTEM_CPU_INT_FROM_CPU_0) / 4) as usize] = v & 1 != 0;
+            }
             // The divider update completes at once (clk_ll_bus_update).
             ROOT_CLK_CTRL0 => {
                 self.other.insert(ROOT_CLK_CTRL0, v & !SOC_CLK_DIV_UPDATE);
@@ -559,6 +571,12 @@ impl Peripherals {
         if self.usj.int_st() != 0 {
             let idx = map[SRC_USJ] as usize;
             if idx < CLIC_LINES {
+                lines[idx] = true;
+            }
+        }
+        for n in 0..4 {
+            let idx = map[SRC_FROM_CPU0 + n] as usize;
+            if self.from_cpu[n] && idx < CLIC_LINES {
                 lines[idx] = true;
             }
         }
