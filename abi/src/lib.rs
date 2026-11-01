@@ -7,6 +7,7 @@
 pub mod ctl;
 pub mod fs;
 pub mod log;
+pub mod mem;
 pub mod net;
 pub mod otadata;
 pub mod store;
