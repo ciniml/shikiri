@@ -28,6 +28,7 @@ mod sched;
 mod screen;
 mod shm;
 mod smp;
+mod spawn;
 mod store;
 mod time;
 
@@ -256,6 +257,7 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     loop {
         sched::run(&mut s, None, &mut |s| {
             settle_updates(s, store);
+            spawn_requested(s, store);
             touch_log.poll();
             screen::poll();
             s.reap();
@@ -267,6 +269,16 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
                 handle(s, store, kup, &mut touch_log, &frame[..n]);
             }
         });
+    }
+}
+
+/// Starts the apps processes asked for through `proc:spawn` (doc/38).
+fn spawn_requested(s: &mut sched::Scheduler, store: &store::Store) {
+    while let Some(r) = spawn::take() {
+        match start(s, store, r.name(), r.arg0, r.arg1) {
+            Ok(pid) => event!(Info, "proc.spawned", by = r.by, name = r.name(), pid = pid),
+            Err(why) => event!(Warn, "proc.spawn_failed", by = r.by, name = r.name(), error = why),
+        }
     }
 }
 

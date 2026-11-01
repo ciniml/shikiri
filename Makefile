@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
 PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --permit shm --permit listen:shmt --permit svc:shmt
@@ -19,6 +19,7 @@ PERMIT_net    := --permit shm --permit listen:net --permit listen:netctl --permi
 PERMIT_nettest := --permit svc:net --stack 32768
 PERMIT_wifi   := --permit wlan:ctl --stack 16384
 PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
+PERMIT_init   := --permit proc:spawn --permit svc:fs --stack 16384
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin
@@ -102,7 +103,8 @@ apps: tools $(UNTRUSTED_KEY)
 # The services started at boot on the Tab5 (doc/30 §5): the same apps with
 # the autostart flag, installed over RTT by `make install-auto`. The store
 # image (and so the tests) keeps them without it.
-AUTO_APPS := wifi fs net netctl
+# `init` starts the rest from T5OS/START.CFG on the SD card (doc/38).
+AUTO_APPS := fs init
 AUTO_DIR  := $(APPS_DIR)/auto
 apps-auto: apps
 	mkdir -p $(AUTO_DIR)
@@ -276,6 +278,13 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "list" --ctl "run ticker 7 20" --ctl "run spin 9 3000" --ctl "kill 102" \
 	    --ctl "run nosuchapp" --ctl "ps" \
 	    --expect-event ticker.tick --expect-event proc.killed --expect-event ctl.failed \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Starting apps from a process (doc/38): init's test list starts hello
+	@# and asks for an app not in the store; the kernel refuses a long name.
+	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run init 2" \
+	    --expect-event proc.spawned --expect-event hello.greet --expect-event proc.spawn_failed \
+	    --expect-event init.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Installing (M3d): the flash write path on a spare sector, an install,
 	@# running it, a rejected image, removal. Stops on any flash access the

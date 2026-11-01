@@ -26,8 +26,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// (`listen:`/`svc:`). Minor 9 (N0b, doc/19 §2): shared memory. Minor 10
 /// (M7c, doc/18 §3): the `sd` object. Minor 11 (N2a, doc/21): `netdev`.
 /// Minor 12 (N2b-3, doc/22): `netdev:wlan0` and `wlan:ctl`. Minor 13
-/// (doc/35 §5): `netdev`'s frame rings (`MAP_RING`, `KICK`).
-pub const ABI_MINOR: u16 = 13;
+/// (doc/35 §5): `netdev`'s frame rings (`MAP_RING`, `KICK`). Minor 14
+/// (doc/38): `proc:spawn`.
+pub const ABI_MINOR: u16 = 14;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -258,6 +259,20 @@ pub mod wlan {
     /// `ctl`: the station's MAC address (`arg` = its 6 bytes, little-endian),
     /// for `netdev:wlan0`'s `MAC_LO`/`MAC_HI`.
     pub const SET_MAC: usize = 1;
+}
+
+/// Starting apps (doc/38): `write` of `[arg0: u32 LE][arg1: u32 LE][name]`
+/// asks the kernel to start the store app `name` with those arguments. It
+/// returns once the request is queued (`Busy`: the queue is full); the
+/// kernel starts the app on its next service round and logs
+/// `proc.spawned` or `proc.spawn_failed`. The app gets its own image's
+/// permissions, nothing of the caller's.
+pub mod spawn {
+    pub const NAME: &str = "proc:spawn";
+    /// The arguments before the name.
+    pub const ARGS: usize = 8;
+    /// Longest name (the store's).
+    pub const NAME_MAX: usize = 32;
 }
 
 /// The SD card as sectors (doc/18 §3), for the file service: one opener at

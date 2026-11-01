@@ -3,7 +3,7 @@
 //! the handle and its rights on every use. Handles are 1..=MAX_HANDLES, so
 //! 0 (an uninitialised variable) is never valid.
 
-use t5_abi::{Error, MAX_HANDLES, chan, display, netdev, rights, sd, shm, svc, timer, touch, wlan};
+use t5_abi::{Error, MAX_HANDLES, chan, display, netdev, rights, sd, shm, spawn, svc, timer, touch, wlan};
 
 use crate::channel;
 use crate::screen::{DisplayHandle, TouchHandle};
@@ -25,6 +25,7 @@ pub enum Object {
     NetDev(crate::hostlink::NetDev),
     WlanCtl(crate::wlan::WlanCtl),
     WlanDev(crate::wlan::WlanDev),
+    Spawn(crate::spawn::SpawnHandle),
 }
 
 /// The SD card's sectors (doc/18 §3): one handle at a time.
@@ -101,6 +102,7 @@ impl Object {
                 rights::READ | rights::WRITE | rights::WAIT | rights::CTL,
             )),
             n if n == sd::NAME.as_bytes() => Ok((Object::Sd(SdHandle::open()?), rights::READ | rights::WRITE | rights::CTL)),
+            n if n == spawn::NAME.as_bytes() => Ok((Object::Spawn(crate::spawn::SpawnHandle { pid }), rights::WRITE)),
             n if n == shm::NAME.as_bytes() => {
                 if !crate::shm::available() {
                     return Err(Error::NoDevice);
@@ -245,7 +247,7 @@ impl Table {
             },
             Object::WlanCtl(c) => c.ctl(op, arg),
             Object::WlanDev(d) => d.ctl(op, arg),
-            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) => Err(Error::NoSupport),
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Spawn(_) => Err(Error::NoSupport),
         }
     }
 
@@ -332,6 +334,7 @@ impl Table {
             Object::NetDev(d) => d.write(buf),
             Object::WlanCtl(c) => c.write(buf),
             Object::WlanDev(d) => d.write(buf),
+            Object::Spawn(s) => s.write(buf),
             _ => Err(Error::NoSupport),
         }
     }
@@ -391,7 +394,7 @@ impl Table {
             Object::NetDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::WlanCtl(c) => c.poll().map(|(ev, v)| (i, ev, v)),
             Object::WlanDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
-            Object::Shm(_) | Object::Sd(_) => None,
+            Object::Shm(_) | Object::Sd(_) | Object::Spawn(_) => None,
         })
     }
 
