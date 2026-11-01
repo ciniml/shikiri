@@ -492,7 +492,13 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadl
                     crate::wlan::flush_tx();
                 }
             }
-            Trap::Interrupt { code } if Current::handle_irq(code) => {}
+            Trap::Interrupt { code } if Current::handle_irq(code) => {
+                // The SDIO interrupt may be the end of a frame's DMA: the
+                // next one goes (doc/37).
+                if core == 0 {
+                    crate::wlan::flush_tx();
+                }
+            }
             Trap::Interrupt { code } => panic!("unexpected interrupt {code}"),
             Trap::Syscall => {
                 // ecall is always 4 bytes long.

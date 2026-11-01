@@ -188,6 +188,11 @@ pub trait Platform {
     fn wlan_pending() -> bool {
         false
     }
+    /// Whether a frame can go to the Wi-Fi chip now, without waiting for
+    /// the one before it on the bus.
+    fn wlan_tx_idle() -> bool {
+        true
+    }
     /// (card interrupts taken, re-arms that found the line still low, ms
     /// in bus commands, bus commands).
     fn wlan_irq_stats() -> (u32, u32, u32, u32) {

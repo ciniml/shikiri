@@ -510,6 +510,16 @@ pub(super) fn finish_write() {
     }
 }
 
+/// Whether a deferred write's DMA still runs (nothing waits). Its end
+/// raises the host interrupt.
+pub(super) fn write_busy() -> bool {
+    if !unsafe { WRITE_IN_FLIGHT } {
+        return false;
+    }
+    let (ids, ints) = unsafe { (rd(IDSTS), rd(RINTSTS)) };
+    !(ids & (IDSTS_TI | IDSTS_ERRORS) != 0 && ints & (DTO | DATA_ERRORS) != 0 || ints & DATA_ERRORS != 0)
+}
+
 fn command_timed(slot: u32, block: usize, cmd: u32, arg: u32, data: Data) -> Result<[u32; 4], &'static str> {
     // The bounce buffer and the host are free again.
     finish_write();

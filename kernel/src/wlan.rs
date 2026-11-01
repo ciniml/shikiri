@@ -201,12 +201,17 @@ pub fn pending() -> bool {
     w.up && (w.ctl_open || w.dev_open) && (Current::wlan_pending() || w.tx.count > 0 || w.rings.as_ref().is_some_and(|r| r.tx_front().is_some()))
 }
 
-/// Sends the queued frames, oldest first, until the chip takes no more
-/// (`Busy`: they stay for the next call). Core 0 does this; a frame that
-/// fails otherwise is dropped and counted.
+/// Sends the queued frames, oldest first, while the bus is free: one frame
+/// goes out while the caller goes on, and the end of its DMA (the SDIO
+/// interrupt, on core 0) sends the next (doc/37). Also stops when the chip
+/// takes no more (`Busy`: they stay for the next call). Core 0 does this; a
+/// frame that fails otherwise is dropped and counted.
 pub fn flush_tx() {
     let w = w();
     while let Some(f) = w.tx.front() {
+        if !Current::wlan_tx_idle() {
+            return;
+        }
         match send(IF_STA, f) {
             Ok(_) => w.sta_tx += 1,
             Err(Error::Busy) => return,
@@ -217,6 +222,9 @@ pub fn flush_tx() {
     // Then the transmit ring.
     let Some(r) = w.rings.as_mut() else { return };
     while let Some(f) = r.tx_front() {
+        if !Current::wlan_tx_idle() {
+            return;
+        }
         let sent = if f.len() > netdev::ETH_FRAME || f.is_empty() { Err(Error::Size) } else { send(IF_STA, f) };
         match sent {
             Ok(_) => w.sta_tx += 1,
@@ -365,9 +373,10 @@ impl WlanDev {
         w().sta.pop(out)
     }
 
-    /// On core 1 (with two cores) the frame is queued for core 0, which
-    /// owns the SDIO transfers then: the caller does not wait for the bus
-    /// (doc/34 §11). On core 0 the queue is sent first, then the frame.
+    /// The frame is queued and the caller does not wait for the bus. On
+    /// core 1 (with two cores) core 0 sends it, which owns the SDIO
+    /// transfers then (doc/34 §11); on core 0 it goes now if the bus is
+    /// free, else when the frame before it is out (doc/37).
     pub fn write(&mut self, frame: &[u8]) -> Result<usize, Error> {
         let w = w();
         if !w.up {
@@ -376,35 +385,26 @@ impl WlanDev {
         if frame.len() > netdev::ETH_FRAME {
             return Err(Error::Size);
         }
-        if crate::smp::two_cores() && crate::smp::hartid() & 1 == 1 {
+        if w.tx.count == TX_QUEUE {
+            // Full: send here rather than drop.
+            flush_tx();
             if w.tx.count == TX_QUEUE {
-                // Full: send here rather than drop.
-                flush_tx();
-                if w.tx.count == TX_QUEUE {
-                    return Err(Error::Busy);
-                }
+                return Err(Error::Busy);
             }
-            let was_empty = w.tx.count == 0;
-            w.tx.push(frame);
-            if was_empty {
-                // Core 0 sends it from its loop, or from the interrupt if
-                // it runs a process.
-                Current::ipi_send(0);
-            }
-            return Ok(frame.len());
         }
-        flush_tx();
-        if w.tx.count > 0 {
-            return Err(Error::Busy);
-        }
-        let r = send(IF_STA, frame);
         if w.sta_tx < 4 {
-            event!(Debug, "wlan.sta_tx", len = frame.len() as u32, ok = r.is_ok(), head = &frame[frame.len().min(14)..frame.len().min(76)]);
+            event!(Debug, "wlan.sta_tx", len = frame.len() as u32, head = &frame[frame.len().min(14)..frame.len().min(76)]);
         }
-        if r.is_ok() {
-            w.sta_tx += 1;
+        let was_empty = w.tx.count == 0;
+        w.tx.push(frame);
+        if !(crate::smp::two_cores() && crate::smp::hartid() & 1 == 1) {
+            flush_tx();
+        } else if was_empty {
+            // Core 0 sends it from its loop, or from the interrupt if it
+            // runs a process.
+            Current::ipi_send(0);
         }
-        r
+        Ok(frame.len())
     }
 
     pub fn ctl(&mut self, op: usize, _arg: u64) -> Result<usize, Error> {
