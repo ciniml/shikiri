@@ -42,7 +42,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [43](43-psram-bandwidth.md) | PSRAM の転送が遅い理由: ミスの待ち時間（1 ラインずつ）と表示の DMA。カーネルのベンチ `membench`、L2 のラインを 128 バイトに、キャッシュの自動先読み（フレームバッファより下）、`term` はフレームバッファの順に描く。読み 76 → 190 MB/s、書き 60 → 92 MB/s、全画面 60 → 35 ms |
 | [44](44-ppa-2d.md) | PPA と 2D-DMA: 塗りつぶし・A8 の文字・矩形のコピーのドライバ（update ビットは別の書き込み）、`ppabench`、ディスプレイのハンドルへの `write` で FILL/COPY を出し `DONE`/`FAILED` を待つ（ABI 小版 17）、`term` の上スクロールをハードウェアで 28.6 → 18.0 ms/行、t5emu の模型 |
 | [45](45-japanese-font.md) | ターミナルの日本語: フォントサービス `font`（XIP、共有メモリで字形を渡す。Noto Sans Mono CJK JP の JIS X 0208 全角 6649 字と Terminus の半角 836 字、OFL）、`t5_rt::Font`、`term` は全角を 2 マスに半分ずつ描く。署名の確かめでウォッチドッグを叩く |
-| [46](46-ipv6-rest.md) | IPv6 の残り: 転送とフィルタの ICMPv6 のエラー（no route、reject、Time Exceeded、Packet Too Big、address unreachable）、RA の RDNSS を受けて下流へ広告し、名前解決と中継に使う、上流のプレフィックスが変わったら古いものを非推奨で広告。実機の網は O フラグ（DHCPv6）で RDNSS なし |
+| [46](46-ipv6-rest.md) | IPv6 の残り: 転送とフィルタの ICMPv6 のエラー（no route、reject、Time Exceeded、Packet Too Big、address unreachable）、RA の RDNSS を受けて下流へ広告し、名前解決と中継に使う、上流のプレフィックスが変わったら古いものを非推奨で広告。実機の網は O フラグ（DHCPv6）で RDNSS なし。一時アドレス（RFC 8981、smoltcp の送り元の選び方に規則 3 と 7）、カーネルの `random`（ABI 小版 18） |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |

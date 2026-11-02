@@ -1866,3 +1866,33 @@ fn test_solicited_node_multicast_autojoin(#[case] medium: Medium) {
     assert!(!iface.has_multicast_group(addr1.solicited_node()));
     assert!(!iface.has_multicast_group(addr2.solicited_node()));
 }
+
+/// tab5-os (doc/46): RFC 6724 rules 3 and 7 from the preference the
+/// application sets.
+#[test]
+fn get_source_address_temporary() {
+    let (mut iface, _, _) = setup(Medium::Ip);
+    const LINK_LOCAL: Ipv6Address = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+    const STABLE: Ipv6Address = Ipv6Address::new(0x2001, 0x0db8, 0, 1, 0x0200, 0x5eff, 0xfe00, 1);
+    const TEMP_OLD: Ipv6Address = Ipv6Address::new(0x2001, 0x0db8, 0, 1, 0x1111, 0x2222, 0x3333, 0x4444);
+    const TEMP: Ipv6Address = Ipv6Address::new(0x2001, 0x0db8, 0, 1, 0x5555, 0x6666, 0x7777, 0x8888);
+    iface.update_ip_addrs(|addrs| {
+        addrs.clear();
+        for a in [LINK_LOCAL, STABLE, TEMP_OLD, TEMP] {
+            addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(a, 64))).unwrap();
+        }
+    });
+    let far = Ipv6Address::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111);
+    let near = Ipv6Address::new(0x2001, 0x0db8, 0, 1, 0, 0, 0, 0x99);
+    // Without a preference, the first of equals.
+    assert_eq!(iface.inner.get_source_address_ipv6(&far), STABLE);
+    iface.set_ipv6_source_preference(Some(TEMP), &[TEMP_OLD]);
+    assert_eq!(iface.inner.get_source_address_ipv6(&far), TEMP);
+    assert_eq!(iface.inner.get_source_address_ipv6(&near), TEMP);
+    // Rule 1 still first; link-local stays link-local.
+    assert_eq!(iface.inner.get_source_address_ipv6(&TEMP_OLD), TEMP_OLD);
+    assert_eq!(iface.inner.get_source_address_ipv6(&Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2)), LINK_LOCAL);
+    // A deprecated address loses to the stable one.
+    iface.set_ipv6_source_preference(None, &[STABLE]);
+    assert_eq!(iface.inner.get_source_address_ipv6(&far), TEMP_OLD);
+}

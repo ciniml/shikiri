@@ -129,6 +129,12 @@ pub struct InterfaceInner {
     caps: DeviceCapabilities,
     now: Instant,
     rand: Rand,
+    /// tab5-os (doc/46): IPv6 source selection, RFC 6724 rule 7 (prefer
+    /// this temporary address) and rule 3 (avoid these deprecated ones).
+    #[cfg(feature = "proto-ipv6")]
+    src_prefer_v6: Option<Ipv6Address>,
+    #[cfg(feature = "proto-ipv6")]
+    src_avoid_v6: Vec<Ipv6Address, 4>,
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     neighbor_cache: NeighborCache,
@@ -296,6 +302,10 @@ impl Interface {
                 slaac: Slaac::new(),
                 #[cfg(feature = "proto-ipv6-slaac")]
                 slaac_updated: Instant::from_millis(0),
+                #[cfg(feature = "proto-ipv6")]
+                src_prefer_v6: None,
+                #[cfg(feature = "proto-ipv6")]
+                src_avoid_v6: Vec::new(),
                 rand,
             },
         }
@@ -421,6 +431,17 @@ impl Interface {
 
     pub fn routes_mut(&mut self) -> &mut Routes {
         &mut self.inner.routes
+    }
+
+    /// tab5-os (doc/46): the temporary address to prefer as an IPv6 source
+    /// (RFC 6724 rule 7) and deprecated ones to avoid (rule 3, at most 4).
+    #[cfg(feature = "proto-ipv6")]
+    pub fn set_ipv6_source_preference(&mut self, prefer: Option<Ipv6Address>, avoid: &[Ipv6Address]) {
+        self.inner.src_prefer_v6 = prefer;
+        self.inner.src_avoid_v6.clear();
+        for a in avoid.iter().take(4) {
+            let _ = self.inner.src_avoid_v6.push(*a);
+        }
     }
 
     /// Enable or disable the AnyIP capability.

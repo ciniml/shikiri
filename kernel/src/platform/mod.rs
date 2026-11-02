@@ -181,6 +181,14 @@ pub trait Platform {
     fn display_stats() -> Result<u32, &'static str> {
         Err("no display")
     }
+    /// 32 random bits (`random`, doc/46 §4). Without a generator: the timer
+    /// through a mixer (not random; QEMU and t5emu's virt board).
+    fn random_u32() -> u32 {
+        let mut x = Self::now() ^ 0x9E37_79B9_7F4A_7C15;
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (x ^ (x >> 31)) as u32
+    }
     /// Starts a 2D request on the display's framebuffer (doc/44).
     fn gfx_start(_req: Gfx) -> Result<(), &'static str> {
         Err("no 2d hardware")

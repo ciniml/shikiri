@@ -40,6 +40,7 @@ const PERIPH: std::ops::Range<u32> = 0x5000_0000..0x5020_0000;
 /// The cache controller's registers (cache_reg.h, DR_REG_CACHE_BASE): kept
 /// as plain registers; autoload is not modelled (doc/43 §4).
 const CACHE_CTRL: std::ops::Range<u32> = 0x3FF1_0000..0x3FF1_1000;
+const RNG_DATA: u32 = 0x5011_01A4;
 const CLIC: std::ops::Range<u32> = 0x2080_0000..0x2080_2000;
 
 /// Flash program page and erase sector.
@@ -65,6 +66,8 @@ pub struct Bus {
     pub l2_suspended: bool,
     /// L2 line size in bytes, as `Cache_Set_L2_Cache_Mode` set it.
     pub l2_line: u32,
+    /// The RNG register's generator (LP_SYSTEM_REG_RNG_DATA_REG).
+    rng: u64,
     /// First flash-window access made while L2 was suspended.
     pub flash_violation: Option<u32>,
     /// 256-byte pages of `phys_flash` changed by the ROM erase/write
@@ -140,6 +143,7 @@ impl Bus {
             mmu_index: 0,
             l2_suspended: false,
             l2_line: 64,
+            rng: 0x2545_F491_4F6C_DD1D,
             flash_violation: None,
             stale_l1d: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
             stale_l2: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
@@ -344,6 +348,15 @@ impl Bus {
             let ticks = self.ticks();
             let word = self.periph.read32(addr & !3, ticks);
             let word = crate::dma2d::read_state(addr & !3, word).unwrap_or(word);
+            // The RNG register (soc/wdev_reg.h): a fresh word each read.
+            let word = if addr & !3 == RNG_DATA {
+                self.rng ^= self.rng << 13;
+                self.rng ^= self.rng >> 7;
+                self.rng ^= self.rng << 17;
+                self.rng as u32
+            } else {
+                word
+            };
             let shift = (addr & 3) * 8;
             let mask = if size == 4 { u32::MAX } else { (1 << (size * 8)) - 1 };
             return Some((word >> shift) & mask);

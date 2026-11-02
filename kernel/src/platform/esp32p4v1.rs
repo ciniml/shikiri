@@ -845,6 +845,18 @@ impl Platform for Esp32p4v1 {
         }
     }
 
+    fn random_u32() -> u32 {
+        // As esp_random (hw_random.c:49-80): XOR the register over at least
+        // 14 CPU cycles per MHz (about 14 µs) between words, and the timer.
+        const RNG_DATA: usize = 0x5011_01A4;
+        let start = Self::now();
+        let mut r = start as u32;
+        while Self::now() - start < 14 * 16 {
+            r ^= unsafe { rd(RNG_DATA) };
+        }
+        r ^ (Self::now() as u32).rotate_left(16)
+    }
+
     fn gfx_finished() -> (u32, u32) {
         (ppa::finished(), ppa::failed())
     }

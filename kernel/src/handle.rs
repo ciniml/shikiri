@@ -29,6 +29,7 @@ pub enum Object {
     Kbd(crate::kbd::KbdHandle),
     List(crate::procinfo::ListHandle),
     Kill(crate::procinfo::KillHandle),
+    Random,
 }
 
 /// The SD card's sectors (doc/18 §3): one handle at a time.
@@ -110,6 +111,7 @@ impl Object {
             n if n == proc::LIST.as_bytes() => Ok((Object::List(crate::procinfo::ListHandle::open(false)), rights::READ)),
             n if n == proc::APPS.as_bytes() => Ok((Object::List(crate::procinfo::ListHandle::open(true)), rights::READ)),
             n if n == proc::KILL.as_bytes() => Ok((Object::Kill(crate::procinfo::KillHandle { pid }), rights::WRITE)),
+            n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == shm::NAME.as_bytes() => {
                 if !crate::shm::available() {
                     return Err(Error::NoDevice);
@@ -254,7 +256,7 @@ impl Table {
             },
             Object::WlanCtl(c) => c.ctl(op, arg),
             Object::WlanDev(d) => d.ctl(op, arg),
-            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Spawn(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) => {
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Spawn(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Random => {
                 Err(Error::NoSupport)
             }
         }
@@ -361,6 +363,14 @@ impl Table {
             Object::WlanDev(d) => d.read(buf),
             Object::Kbd(k) => k.read(buf),
             Object::List(l) => l.read(buf),
+            Object::Random => {
+                let n = buf.len().min(t5_abi::random::MAX);
+                for chunk in buf[..n].chunks_mut(4) {
+                    let w = Current::random_u32().to_le_bytes();
+                    chunk.copy_from_slice(&w[..chunk.len()]);
+                }
+                Ok(n)
+            }
             _ => Err(Error::NoSupport),
         }
     }
@@ -408,7 +418,7 @@ impl Table {
             Object::WlanCtl(c) => c.poll().map(|(ev, v)| (i, ev, v)),
             Object::WlanDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::Kbd(k) => k.poll().map(|(ev, v)| (i, ev, v)),
-            Object::Shm(_) | Object::Sd(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) => None,
+            Object::Shm(_) | Object::Sd(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Random => None,
         })
     }
 

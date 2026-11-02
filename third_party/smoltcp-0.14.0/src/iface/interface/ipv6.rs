@@ -93,48 +93,58 @@ impl InterfaceInner {
             .find_map(|a| match a {
                 #[cfg(feature = "proto-ipv4")]
                 IpCidr::Ipv4(_) => None,
-                IpCidr::Ipv6(a) => Some(a),
+                IpCidr::Ipv6(a) if is_candidate_source_address(dst_addr, &a.address()) => Some(a),
+                IpCidr::Ipv6(_) => None,
             })
-            .unwrap(); // NOTE: we check above that there is at least one IPv6 address.
+            .unwrap_or_else(|| {
+                self.ip_addrs
+                    .iter()
+                    .find_map(|a| match a {
+                        IpCidr::Ipv6(a) => Some(a),
+                        #[cfg(feature = "proto-ipv4")]
+                        IpCidr::Ipv4(_) => None,
+                    })
+                    .unwrap() // NOTE: we check above that there is at least one IPv6 address.
+            });
 
+        // tab5-os (doc/46): RFC 6724 §5 as a comparison of two candidates,
+        // with rules 3 (avoid deprecated) and 7 (prefer temporary) from the
+        // preference the application set. Rules 4-6 do not apply here.
+        let scope = |a: &Ipv6Address| a.x_multicast_scope() as u8;
+        let avoided = |a: &Ipv6Address| self.src_avoid_v6.contains(a);
+        let preferred = |a: &Ipv6Address| self.src_prefer_v6 == Some(*a);
+        let better = |a: &Ipv6Cidr, b: &Ipv6Cidr| -> bool {
+            let (sa, sb) = (a.address(), b.address());
+            // Rule 1: prefer the same address.
+            if (sa == *dst_addr) != (sb == *dst_addr) {
+                return sb == *dst_addr;
+            }
+            // Rule 2: prefer appropriate scope.
+            let (ca, cb, cd) = (scope(&sa), scope(&sb), scope(dst_addr));
+            if ca < cb {
+                return ca < cd;
+            }
+            if cb < ca {
+                return cb >= cd;
+            }
+            // Rule 3: avoid deprecated addresses.
+            if avoided(&sa) != avoided(&sb) {
+                return avoided(&sa);
+            }
+            // Rule 7: prefer temporary addresses.
+            if preferred(&sa) != preferred(&sb) {
+                return preferred(&sb);
+            }
+            // Rule 8: use longest matching prefix.
+            common_prefix_length(b, dst_addr) > common_prefix_length(a, dst_addr)
+        };
         for addr in self.ip_addrs.iter().filter_map(|a| match a {
             #[cfg(feature = "proto-ipv4")]
             IpCidr::Ipv4(_) => None,
             #[cfg(feature = "proto-ipv6")]
             IpCidr::Ipv6(a) => Some(a),
         }) {
-            if !is_candidate_source_address(dst_addr, &addr.address()) {
-                continue;
-            }
-
-            // Rule 1: prefer the address that is the same as the output destination address.
-            if candidate.address() != *dst_addr && addr.address() == *dst_addr {
-                candidate = addr;
-            }
-
-            // Rule 2: prefer appropriate scope.
-            if (candidate.address().x_multicast_scope() as u8)
-                < (addr.address().x_multicast_scope() as u8)
-            {
-                if (candidate.address().x_multicast_scope() as u8)
-                    < (dst_addr.x_multicast_scope() as u8)
-                {
-                    candidate = addr;
-                }
-            } else if (addr.address().x_multicast_scope() as u8)
-                > (dst_addr.x_multicast_scope() as u8)
-            {
-                candidate = addr;
-            }
-
-            // Rule 3: avoid deprecated addresses (TODO)
-            // Rule 4: prefer home addresses (TODO)
-            // Rule 5: prefer outgoing interfaces (TODO)
-            // Rule 5.5: prefer addresses in a prefix advertises by the next-hop (TODO).
-            // Rule 6: prefer matching label (TODO)
-            // Rule 7: prefer temporary addresses (TODO)
-            // Rule 8: use longest matching prefix
-            if common_prefix_length(candidate, dst_addr) < common_prefix_length(addr, dst_addr) {
+            if is_candidate_source_address(dst_addr, &addr.address()) && better(candidate, addr) {
                 candidate = addr;
             }
         }

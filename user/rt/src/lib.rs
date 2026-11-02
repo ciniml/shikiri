@@ -9,7 +9,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, font, fs, kbd, net, netdev, proc, rights, sd, shm, spawn, svc, sys, timer, touch, wlan};
+pub use t5_abi::{Error, FOREVER, chan, display, event, font, fs, kbd, net, netdev, proc, random, rights, sd, shm, spawn, svc, sys, timer, touch, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -461,6 +461,23 @@ impl Font {
         let g = self.find(self.wide, font::WIDE_BYTES, cp)?;
         Some(core::array::from_fn(|y| u32::from_le_bytes([g[4 * y], g[4 * y + 1], g[4 * y + 2], g[4 * y + 3]])))
     }
+}
+
+/// Fills `buf` from the kernel's `random` (doc/46 §4; see `random` for how
+/// random it is). Needs `--permit random`.
+pub fn random_fill(buf: &mut [u8]) -> Result<(), Error> {
+    let h = Handle::open(random::NAME, rights::READ)?;
+    for chunk in buf.chunks_mut(random::MAX) {
+        h.read(chunk)?;
+    }
+    Ok(())
+}
+
+/// 64 random bits (`random_fill`).
+pub fn random_u64() -> Result<u64, Error> {
+    let mut b = [0u8; 8];
+    random_fill(&mut b)?;
+    Ok(u64::from_le_bytes(b))
 }
 
 /// RGB565 from 8-bit components.

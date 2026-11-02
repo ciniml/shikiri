@@ -36,7 +36,7 @@ mod testlan;
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
+use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address, Ipv6Cidr};
 use t5_rt::net::{self as proto, iface, op, state, status};
 use t5_rt::{Channel, Error, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
 
@@ -203,6 +203,33 @@ pub struct EthLink {
     changed: bool,
     /// The global IPv6 address last logged (SLAAC).
     v6_logged: Option<Ipv6Address>,
+    /// SLAAC is on: temporary addresses too (RFC 8981, doc/46 §4).
+    slaac: bool,
+    temp: Option<Temp>,
+    /// Earlier temporary addresses: kept (avoided as sources) until then.
+    old_temps: [Option<(Ipv6Address, u64)>; OLD_TEMPS],
+}
+
+/// A temporary address: the /64 it is in, when to make the next one,
+/// when it goes.
+#[derive(Clone, Copy)]
+struct Temp {
+    addr: Ipv6Address,
+    prefix: u128,
+    renew_at: u64,
+    remove_at: u64,
+}
+
+const OLD_TEMPS: usize = 2;
+const DAY_NS: u64 = 86_400_000_000_000;
+/// RFC 8981 §3.8: TEMP_PREFERRED_LIFETIME 1 day, TEMP_VALID_LIFETIME
+/// 2 days, MAX_DESYNC_FACTOR 0.4.
+const TEMP_PREFERRED_NS: u64 = DAY_NS;
+const TEMP_VALID_NS: u64 = 2 * DAY_NS;
+
+/// Random bits from the kernel, else from the clock (doc/46 §4).
+fn random_u64() -> u64 {
+    t5_rt::random_u64().unwrap_or_else(|_| time_ns().wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
 impl EthLink {
@@ -212,7 +239,7 @@ impl EthLink {
         let mut dev = EthNic { link, port, mac, own: None, rx: 0, rx_unicast: 0, tx: 0, tx_dropped: 0, queued: true };
         let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
         config.slaac = slaac;
-        config.random_seed = time_ns() ^ u64::from_le_bytes([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0, 0]);
+        config.random_seed = random_u64() ^ u64::from_le_bytes([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0, 0]);
         let mut iface = Interface::new(config, &mut dev, now());
         iface.update_ip_addrs(|a| {
             let _ = a.push(link_local(mac));
@@ -229,11 +256,95 @@ impl EthLink {
             report_at: clock_ns() + 5_000_000_000,
             changed: true,
             v6_logged: None,
+            slaac,
+            temp: None,
+            old_temps: [None; OLD_TEMPS],
         }
+    }
+
+    /// Temporary addresses (RFC 8981): one in the /64 SLAAC gave, made
+    /// again every day or so; the earlier ones stay for the connections
+    /// that use them but are not chosen as sources (smoltcp's source
+    /// selection, rules 3 and 7, doc/46 §4).
+    fn privacy(&mut self) {
+        if !self.slaac {
+            return;
+        }
+        let now = clock_ns();
+        let stable_iid = match link_local(self.dev.mac).address() {
+            IpAddress::Ipv6(a) => a.to_bits() & u64::MAX as u128,
+            _ => return,
+        };
+        let stable = self.iface.ip_addrs().iter().find_map(|c| match c {
+            IpCidr::Ipv6(c) if !c.address().is_unicast_link_local() && c.address().to_bits() & u64::MAX as u128 == stable_iid => Some(c.address()),
+            _ => None,
+        });
+        let prefix = stable.map(|a| a.to_bits() & !(u64::MAX as u128));
+        let made = |l: &EthLink| -> [Option<Ipv6Address>; 1 + OLD_TEMPS] { [l.temp.map(|t| t.addr), l.old_temps[0].map(|o| o.0), l.old_temps[1].map(|o| o.0)] };
+        let before = made(self);
+        let mut changed = false;
+        if let Some(t) = self.temp
+            && (prefix != Some(t.prefix) || now >= t.renew_at)
+        {
+            self.temp = None;
+            // Kept only while its prefix is.
+            let until = if prefix == Some(t.prefix) { t.remove_at } else { now };
+            match self.old_temps.iter_mut().find(|o| o.is_none()) {
+                Some(o) => *o = Some((t.addr, until)),
+                None => {
+                    // The oldest goes now.
+                    let oldest = self.old_temps.iter_mut().min_by_key(|o| o.map_or(0, |(_, at)| at)).unwrap();
+                    *oldest = Some((t.addr, until));
+                }
+            }
+            changed = true;
+        }
+        if let Some(p) = prefix
+            && self.temp.is_none()
+        {
+            // A random interface identifier: not zero, not the stable one,
+            // not a reserved one (RFC 5453: fdff:ffff:ffff:ff80-ff).
+            let mut iid = random_u64() as u128;
+            while iid == 0 || iid == stable_iid || iid >> 7 == 0x1FF_FFFF_FFFF_FFFF {
+                iid = random_u64() as u128;
+            }
+            let addr = Ipv6Address::from_bits(p | iid);
+            let desync = random_u64() % (TEMP_PREFERRED_NS * 2 / 5);
+            self.temp = Some(Temp { addr, prefix: p, renew_at: now + TEMP_PREFERRED_NS - desync, remove_at: now + TEMP_VALID_NS });
+            event!(Info, "net.temp_addr", link = LINK_NAMES[self.dev.link], addr = &addr.octets()[..], hours = ((TEMP_PREFERRED_NS - desync) / 3_600_000_000_000) as u32);
+            changed = true;
+        }
+        for o in self.old_temps.iter_mut() {
+            if o.is_some_and(|(_, at)| now >= at) {
+                *o = None;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let keep = made(self);
+        self.iface.update_ip_addrs(|addrs| {
+            // Temporary addresses no longer kept go; the new one comes.
+            addrs.retain(|c| match c {
+                IpCidr::Ipv6(c) => !before.contains(&Some(c.address())) || keep.contains(&Some(c.address())),
+                _ => true,
+            });
+            for a in keep.iter().flatten() {
+                let cidr = IpCidr::Ipv6(Ipv6Cidr::new(*a, 64));
+                if !addrs.contains(&cidr) {
+                    let _ = addrs.push(cidr);
+                }
+            }
+        });
+        let avoid: [Ipv6Address; OLD_TEMPS] = core::array::from_fn(|k| self.old_temps[k].map_or(Ipv6Address::UNSPECIFIED, |o| o.0));
+        self.iface.set_ipv6_source_preference(self.temp.map(|t| t.addr), &avoid);
+        self.changed = true;
     }
 
     /// Logs the global IPv6 address when SLAAC gives (or changes) it.
     fn log_ipv6(&mut self) {
+        self.privacy();
         let global = self.iface.ip_addrs().iter().find_map(|c| match c {
             IpCidr::Ipv6(c) if !c.address().is_unicast_link_local() => Some(c.address()),
             _ => None,
