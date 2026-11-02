@@ -724,6 +724,14 @@ impl Net {
         r
     }
 
+    /// Interface `k`'s record (`net::iface`) at the start of the slice:
+    /// its length, or None if the interface is not up now. `NO_ADDRESS`
+    /// past the last interface.
+    pub fn if_info(&self, k: u32) -> Result<Option<usize>, NetError> {
+        let (up, len) = self.call(net::op::IF_INFO, 0, k, 0)?;
+        Ok((up != 0).then_some(len as usize))
+    }
+
     /// Asks `op` on `s` every millisecond until it answers (1, value[,
     /// IPv6 address]).
     fn poll_result(&self, op: u8, s: u16, ms: u64) -> Result<(u32, Option<Ipv6Addr>), NetError> {

@@ -9,7 +9,7 @@
 //! proc:spawn --permit proc:list --permit proc:apps --permit proc:kill`.
 //! Exits 0 on `exit`, or 1 if there is no terminal.
 
-use t5_rt::{Channel, Error, Files, Handle, Net, chan, event, fs, proc, rights, sleep_ms, spawn, time_ns};
+use t5_rt::{Channel, Error, Files, Handle, Net, chan, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
 
 t5_rt::entry!(main);
 
@@ -101,6 +101,49 @@ impl Out {
             self.raw(b' ');
         }
         self.num(v);
+    }
+
+    fn hex2(&mut self, b: u8) {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        self.raw(HEX[(b >> 4) as usize]);
+        self.raw(HEX[(b & 15) as usize]);
+    }
+
+    /// An IPv6 address, the longest run of zero groups as `::`.
+    fn ip6(&mut self, a: [u8; 16]) {
+        let g = |i: usize| u16::from_be_bytes([a[2 * i], a[2 * i + 1]]);
+        let (mut best, mut best_len, mut i) = (8, 0, 0);
+        while i < 8 {
+            let start = i;
+            while i < 8 && g(i) == 0 {
+                i += 1;
+            }
+            if i - start > best_len && i - start > 1 {
+                (best, best_len) = (start, i - start);
+            }
+            i += 1;
+        }
+        let mut i = 0;
+        while i < 8 {
+            if i == best {
+                self.str("::");
+                i += best_len;
+                continue;
+            }
+            if i > 0 && i != best + best_len {
+                self.raw(b':');
+            }
+            let v = g(i);
+            let mut started = false;
+            for shift in [12, 8, 4, 0] {
+                let d = (v >> shift) & 15;
+                if d != 0 || started || shift == 0 {
+                    self.raw(b"0123456789abcdef"[d as usize]);
+                    started = true;
+                }
+            }
+            i += 1;
+        }
     }
 
     fn ip(&mut self, ip: u32) {
@@ -285,6 +328,10 @@ impl Shell {
                  ps                    list the processes\n\
                  kill PID              stop a process\n\
                  ping HOST             ping an address or name\n\
+                 ifconfig              the network interfaces\n\
+                 top                   CPU use per process (any key ends)\n\
+                 nc HOST PORT          a TCP connection, a line at a time\n\
+                                       (Ctrl-C or Ctrl-D ends)\n\
                  exit                  end the shell (term starts a new one)\n",
             ),
             "echo" => {
@@ -334,6 +381,12 @@ impl Shell {
                 None => o.str("usage: run APP [A0 [A1]]\n"),
             },
             "ps" => ps(o),
+            "top" => top(o),
+            "ifconfig" => ifconfig(o),
+            "nc" => match (args.first(), args.get(1).and_then(|p| p.parse::<u16>().ok())) {
+                (Some(h), Some(port)) => nc(o, h, port),
+                _ => o.str("usage: nc HOST PORT\n"),
+            },
             "apps" => apps(o),
             "kill" => match args.first().and_then(|a| a.parse::<u32>().ok()) {
                 Some(pid) => kill(o, pid),
@@ -445,23 +498,27 @@ fn parse_ip(s: &str) -> Option<u32> {
     (parts == 4).then_some(ip)
 }
 
+/// `host`'s IPv4 address: as written, or from DNS.
+fn lookup(o: &mut Out, net: &mut Net, cmd: &str, host: &str) -> Option<u32> {
+    if let Some(ip) = parse_ip(host) {
+        return Some(ip);
+    }
+    let r = net.resolve(host, 3000).ok();
+    if r.is_none() {
+        o.str(cmd);
+        o.str(": cannot resolve ");
+        o.str(host);
+        o.str("\n");
+    }
+    r
+}
+
 fn ping(o: &mut Out, host: &str) {
     let Ok(mut net) = Net::connect() else {
         o.str("ping: no network service\n");
         return;
     };
-    let ip = match parse_ip(host) {
-        Some(ip) => ip,
-        None => match net.resolve(host, 3000) {
-            Ok(ip) => ip,
-            Err(_) => {
-                o.str("ping: cannot resolve ");
-                o.str(host);
-                o.str("\n");
-                return;
-            }
-        },
-    };
+    let Some(ip) = lookup(o, &mut net, "ping", host) else { return };
     for _ in 0..4 {
         o.str("ping ");
         o.ip(ip);
@@ -588,4 +645,213 @@ fn kill(o: &mut Out, pid: u32) {
         Err(Error::Busy) => o.str("kill: busy, try again\n"),
         Err(_) => o.str("kill: failed\n"),
     }
+}
+
+/// Keys from the terminal, waiting up to `ms`: how many bytes; Err when
+/// the terminal is gone.
+fn keys(o: &Out, buf: &mut [u8], ms: u64) -> Result<usize, Error> {
+    match o.tty.0.read(buf) {
+        Err(Error::Busy) => {}
+        r => return r,
+    }
+    let _ = wait_raw(&[o.tty.0.raw()], ms * 1_000_000);
+    match o.tty.0.read(buf) {
+        Err(Error::Busy) => Ok(0),
+        r => r,
+    }
+}
+
+fn top(o: &mut Out) {
+    // CPU time (ms) per pid at the last round.
+    let mut last = [(0u32, 0u32); proc::MAX_PROCS];
+    let mut last_at = time_ns();
+    let mut buf = [0u8; proc::PROC_RECORD * proc::MAX_PROCS];
+    let mut key = [0u8; chan::MSG_MAX];
+    let mut first = true;
+    loop {
+        let Ok(len) = snapshot(proc::LIST, &mut buf) else {
+            o.str("top: cannot list the processes\n");
+            return;
+        };
+        let now = time_ns();
+        let window_ms = ((now - last_at) / 1_000_000).max(1) as u32;
+        last_at = now;
+        o.str("\x1b[H\x1b[2J");
+        o.str("top: CPU per process over ");
+        o.num(window_ms as u64);
+        o.str(" ms (100% = one core). Any key ends.\n\n");
+        o.str("  PID NAME             STATE        CPU%    CPU s\n");
+        let mut next = [(0u32, 0u32); proc::MAX_PROCS];
+        for (i, r) in buf[..len].chunks(proc::PROC_RECORD).enumerate() {
+            let (pid, ms) = (word(r, 0), word(r, 8));
+            next[i] = (pid, ms);
+            o.num_col(pid as u64, 5);
+            o.raw(b' ');
+            o.col(name_of(&r[16..32]), 17);
+            o.col(
+                match r[4] {
+                    proc::STATE_READY => "ready",
+                    proc::STATE_SLEEPING => "sleeping",
+                    proc::STATE_WAITING => "waiting",
+                    _ => "exited",
+                },
+                9,
+            );
+            match last.iter().find(|l| l.0 == pid && l.0 != 0) {
+                Some(&(_, before)) if !first => {
+                    // Per mille of one core.
+                    let pm = (ms.saturating_sub(before) as u64 * 1000 / window_ms as u64).min(9999);
+                    o.num_col(pm / 10, 6);
+                    o.raw(b'.');
+                    o.num(pm % 10);
+                }
+                _ => o.str("     -  "),
+            }
+            o.num_col(ms as u64 / 1000, 7);
+            o.raw(b'.');
+            o.num(ms as u64 / 100 % 10);
+            o.str("\n");
+        }
+        o.flush();
+        last = next;
+        first = false;
+        match keys(o, &mut key, 1000) {
+            Ok(0) => {}
+            _ => return,
+        }
+    }
+}
+
+fn ifconfig(o: &mut Out) {
+    let Ok(net) = Net::connect() else {
+        o.str("ifconfig: no network service\n");
+        return;
+    };
+    for k in 0.. {
+        let len = match net.if_info(k) {
+            Ok(Some(len)) => len,
+            Ok(None) => continue,
+            Err(_) => break,
+        };
+        let r = &net.slice[..len];
+        o.str(name_of(&r[0..8]));
+        o.str(":\n");
+        if r[8..14] != [0; 6] {
+            o.str("    ether ");
+            for (i, b) in r[8..14].iter().enumerate() {
+                if i > 0 {
+                    o.raw(b':');
+                }
+                o.hex2(*b);
+            }
+            o.str("\n");
+        }
+        if r[14] > 0 {
+            o.str("    inet  ");
+            o.ip(u32::from_le_bytes(r[16..20].try_into().unwrap()));
+            o.raw(b'/');
+            o.num(r[14] as u64);
+            o.str("\n");
+        }
+        for (label, at) in [("    router ", 20), ("    dns   ", 24)] {
+            let v = u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+            if v != 0 {
+                o.str(label);
+                o.ip(v);
+                o.str("\n");
+            }
+        }
+        for i in 0..r[15] as usize {
+            let e = &r[net::iface::HEADER + i * net::iface::V6_ENTRY..];
+            o.str("    inet6 ");
+            o.ip6(e[..16].try_into().unwrap());
+            o.raw(b'/');
+            o.num(e[16] as u64);
+            o.str("\n");
+        }
+        o.str("    frames rx ");
+        o.num(u32::from_le_bytes(r[28..32].try_into().unwrap()) as u64);
+        o.str("  tx ");
+        o.num(u32::from_le_bytes(r[32..36].try_into().unwrap()) as u64);
+        o.str("\n");
+    }
+    event!(Info, "shell.listed", what = "ifconfig", count = 0u32);
+}
+
+/// A TCP connection: what arrives is shown; a line typed is sent with
+/// CRLF when Enter is pressed. Ctrl-C or Ctrl-D ends it.
+fn nc(o: &mut Out, host: &str, port: u16) {
+    let Ok(mut net) = Net::connect() else {
+        o.str("nc: no network service\n");
+        return;
+    };
+    let Some(ip) = lookup(o, &mut net, "nc", host) else { return };
+    let s = match net.tcp_connect(ip, port).and_then(|s| net.wait_established(s, 5000).map(|_| s)) {
+        Ok(s) => s,
+        Err(_) => {
+            o.str("nc: cannot connect\n");
+            return;
+        }
+    };
+    o.str("connected to ");
+    o.ip(ip);
+    o.str("\n");
+    o.flush();
+    event!(Info, "shell.nc", port = port as u32);
+    let mut line = [0u8; LINE_MAX + 2];
+    let mut n = 0;
+    let mut key = [0u8; chan::MSG_MAX];
+    let mut data = [0u8; 1024];
+    loop {
+        let Ok(k) = keys(o, &mut key, 10) else { break };
+        let mut quit = false;
+        for &b in &key[..k] {
+            match b {
+                0x03 | 0x04 => quit = true,
+                b'\r' | b'\n' => {
+                    o.str("\n");
+                    line[n..n + 2].copy_from_slice(b"\r\n");
+                    if net.send_all(s, &line[..n + 2]).is_err() {
+                        quit = true;
+                    }
+                    n = 0;
+                }
+                0x7F | 0x08 if n > 0 => {
+                    n -= 1;
+                    o.str("\x08 \x08");
+                }
+                0x20..=0x7E if n < LINE_MAX => {
+                    line[n] = b;
+                    n += 1;
+                    o.raw(b);
+                }
+                _ => {}
+            }
+        }
+        if quit {
+            o.str("^C\n");
+            break;
+        }
+        match net.recv_now(s, &mut data) {
+            Ok(r) => {
+                for &b in &data[..r.len] {
+                    // Lone LFs as CRLF; CRs as they are.
+                    if b == b'\n' {
+                        o.raw(b'\r');
+                    }
+                    o.raw(b);
+                }
+                if r.ended {
+                    o.str("\nconnection closed\n");
+                    break;
+                }
+            }
+            Err(_) => {
+                o.str("\nconnection lost\n");
+                break;
+            }
+        }
+        o.flush();
+    }
+    let _ = net.close(s);
 }

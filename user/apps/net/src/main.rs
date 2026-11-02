@@ -37,7 +37,7 @@ use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, Soc
 use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address};
-use t5_rt::net::{self as proto, op, state, status};
+use t5_rt::net::{self as proto, iface, op, state, status};
 use t5_rt::{Channel, Error, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
 
 use fwd::{Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
@@ -1003,8 +1003,54 @@ impl Stack {
                     }
                 }
             }
+            op::IF_INFO => self.if_info(u32::from_le_bytes([m[4], m[5], m[6], m[7]]), mem),
             _ => Err(status::BAD_REQUEST),
         }
+    }
+
+    /// IF_INFO (doc/41): interface `k`'s record in `mem`.
+    fn if_info(&mut self, k: u32, mem: &mut [u8]) -> Result<(u32, u32), u32> {
+        let k = k as usize;
+        if k >= IFACES {
+            return Err(status::NO_ADDRESS);
+        }
+        let (iface, mac, router, dns, rx, tx) = match k {
+            IFACE0 => {
+                let Some(_) = self.dev.host else { return Ok((0, 0)) };
+                (&self.iface, [0; 6], None, None, self.dev.from_host, self.dev.to_host)
+            }
+            _ => {
+                let Some(e) = self.eth[k - 1].as_ref() else { return Ok((0, 0)) };
+                (&e.iface, e.dev.mac, e.router, e.dns_server, e.dev.rx, e.dev.tx)
+            }
+        };
+        let r = mem.get_mut(..iface::RECORD_MAX).ok_or(status::BAD_REQUEST)?;
+        r.fill(0);
+        let name = LINK_NAMES[k].as_bytes();
+        r[..name.len()].copy_from_slice(name);
+        r[8..14].copy_from_slice(&mac);
+        let mut n6 = 0;
+        for c in iface.ip_addrs() {
+            match c {
+                IpCidr::Ipv4(c) if r[14] == 0 => {
+                    r[14] = c.prefix_len();
+                    r[16..20].copy_from_slice(&c.address().to_bits().to_le_bytes());
+                }
+                IpCidr::Ipv6(c) if n6 < iface::V6_MAX => {
+                    let o = iface::HEADER + n6 * iface::V6_ENTRY;
+                    r[o..o + 16].copy_from_slice(&c.address().octets());
+                    r[o + 16] = c.prefix_len();
+                    n6 += 1;
+                }
+                _ => {}
+            }
+        }
+        r[15] = n6 as u8;
+        r[20..24].copy_from_slice(&router.unwrap_or(0).to_le_bytes());
+        r[24..28].copy_from_slice(&dns.unwrap_or(0).to_le_bytes());
+        r[28..32].copy_from_slice(&rx.to_le_bytes());
+        r[32..36].copy_from_slice(&tx.to_le_bytes());
+        Ok((1, (iface::HEADER + n6 * iface::V6_ENTRY) as u32))
     }
 
     /// An address for the reply: IPv4 as the value, IPv6 after the reply.

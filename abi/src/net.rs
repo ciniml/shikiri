@@ -27,12 +27,15 @@
 //! | PING_RESULT | – | – | 1 once the reply came / round trip in µs |
 //! | RESOLVE | – | name bytes from the slice (≤ `NAME_MAX`) | socket (one DNS lookup: an A record, AAAA with family 6) |
 //! | RESOLVE_RESULT | – | – | 1 once answered / IPv4 (`UNREACHABLE`: failed or no record); IPv6 after the reply |
+//! | IF_INFO | interface (0, 1, …) | – | 1 if it is up (0: not there now) / bytes put in the slice (`iface`; doc/41) |
 //!
 //! TCP_LISTEN and UDP_BIND (doc/23 §5): with address 0 and `link::ANY` the
 //! socket listens on every link (a TCP listener becomes the connection that
 //! comes first, on whichever link). A local address limits it to the link
 //! that has that address (`NO_ADDRESS` if none); a link limits it to that
 //! link.
+//!
+//! IF_INFO answers `NO_ADDRESS` for an interface number past the last.
 //!
 //! PING and RESOLVE sockets are freed with CLOSE like the others. Names are
 //! resolved on the Wi-Fi link only, with the DNS servers DHCP gave.
@@ -64,6 +67,20 @@ pub mod op {
     pub const PING_RESULT: u8 = 11;
     pub const RESOLVE: u8 = 12;
     pub const RESOLVE_RESULT: u8 = 13;
+    pub const IF_INFO: u8 = 14;
+}
+
+/// IF_INFO's record in the slice (doc/41): `name[8]` (NUL-padded) | `mac[6]`
+/// (zero for a link without one) | `u8` IPv4 prefix | `u8` IPv6 addresses
+/// | `u32` IPv4 address | `u32` router | `u32` DNS server (0: none) | `u32`
+/// frames received | `u32` frames sent | then per IPv6 address: `[u8; 16]`
+/// address | `u8` prefix | 3 zero bytes.
+pub mod iface {
+    pub const HEADER: usize = 36;
+    pub const V6_ENTRY: usize = 20;
+    /// IPv6 addresses a record holds at most.
+    pub const V6_MAX: usize = 4;
+    pub const RECORD_MAX: usize = HEADER + V6_ENTRY * V6_MAX;
 }
 
 pub mod status {
