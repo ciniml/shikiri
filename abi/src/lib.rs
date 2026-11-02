@@ -28,8 +28,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// Minor 12 (N2b-3, doc/22): `netdev:wlan0` and `wlan:ctl`. Minor 13
 /// (doc/35 §5): `netdev`'s frame rings (`MAP_RING`, `KICK`). Minor 14
 /// (doc/38): `proc:spawn`. Minor 15 (doc/39): `kbd`. Minor 16 (doc/40):
-/// `proc:list`, `proc:apps`, `proc:kill`.
-pub const ABI_MINOR: u16 = 16;
+/// `proc:list`, `proc:apps`, `proc:kill`. Minor 17 (doc/44): the display's
+/// 2D requests (`write`, `display::DONE`).
+pub const ABI_MINOR: u16 = 17;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -363,6 +364,27 @@ pub mod display {
     pub const ORIENTATION: usize = 4;
     /// `wait` event: frames were sent to the panel (value = how many).
     pub const FRAME: usize = 1;
+    /// `wait` event: 2D requests finished (value = how many; doc/44). One
+    /// runs at a time: `write` returns `Busy` until it has finished.
+    pub const DONE: usize = 2;
+    /// `wait` event: 2D requests failed (timed out, DMA error), in place of
+    /// their `DONE` (value = how many). The rows may be partly written.
+    pub const FAILED: usize = 3;
+
+    /// 2D requests, written to the display handle (doc/44): little-endian
+    /// u16s, in framebuffer pixels (the panel's, not the orientation's).
+    /// The hardware does them while the caller runs; it must not touch the
+    /// rows involved until `DONE`. The kernel writes those rows back from
+    /// the cache first (and drops the destination's).
+    pub mod op {
+        /// `FILL, x, y, w, h, rgb565`
+        pub const FILL: u16 = 1;
+        /// `COPY, src_x, src_y, dst_x, dst_y, w, h`. When the two overlap,
+        /// the destination must not come after the source in memory (rows,
+        /// then columns): the hardware reads ahead of what it writes, so a
+        /// copy down or to the right is refused (`Invalid`).
+        pub const COPY: u16 = 2;
+    }
 }
 
 /// Touch input (doc/17 §6). Points are in the orientation's coordinates

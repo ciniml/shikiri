@@ -91,7 +91,7 @@ impl Object {
     fn open(name: &[u8], pid: u32) -> Result<(Object, usize), Error> {
         match name {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
-            n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT)),
+            n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT | rights::WRITE)),
             n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open()?), rights::READ | rights::WAIT)),
             n if n == netdev::HOST.as_bytes() => {
                 Ok((Object::NetDev(crate::hostlink::NetDev::open()?), rights::READ | rights::WRITE | rights::WAIT))
@@ -345,6 +345,7 @@ impl Table {
             Object::WlanDev(d) => d.write(buf),
             Object::Spawn(s) => s.write(buf),
             Object::Kill(k) => k.write(buf),
+            Object::Display(d) => d.write(buf),
             _ => Err(Error::NoSupport),
         }
     }

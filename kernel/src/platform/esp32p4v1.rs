@@ -10,6 +10,7 @@ mod display;
 mod i2c;
 mod kbd;
 mod membench;
+mod ppa;
 mod psram;
 mod sd;
 mod sdio;
@@ -811,6 +812,51 @@ impl Platform for Esp32p4v1 {
         membench::bench(buf, pause_display)
     }
 
+    fn ppa_bench(buf: usize) -> Result<u32, &'static str> {
+        membench::ppa_bench(buf)
+    }
+
+    fn gfx_start(req: super::Gfx) -> Result<(), &'static str> {
+        let fb = display::buffer().ok_or("no display")?;
+        let (w, h) = (display::WIDTH as u32, display::HEIGHT as u32);
+        let at = |x: u16, y: u16| ppa::Block { base: fb, width: w, height: h, x: x as u32, y: y as u32 };
+        // Whole rows: the rows the hardware reads are written back; the
+        // ones it writes are written back and dropped, so that nothing the
+        // cache holds is written over its result later.
+        let rows = |y: u16, n: u16| (fb + y as usize * w as usize * 2, n as usize * w as usize * 2);
+        if ppa::busy() {
+            return Err("busy");
+        }
+        match req {
+            super::Gfx::Fill { x, y, w: bw, h: bh, rgb565 } => {
+                let (a, n) = rows(y, bh);
+                cache_writeback(a, n, true);
+                cache_invalidate(a, n, true);
+                ppa::start_fill(&at(x, y), bw as u32, bh as u32, rgb565)
+            }
+            super::Gfx::Copy { sx, sy, dx, dy, w: bw, h: bh } => {
+                let overlap = sx < dx + bw && dx < sx + bw && sy < dy + bh && dy < sy + bh;
+                if overlap && (dy > sy || (dy == sy && dx > sx)) {
+                    return Err("copy would overwrite its source");
+                }
+                let (a, n) = rows(sy, bh);
+                cache_writeback(a, n, true);
+                let (a, n) = rows(dy, bh);
+                cache_writeback(a, n, true);
+                cache_invalidate(a, n, true);
+                ppa::start_copy(&at(dx, dy), &at(sx, sy), bw as u32, bh as u32)
+            }
+        }
+    }
+
+    fn gfx_finished() -> (u32, u32) {
+        (ppa::finished(), ppa::failed())
+    }
+
+    fn gfx_busy() -> bool {
+        ppa::busy()
+    }
+
     fn flash_chip() -> Option<(u32, u32)> {
         // esp_rom_spiflash_chip_t starts with device_id, chip_size.
         let p = unsafe { rd(ROM_SPIFLASH_LEGACY_DATA) } as usize;
@@ -902,6 +948,10 @@ impl Platform for Esp32p4v1 {
 
     fn display_service() {
         display::service();
+        // A missed interrupt, or the timeout.
+        if ppa::busy() {
+            let _ = ppa::poll();
+        }
     }
 
     fn display_buffer() -> Option<(usize, usize)> {
@@ -927,6 +977,10 @@ impl Platform for Esp32p4v1 {
     fn handle_irq(code: usize) -> bool {
         if code == display::IRQ {
             display::service();
+            return true;
+        }
+        if code == ppa::IRQ {
+            let _ = ppa::poll();
             return true;
         }
         if code == USJ_IRQ {

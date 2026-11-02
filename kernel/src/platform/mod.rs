@@ -104,6 +104,11 @@ pub trait Platform {
     fn membench(_buf: usize, _pause_display: bool) -> Result<u32, &'static str> {
         Err("no psram")
     }
+    /// Fills, glyphs and copies with the 2D hardware on `buf` (a free PSRAM
+    /// slot), checked and timed (doc/44); returns the wrong pixels.
+    fn ppa_bench(_buf: usize) -> Result<u32, &'static str> {
+        Err("no 2d hardware")
+    }
     /// Flash chip details the boot code left behind, for the log:
     /// (JEDEC device id, size in bytes).
     fn flash_chip() -> Option<(u32, u32)> {
@@ -175,6 +180,17 @@ pub trait Platform {
     /// Logs the display's frame count and rate.
     fn display_stats() -> Result<u32, &'static str> {
         Err("no display")
+    }
+    /// Starts a 2D request on the display's framebuffer (doc/44).
+    fn gfx_start(_req: Gfx) -> Result<(), &'static str> {
+        Err("no 2d hardware")
+    }
+    /// 2D requests finished so far, and how many of them failed.
+    fn gfx_finished() -> (u32, u32) {
+        (0, 0)
+    }
+    fn gfx_busy() -> bool {
+        false
     }
     /// Handles an interrupt other than the timer; false if unknown.
     fn handle_irq(_code: usize) -> bool {
@@ -285,4 +301,11 @@ pub struct TouchPoint {
     pub y: u16,
     pub id: u16,
     pub size: u16,
+}
+
+/// A 2D request in framebuffer pixels (`t5_abi::display::op`, doc/44).
+#[derive(Clone, Copy, Debug)]
+pub enum Gfx {
+    Fill { x: u16, y: u16, w: u16, h: u16, rgb565: u16 },
+    Copy { sx: u16, sy: u16, dx: u16, dy: u16, w: u16, h: u16 },
 }

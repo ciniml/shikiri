@@ -343,6 +343,7 @@ impl Bus {
         if (PERIPH.contains(&addr) || CLIC.contains(&addr) || CACHE_CTRL.contains(&addr)) && addr % size == 0 {
             let ticks = self.ticks();
             let word = self.periph.read32(addr & !3, ticks);
+            let word = crate::dma2d::read_state(addr & !3, word).unwrap_or(word);
             let shift = (addr & 3) * 8;
             let mask = if size == 4 { u32::MAX } else { (1 << (size * 8)) - 1 };
             return Some((word >> shift) & mask);
@@ -417,9 +418,32 @@ impl Bus {
                 (self.periph.read32(a, ticks) & !mask) | ((v << shift) & mask)
             };
             self.periph.write32(a, word, ticks);
+            if crate::dma2d::contains(a) {
+                crate::dma2d::on_write(self, a, word);
+            }
             return true;
         }
         false
+    }
+
+    /// A DMA read of memory (L2MEM or PSRAM, not through the caches).
+    pub fn dma_read(&mut self, addr: u32, size: u32) -> u32 {
+        if let Some(o) = within(addr, size, L2MEM_BASE, L2MEM_SIZE) {
+            return rd(&self.l2mem, o, size);
+        }
+        match self.psram.translate(addr, size) {
+            Some(o) if Psram::in_window(addr) => rd(&self.psram.mem, o as u32, size),
+            _ => 0,
+        }
+    }
+
+    /// A DMA write of memory (L2MEM or PSRAM, not through the caches).
+    pub fn dma_write(&mut self, addr: u32, size: u32, v: u32) {
+        if let Some(o) = within(addr, size, L2MEM_BASE, L2MEM_SIZE) {
+            wr(&mut self.l2mem, o, size, v);
+        } else if let (Some(o), true) = (self.psram.translate(addr, size), Psram::in_window(addr)) {
+            wr(&mut self.psram.mem, o as u32, size, v);
+        }
     }
 
     /// Instruction fetch of a halfword. `None` is a bus error. ROM is handled

@@ -269,7 +269,7 @@ pub struct Display {
 impl Display {
     /// Opens and maps the display. Needs `--permit display`.
     pub fn open() -> Result<Display, Error> {
-        let handle = Handle::open(display::NAME, rights::CTL | rights::WAIT)?;
+        let handle = Handle::open(display::NAME, rights::CTL | rights::WAIT | rights::WRITE)?;
         let info = handle.ctl(display::INFO, 0)?;
         let (fb_w, fb_h) = (info & 0xFFFF, info >> 16);
         let quarter = handle.ctl(display::ORIENTATION, 0)? & 3;
@@ -349,6 +349,50 @@ impl Display {
 
     pub fn flush_all(&self) -> Result<(), Error> {
         self.flush(0, self.fb_h)
+    }
+
+    /// The framebuffer rectangle (x, y, w, h) that user rectangle covers.
+    pub fn fb_rect(&self, x: usize, y: usize, w: usize, h: usize) -> (usize, usize, usize, usize) {
+        let (a, b) = (self.index(x, y), self.index(x + w - 1, y + h - 1));
+        let (ax, ay, bx, by) = (a % self.fb_w, a / self.fb_w, b % self.fb_w, b / self.fb_w);
+        (ax.min(bx), ay.min(by), ax.abs_diff(bx) + 1, ay.abs_diff(by) + 1)
+    }
+
+    /// Starts filling a user rectangle with the 2D hardware (doc/44). The
+    /// caller must not touch those framebuffer rows until `wait_done`.
+    pub fn start_fill(&self, x: usize, y: usize, w: usize, h: usize, color: u16) -> Result<(), Error> {
+        let (fx, fy, fw, fh) = self.fb_rect(x, y, w, h);
+        self.request(&[display::op::FILL, fx as u16, fy as u16, fw as u16, fh as u16, color])
+    }
+
+    /// Starts copying a user rectangle of `w` x `h` from (sx, sy) to
+    /// (dx, dy) with the 2D hardware. `Invalid` if, in the framebuffer,
+    /// the copy would overwrite source it has not read yet (then copy with
+    /// the CPU).
+    pub fn start_copy(&self, sx: usize, sy: usize, dx: usize, dy: usize, w: usize, h: usize) -> Result<(), Error> {
+        let (fsx, fsy, fw, fh) = self.fb_rect(sx, sy, w, h);
+        let (fdx, fdy, _, _) = self.fb_rect(dx, dy, w, h);
+        self.request(&[display::op::COPY, fsx as u16, fsy as u16, fdx as u16, fdy as u16, fw as u16, fh as u16])
+    }
+
+    fn request(&self, words: &[u16]) -> Result<(), Error> {
+        let mut b = [0u8; 14];
+        for (i, w) in words.iter().enumerate() {
+            b[2 * i..2 * i + 2].copy_from_slice(&w.to_le_bytes());
+        }
+        self.handle.write(&b[..2 * words.len()]).map(|_| ())
+    }
+
+    /// Waits until the 2D request started last has finished; `Fail` if it
+    /// failed (the rows may be partly written).
+    pub fn wait_done(&self) -> Result<(), Error> {
+        loop {
+            match wait(&[&self.handle], FOREVER)?.kind {
+                display::DONE => return Ok(()),
+                display::FAILED => return Err(Error::Fail),
+                _ => {}
+            }
+        }
     }
 }
 

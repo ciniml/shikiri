@@ -550,6 +550,11 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             Some(_) => Err("slot too small"),
             None => Err("no free slot"),
         },
+        Command::PpaBench => match s.free_slot().map(slot) {
+            Some((base, size)) if size >= 3 << 20 => Current::ppa_bench(base),
+            Some(_) => Err("slot too small"),
+            None => Err("no free slot"),
+        },
     };
     match result {
         Ok(value) => event!(Info, "ctl.done", request_id = id, cmd = cmd.name(), ok = true, value = value),

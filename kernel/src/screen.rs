@@ -4,7 +4,7 @@
 
 use t5_abi::{Error, event};
 
-use crate::platform::{Current, Platform, TouchPoint};
+use crate::platform::{Current, Gfx, Platform, TouchPoint};
 use crate::time;
 
 /// Quarter turns clockwise from the panel's top to the user's top. The
@@ -152,6 +152,8 @@ static mut DISPLAY_OWNED: bool = false;
 /// The handle on `display`; only one exists at a time.
 pub struct DisplayHandle {
     seen_frames: u32,
+    /// 2D requests (finished, failed) the process has been told about.
+    seen_done: (u32, u32),
 }
 
 impl DisplayHandle {
@@ -163,7 +165,7 @@ impl DisplayHandle {
             return Err(Error::Busy);
         }
         unsafe { DISPLAY_OWNED = true };
-        Ok(DisplayHandle { seen_frames: Current::display_frames() })
+        Ok(DisplayHandle { seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
     }
 
     pub fn ctl(&mut self, op: usize, arg: u64) -> Result<usize, Error> {
@@ -188,8 +190,38 @@ impl DisplayHandle {
         }
     }
 
-    /// The `wait` event: FRAME with the frames sent since the last one.
+    /// A 2D request (`t5_abi::display::op`, doc/44): starts it.
+    pub fn write(&mut self, req: &[u8]) -> Result<usize, Error> {
+        use t5_abi::display::op;
+        let mut v = [0u16; 7];
+        for (i, c) in req.chunks_exact(2).take(7).enumerate() {
+            v[i] = u16::from_le_bytes([c[0], c[1]]);
+        }
+        let gfx = match (v[0], req.len()) {
+            (op::FILL, 12) => Gfx::Fill { x: v[1], y: v[2], w: v[3], h: v[4], rgb565: v[5] },
+            (op::COPY, 14) => Gfx::Copy { sx: v[1], sy: v[2], dx: v[3], dy: v[4], w: v[5], h: v[6] },
+            (op::FILL | op::COPY, _) => return Err(Error::Size),
+            _ => return Err(Error::NoSupport),
+        };
+        if Current::gfx_busy() {
+            return Err(Error::Busy);
+        }
+        Current::gfx_start(gfx).map_err(|why| {
+            event!(Debug, "display.gfx_refused", error = why);
+            Error::Invalid
+        })?;
+        Ok(req.len())
+    }
+
+    /// The `wait` events: FAILED or DONE with the 2D requests finished
+    /// since the last one, else FRAME with the frames sent since the last.
     pub fn poll(&mut self) -> Option<(usize, usize)> {
+        let (done, failed) = Current::gfx_finished();
+        if (done, failed) != self.seen_done {
+            let (n, bad) = (done.wrapping_sub(self.seen_done.0), failed.wrapping_sub(self.seen_done.1));
+            self.seen_done = (done, failed);
+            return Some(if bad != 0 { (t5_abi::display::FAILED, bad as usize) } else { (t5_abi::display::DONE, n as usize) });
+        }
         let f = Current::display_frames();
         (f != self.seen_frames).then(|| {
             let n = f.wrapping_sub(self.seen_frames);

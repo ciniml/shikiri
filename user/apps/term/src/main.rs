@@ -53,9 +53,13 @@ fn main(mode: usize, _: usize) -> usize {
         cursor_drawn: None,
         shown: unsafe { &mut *core::ptr::addr_of_mut!(SHOWN) },
     };
-    // Matches `SHOWN`'s blank cells.
-    d.fill(color(Color::Default, false));
-    let _ = d.flush_all();
+    // Matches `SHOWN`'s blank cells. The 2D hardware writes memory itself
+    // (doc/44); the CPU's fill needs the flush.
+    let (w, h) = d.size();
+    if d.start_fill(0, 0, w, h, color(Color::Default, false)).and_then(|_| d.wait_done()).is_err() {
+        d.fill(color(Color::Default, false));
+        let _ = d.flush_all();
+    }
     t.screen.mark_all();
     t.draw(&mut d);
     if mode == 1 {
@@ -330,8 +334,16 @@ impl Term {
             return false;
         }
         let (h, dy) = ((ROWS * CH) as isize, k.unsigned_abs() as isize * CH as isize);
+        // Up with the 2D hardware where the kernel takes it (doc/44): at 270°
+        // the copy runs toward lower addresses. Else with the CPU.
+        let hw = k > 0 && d.start_copy(0, dy as usize, 0, 0, COLS * CW, (h - dy) as usize).is_ok();
+        if hw && d.wait_done().is_err() {
+            // Partly copied: draw every cell again.
+            self.shown.iter_mut().for_each(|r| r.fill(STALE));
+            return true;
+        }
         let fb_len = d.fb_mut().len() as isize;
-        for x in 0..COLS * CW {
+        for x in (0..COLS * CW).filter(|_| !hw) {
             let b = d.index(x, 0) as isize;
             // [src, src + len) to dst, in framebuffer indices.
             let len = h - dy;

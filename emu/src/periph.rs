@@ -589,6 +589,12 @@ impl Peripherals {
                 lines[idx] = true;
             }
         }
+        if self.peek(crate::dma2d::RX1_INT_RAW) & self.peek(crate::dma2d::RX1_INT_ENA) != 0 {
+            let idx = map[crate::dma2d::SRC_DMA2D_IN_CH1] as usize;
+            if idx < CLIC_LINES {
+                lines[idx] = true;
+            }
+        }
         if self.usj.int_st() != 0 {
             let idx = map[SRC_USJ] as usize;
             if idx < CLIC_LINES {
@@ -629,5 +635,10 @@ impl Peripherals {
     /// A register value nothing models (writes are kept).
     pub fn peek(&self, addr: u32) -> u32 {
         self.other.get(&addr).copied().unwrap_or_else(|| initial_value(addr))
+    }
+
+    /// Sets a register nothing models, as the hardware would (dma2d.rs).
+    pub fn poke(&mut self, addr: u32, v: u32) {
+        self.other.insert(addr, v);
     }
 }

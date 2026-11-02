@@ -202,3 +202,135 @@ pub fn bench(buf: usize, pause: bool) -> Result<u32, &'static str> {
     event!(Info, "membench.done");
     Ok(BYTES as u32)
 }
+
+// ---- PPA and 2D-DMA (doc/44) -------------------------------------------
+
+/// A 720 x 1280 RGB565 image, as the framebuffer.
+const W: u32 = 720;
+const H: u32 = 1280;
+const IMAGE: usize = (W * H * 2) as usize;
+
+fn px(a: usize, x: u32, y: u32) -> u16 {
+    unsafe { core::ptr::read_volatile((a + ((y * W + x) * 2) as usize) as *const u16) }
+}
+
+fn pattern16(x: u32, y: u32) -> u16 {
+    (x.wrapping_mul(31) ^ y.wrapping_mul(17)) as u16
+}
+
+/// Fill, glyphs and copies with the PPA and 2D-DMA on `buf` (a free slot:
+/// the image, then the glyph), checked by the CPU.
+pub fn ppa_bench(buf: usize) -> Result<u32, &'static str> {
+    use super::ppa::{self, Block};
+    if buf < psram::WINDOW {
+        return Err("no psram");
+    }
+    let img = |x: u32, y: u32| Block { base: buf, width: W, height: H, x, y };
+    let glyph_at = buf + (2 << 20);
+    let report = |case: &str, ops: u32, us: u64, bad: u32| {
+        event!(Info, "ppa.bench", case = case, ops = ops, us = us as u32, bad = bad);
+    };
+    let _ = &report;
+    let sync = |len: usize| {
+        cache_writeback(buf, len, true);
+        cache_invalidate(buf, len, true);
+    };
+    let mut failures = 0;
+
+    let mut r: Result<(), &str> = Ok(());
+    // Copies: the lower half from the upper; then a scroll, everything 32
+    // pixels to the left (source and destination overlap).
+    for y in 0..H {
+        for x in 0..W {
+            unsafe { core::ptr::write_volatile((buf + ((y * W + x) * 2) as usize) as *mut u16, pattern16(x, y)) };
+        }
+    }
+    sync(IMAGE);
+    let us = timed(|| r = ppa::copy(&img(0, H / 2), &img(0, 0), W, H / 2));
+    sync(IMAGE);
+    let bad = (H / 2..H).map(|y| (0..W).filter(|&x| px(buf, x, y) != pattern16(x, y - H / 2)).count() as u32).sum();
+    report("copy_half", 1, us, bad);
+    failures += bad;
+    for y in 0..H {
+        for x in 0..W {
+            unsafe { core::ptr::write_volatile((buf + ((y * W + x) * 2) as usize) as *mut u16, pattern16(x, y)) };
+        }
+    }
+    sync(IMAGE);
+    let us = timed(|| r = ppa::copy(&img(0, 0), &img(32, 0), W - 32, H));
+    sync(IMAGE);
+    let bad = (0..H).map(|y| (0..W - 32).filter(|&x| px(buf, x, y) != pattern16(x + 32, y)).count() as u32).sum();
+    report("copy_scroll_left", 1, us, bad);
+    failures += bad;
+    display::service();
+    // A full-screen fill.
+    sync(IMAGE);
+    let us = timed(|| r = ppa::fill(&img(0, 0), W, H, 0x1234));
+    sync(IMAGE);
+    let bad = (0..H).map(|y| (0..W).filter(|&x| px(buf, x, y) != 0x1234).count() as u32).sum();
+    report("fill_full", r.is_ok() as u32, us, bad);
+    failures += bad;
+    display::service();
+
+    // The terminal's 22 x 80 cells (32 x 16 in the framebuffer), one fill each.
+    let cell_color = |r: u32, c: u32| (r * 80 + c) as u16 | 1;
+    let us = timed(|| {
+        for c in 0..80 {
+            for r in 0..22 {
+                if ppa::fill(&img(r * 32, c * 16), 32, 16, cell_color(r, c)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    sync(IMAGE);
+    let mut bad = 0;
+    for c in 0..80 {
+        for r in 0..22 {
+            bad += (px(buf, r * 32, c * 16) != cell_color(r, c)) as u32 + (px(buf, r * 32 + 31, c * 16 + 15) != cell_color(r, c)) as u32;
+        }
+    }
+    report("fill_cells", 1760, us, bad);
+    failures += bad;
+    display::service();
+
+    // A8 glyphs: alpha 0, 128, 255 in thirds of the rows.
+    let alpha = |x: u32| [0u8, 128, 255][(x * 3 / 32) as usize];
+    for y in 0..16 {
+        for x in 0..32 {
+            unsafe { core::ptr::write_volatile((glyph_at + (y * 32 + x) as usize) as *mut u8, alpha(x)) };
+        }
+    }
+    cache_writeback(glyph_at, 512, true);
+    let _ = ppa::fill(&img(0, 0), W, H, 0x0000);
+    sync(IMAGE);
+    let g = Block { base: glyph_at, width: 32, height: 16, x: 0, y: 0 };
+    let us = timed(|| {
+        for c in 0..80 {
+            for r in 0..22 {
+                if ppa::glyph(&img(r * 32, c * 16), &g, 32, 16, 0xFF_FFFF).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    sync(IMAGE);
+    let (mut bad, mut mid) = (0, 0);
+    for c in 0..80 {
+        for r in 0..22 {
+            let (x0, y0) = (r * 32, c * 16 + 7);
+            let wrong = (px(buf, x0, y0) != 0) as u32 + (px(buf, x0 + 31, y0) != 0xFFFF) as u32;
+            if wrong != 0 && bad == 0 {
+                event!(Info, "ppa.glyph_wrong", row = r, col = c, left = px(buf, x0, y0) as u32, right = px(buf, x0 + 31, y0) as u32);
+            }
+            bad += wrong;
+            mid = px(buf, x0 + 15, y0);
+        }
+    }
+    report("glyph_cells", 1760, us, bad);
+    event!(Info, "ppa.glyph_half", value = mid as u32);
+    failures += bad;
+    display::service();
+
+    Ok(failures)
+}

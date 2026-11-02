@@ -69,6 +69,8 @@ pub mod cmd {
     /// `u32 pause`: memory bandwidth on a free slot, also with the frame
     /// DMA stopped if `pause` (doc/43).
     pub const MEMBENCH: u8 = 27;
+    /// Fill, glyph and copy with the PPA and 2D-DMA on a free slot (doc/44).
+    pub const PPA_BENCH: u8 = 28;
 }
 
 /// `Command::Prof` operations.
@@ -113,6 +115,7 @@ pub enum Command<'a> {
     WlanProbe,
     Prof { op: u32, a: u32, b: u32 },
     Membench { pause: bool },
+    PpaBench,
 }
 
 impl Command<'_> {
@@ -145,6 +148,7 @@ impl Command<'_> {
             Command::WlanProbe => "wlanprobe",
             Command::Prof { .. } => "prof",
             Command::Membench { .. } => "membench",
+            Command::PpaBench => "ppabench",
         }
     }
 }
@@ -182,6 +186,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::SD_READ if args.len() == 4 => Command::SdRead { lba: u32_at(args, 0)? },
         cmd::SD_TEST if args.is_empty() => Command::SdTest,
         cmd::WLAN_PROBE if args.is_empty() => Command::WlanProbe,
+        cmd::PPA_BENCH if args.is_empty() => Command::PpaBench,
         cmd::MEMBENCH if args.len() == 4 => Command::Membench { pause: u32_at(args, 0)? != 0 },
         cmd::PROF if args.len() == 12 => Command::Prof { op: u32_at(args, 0)?, a: u32_at(args, 4)?, b: u32_at(args, 8)? },
         cmd::REMOVE | cmd::ROLLBACK => {
@@ -241,6 +246,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::WlanProbe => put(&[cmd::WLAN_PROBE])?,
         Command::Prof { .. } => put(&[cmd::PROF])?,
         Command::Membench { .. } => put(&[cmd::MEMBENCH])?,
+        Command::PpaBench => put(&[cmd::PPA_BENCH])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -331,6 +337,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("wlanprobe") => Command::WlanProbe,
         Some("sdread") => Command::SdRead { lba: num(Some(w.next().ok_or("sdread LBA")?))? },
         Some("rotate") => Command::Rotate { degrees: num(Some(w.next().ok_or("rotate 0|90|180|270")?))? },
+        Some("ppabench") => Command::PpaBench,
         Some("membench") => match w.next() {
             None => Command::Membench { pause: false },
             Some("pause") => Command::Membench { pause: true },
@@ -347,7 +354,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         },
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause]");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench");
         }
     };
     if w.next().is_some() {

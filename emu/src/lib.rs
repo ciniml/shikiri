@@ -1,5 +1,6 @@
 pub mod bus;
 pub mod cache;
+pub mod dma2d;
 pub mod dsi;
 pub mod elf;
 pub mod hostpeer;
