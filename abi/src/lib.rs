@@ -27,8 +27,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// (M7c, doc/18 §3): the `sd` object. Minor 11 (N2a, doc/21): `netdev`.
 /// Minor 12 (N2b-3, doc/22): `netdev:wlan0` and `wlan:ctl`. Minor 13
 /// (doc/35 §5): `netdev`'s frame rings (`MAP_RING`, `KICK`). Minor 14
-/// (doc/38): `proc:spawn`. Minor 15 (doc/39): `kbd`.
-pub const ABI_MINOR: u16 = 15;
+/// (doc/38): `proc:spawn`. Minor 15 (doc/39): `kbd`. Minor 16 (doc/40):
+/// `proc:list`, `proc:apps`, `proc:kill`.
+pub const ABI_MINOR: u16 = 16;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -273,6 +274,45 @@ pub mod spawn {
     pub const ARGS: usize = 8;
     /// Longest name (the store's).
     pub const NAME_MAX: usize = 32;
+}
+
+/// The processes, the store's apps, and stopping a process (doc/40).
+/// Each needs its name in the Permissions TLV.
+///
+/// `proc:list` and `proc:apps` are read as whole records, as many as fit,
+/// from a snapshot the kernel takes on its service round after the
+/// handle was opened; until then `read` returns `Busy`. Each `read` gives
+/// the snapshot from its start (open again for a newer one).
+///
+/// `proc:kill`: writing a `u32` pid (LE) queues the kill; the kernel does
+/// it on its next service round and logs `proc.killed` or
+/// `proc.kill_failed`.
+pub mod proc {
+    pub const LIST: &str = "proc:list";
+    pub const APPS: &str = "proc:apps";
+    pub const KILL: &str = "proc:kill";
+
+    /// A `proc:list` record: `u32 pid | u8 state | u8 handles | u16 0 |
+    /// u32 cpu_ms | u32 ram (bytes: data, bss and stack) | name[16]`
+    /// (NUL-padded, cut if longer).
+    pub const PROC_RECORD: usize = 32;
+    pub const STATE_READY: u8 = 0;
+    pub const STATE_SLEEPING: u8 = 1;
+    pub const STATE_WAITING: u8 = 2;
+    pub const STATE_EXITED: u8 = 3;
+
+    /// A `proc:apps` record: `name[32] | u32 length | u32 version[3] | u8
+    /// state (0 current, 1 previous, 2 unconfirmed) | u8 flags (bit 0
+    /// autostart) | u16 0`.
+    pub const APP_RECORD: usize = 52;
+    pub const APP_CURRENT: u8 = 0;
+    pub const APP_PREVIOUS: u8 = 1;
+    pub const APP_UNCONFIRMED: u8 = 2;
+    pub const APP_AUTOSTART: u8 = 1;
+
+    /// Processes and apps a snapshot holds at most.
+    pub const MAX_PROCS: usize = 16;
+    pub const MAX_APPS: usize = 32;
 }
 
 /// The SD card as sectors (doc/18 §3), for the file service: one opener at

@@ -6,9 +6,10 @@
 //! built-in commands; `help` lists them.
 //!
 //! Built with `--permit svc:tty --permit svc:fs --permit svc:net --permit
-//! proc:spawn`. Exits 0 on `exit`, or 1 if there is no terminal.
+//! proc:spawn --permit proc:list --permit proc:apps --permit proc:kill`.
+//! Exits 0 on `exit`, or 1 if there is no terminal.
 
-use t5_rt::{Channel, Error, Files, Handle, Net, chan, event, fs, rights, sleep_ms, spawn, time_ns};
+use t5_rt::{Channel, Error, Files, Handle, Net, chan, event, fs, proc, rights, sleep_ms, spawn, time_ns};
 
 t5_rt::entry!(main);
 
@@ -83,6 +84,23 @@ impl Out {
             self.num(v / 10);
         }
         self.raw(b'0' + (v % 10) as u8);
+    }
+
+    /// `s`, then spaces up to `width` columns.
+    fn col(&mut self, s: &str, width: usize) {
+        self.str(s);
+        for _ in s.len()..width {
+            self.raw(b' ');
+        }
+    }
+
+    /// `v` right-aligned in `width` columns.
+    fn num_col(&mut self, v: u64, width: usize) {
+        let digits = (v.max(1).ilog10() + 1) as usize;
+        for _ in digits..width {
+            self.raw(b' ');
+        }
+        self.num(v);
     }
 
     fn ip(&mut self, ip: u32) {
@@ -263,6 +281,9 @@ impl Shell {
                  rm FILE               delete a file\n\
                  mkdir DIR             make a directory\n\
                  run APP [A0 [A1]]     start an app from the store\n\
+                 apps                  list the apps in the store\n\
+                 ps                    list the processes\n\
+                 kill PID              stop a process\n\
                  ping HOST             ping an address or name\n\
                  exit                  end the shell (term starts a new one)\n",
             ),
@@ -311,6 +332,12 @@ impl Shell {
             "run" => match args.first() {
                 Some(app) => run_app(o, app, args.get(1).and_then(|a| a.parse().ok()).unwrap_or(0), args.get(2).and_then(|a| a.parse().ok()).unwrap_or(0)),
                 None => o.str("usage: run APP [A0 [A1]]\n"),
+            },
+            "ps" => ps(o),
+            "apps" => apps(o),
+            "kill" => match args.first().and_then(|a| a.parse::<u32>().ok()) {
+                Some(pid) => kill(o, pid),
+                None => o.str("usage: kill PID\n"),
             },
             "ping" => match args.first() {
                 Some(h) => ping(o, h),
@@ -450,5 +477,115 @@ fn ping(o: &mut Out, host: &str) {
         }
         o.flush();
         sleep_ms(500);
+    }
+}
+
+/// A snapshot from `proc:list` or `proc:apps` into `buf`: its length.
+fn snapshot(name: &str, buf: &mut [u8]) -> Result<usize, Error> {
+    let h = Handle::open(name, rights::READ)?;
+    // The kernel takes it on its next service round.
+    for _ in 0..100 {
+        match h.read(buf) {
+            Err(Error::Busy) => sleep_ms(10),
+            r => return r,
+        }
+    }
+    Err(Error::Busy)
+}
+
+fn word(b: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
+}
+
+fn name_of(b: &[u8]) -> &str {
+    let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    core::str::from_utf8(&b[..n]).unwrap_or("?")
+}
+
+fn ps(o: &mut Out) {
+    let mut buf = [0u8; proc::PROC_RECORD * proc::MAX_PROCS];
+    let Ok(len) = snapshot(proc::LIST, &mut buf) else {
+        o.str("ps: cannot list the processes\n");
+        return;
+    };
+    o.str("  PID NAME             STATE     HANDLES    RAM KB    CPU s\n");
+    for r in buf[..len].chunks(proc::PROC_RECORD) {
+        o.num_col(word(r, 0) as u64, 5);
+        o.raw(b' ');
+        o.col(name_of(&r[16..32]), 17);
+        o.col(
+            match r[4] {
+                proc::STATE_READY => "ready",
+                proc::STATE_SLEEPING => "sleeping",
+                proc::STATE_WAITING => "waiting",
+                _ => "exited",
+            },
+            9,
+        );
+        o.num_col(r[5] as u64, 8);
+        o.num_col(word(r, 12).div_ceil(1024) as u64, 10);
+        let ms = word(r, 8) as u64;
+        o.num_col(ms / 1000, 7);
+        o.raw(b'.');
+        o.num(ms / 100 % 10);
+        o.str("\n");
+    }
+    event!(Info, "shell.listed", what = "ps", count = (len / proc::PROC_RECORD) as u32);
+}
+
+fn apps(o: &mut Out) {
+    let mut buf = [0u8; proc::APP_RECORD * proc::MAX_APPS];
+    let Ok(len) = snapshot(proc::APPS, &mut buf) else {
+        o.str("apps: cannot list the store\n");
+        return;
+    };
+    o.str("NAME             VERSION     SIZE KB  NOTE\n");
+    for r in buf[..len].chunks(proc::APP_RECORD) {
+        o.col(name_of(&r[0..32]), 17);
+        let mut v = [0u8; 24];
+        let mut n = 0;
+        for i in 0..3 {
+            if i > 0 {
+                v[n] = b'.';
+                n += 1;
+            }
+            let mut x = word(r, 36 + 4 * i);
+            let start = n;
+            loop {
+                v[n] = b'0' + (x % 10) as u8;
+                n += 1;
+                x /= 10;
+                if x == 0 {
+                    break;
+                }
+            }
+            v[start..n].reverse();
+        }
+        o.col(core::str::from_utf8(&v[..n]).unwrap_or("?"), 10);
+        o.num_col(word(r, 32).div_ceil(1024) as u64, 9);
+        o.str("  ");
+        match r[48] {
+            proc::APP_PREVIOUS => o.str("previous "),
+            proc::APP_UNCONFIRMED => o.str("unconfirmed "),
+            _ => {}
+        }
+        if r[49] & proc::APP_AUTOSTART != 0 {
+            o.str("autostart");
+        }
+        o.str("\n");
+    }
+    event!(Info, "shell.listed", what = "apps", count = (len / proc::APP_RECORD) as u32);
+}
+
+fn kill(o: &mut Out, pid: u32) {
+    match Handle::open(proc::KILL, rights::WRITE).and_then(|h| h.write(&pid.to_le_bytes())) {
+        // Done on the kernel's next round; the log says how it went.
+        Ok(_) => {
+            o.str("kill ");
+            o.num(pid as u64);
+            o.str(": asked\n");
+        }
+        Err(Error::Busy) => o.str("kill: busy, try again\n"),
+        Err(_) => o.str("kill: failed\n"),
     }
 }

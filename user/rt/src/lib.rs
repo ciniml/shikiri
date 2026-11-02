@@ -9,7 +9,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, fs, kbd, net, netdev, rights, sd, shm, spawn, svc, sys, timer, touch, wlan};
+pub use t5_abi::{Error, FOREVER, chan, display, event, fs, kbd, net, netdev, proc, rights, sd, shm, spawn, svc, sys, timer, touch, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
