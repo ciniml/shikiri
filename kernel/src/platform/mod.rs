@@ -99,6 +99,11 @@ pub trait Platform {
     fn psram_test() -> Result<u32, &'static str> {
         Err("no psram")
     }
+    /// Measures memory bandwidth on `buf` (a free PSRAM slot) and logs it
+    /// (doc/43); with `pause_display`, also with the frame DMA stopped.
+    fn membench(_buf: usize, _pause_display: bool) -> Result<u32, &'static str> {
+        Err("no psram")
+    }
     /// Flash chip details the boot code left behind, for the log:
     /// (JEDEC device id, size in bytes).
     fn flash_chip() -> Option<(u32, u32)> {

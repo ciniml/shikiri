@@ -9,6 +9,7 @@ mod clock;
 mod display;
 mod i2c;
 mod kbd;
+mod membench;
 mod psram;
 mod sd;
 mod sdio;
@@ -226,6 +227,42 @@ unsafe fn map_flash_pages(first_entry: usize, count: usize, first_page: usize, v
         resume(autoload);
         core::arch::asm!("csrw 0x7c1, {0}", in(reg) mhcr);
     }
+}
+
+// esp32p4.rom.ld:180-182, 194; rom/cache.h:97-110.
+const ROM_CACHE_GET_L2_LINE_SIZE: usize = 0x4FC0_03CC;
+const ROM_CACHE_SET_L2_MODE: usize = 0x4FC0_03D4;
+const ROM_CACHE_INVALIDATE_ALL: usize = 0x4FC0_0404;
+const CACHE_SIZE_128K: u32 = 9;
+const CACHE_LINE_SIZE_128B: u32 = 4;
+/// L2 line size set at boot (doc/43 §3). The bootloader leaves 64 bytes
+/// (boot/sdkconfig: CONFIG_CACHE_L2_CACHE_LINE_64B).
+pub const L2_LINE: u32 = 128;
+
+/// Sets the L2 cache to 128 KiB, 8 ways, `L2_LINE`-byte lines and empties
+/// it, as ESP-IDF's app startup does (cpu_start.c:467-487, cache_hal.c:58-
+/// 77). Only at boot, before the PSRAM is up: L2 then holds clean flash
+/// lines only. Runs from RAM: the flash window goes through L2.
+#[unsafe(link_section = ".ram_text")]
+#[inline(never)]
+unsafe fn set_l2_line() {
+    unsafe {
+        let set_mode: unsafe extern "C" fn(u32, u32, u32) = core::mem::transmute(ROM_CACHE_SET_L2_MODE);
+        let invalidate_all: unsafe extern "C" fn(u32) -> i32 = core::mem::transmute(ROM_CACHE_INVALIDATE_ALL);
+        let writeback_all: unsafe extern "C" fn(u32) -> i32 = core::mem::transmute(ROM_CACHE_WRITEBACK_ALL);
+        let mhcr: usize;
+        core::arch::asm!("csrrc {0}, 0x7c1, {1}", out(reg) mhcr, in(reg) MHCR_BRANCH_PREDICTION);
+        writeback_all(CACHE_MAP_L1_DCACHE);
+        set_mode(CACHE_SIZE_128K, 8, CACHE_LINE_SIZE_128B);
+        invalidate_all(CACHE_MAP_L2_CACHE);
+        core::arch::asm!("csrw 0x7c1, {0}", in(reg) mhcr);
+    }
+}
+
+/// The L2 line size in bytes.
+pub fn l2_line() -> u32 {
+    let get: unsafe extern "C" fn() -> u32 = unsafe { core::mem::transmute(ROM_CACHE_GET_L2_LINE_SIZE) };
+    unsafe { get() }
 }
 
 // ROM SPI flash functions (esp32p4.rom.ld:123-125 for rev v1.x; the eco5 file
@@ -474,6 +511,9 @@ impl Platform for Esp32p4v1 {
             wr(INTMTX_CORE1_BASE + 4 * (FROM_CPU_INTR0_SOURCE + 1), IPI_CLIC_INDEX as u32);
             wr(CLIC_CTRL_BASE + 4 * IPI_CLIC_INDEX, CLIC_TIMER_CTRL);
             wr(CLIC_INT_THRESH, 0);
+            if L2_LINE == 128 {
+                set_l2_line();
+            }
         }
     }
 
@@ -767,6 +807,10 @@ impl Platform for Esp32p4v1 {
         }
     }
 
+    fn membench(buf: usize, pause_display: bool) -> Result<u32, &'static str> {
+        membench::bench(buf, pause_display)
+    }
+
     fn flash_chip() -> Option<(u32, u32)> {
         // esp_rom_spiflash_chip_t starts with device_id, chip_size.
         let p = unsafe { rd(ROM_SPIFLASH_LEGACY_DATA) } as usize;
@@ -850,6 +894,9 @@ impl Platform for Esp32p4v1 {
     }
 
     fn display_init(panel: super::Panel, fb: usize) -> Result<usize, &'static str> {
+        // Drawing at 90° and 270° writes the framebuffer in strides, which
+        // autoload makes slower (doc/43 §4): keep it to the memory below.
+        psram::autoload(fb - psram::WINDOW);
         display::init(panel, fb).map(|_| display::FB_BYTES)
     }
 

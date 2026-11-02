@@ -37,6 +37,9 @@ pub const LP_SRAM_SIZE: u32 = 0x8000;
 pub const ROM_BASE: u32 = 0x4FC0_0000;
 pub const ROM_SIZE: u32 = 0x0002_0000;
 const PERIPH: std::ops::Range<u32> = 0x5000_0000..0x5020_0000;
+/// The cache controller's registers (cache_reg.h, DR_REG_CACHE_BASE): kept
+/// as plain registers; autoload is not modelled (doc/43 §4).
+const CACHE_CTRL: std::ops::Range<u32> = 0x3FF1_0000..0x3FF1_1000;
 const CLIC: std::ops::Range<u32> = 0x2080_0000..0x2080_2000;
 
 /// Flash program page and erase sector.
@@ -60,6 +63,8 @@ pub struct Bus {
     /// Set by the ROM's Cache_Suspend_L2_Cache. While set, the flash window
     /// cannot be read or fetched from: the real core would hang.
     pub l2_suspended: bool,
+    /// L2 line size in bytes, as `Cache_Set_L2_Cache_Mode` set it.
+    pub l2_line: u32,
     /// First flash-window access made while L2 was suspended.
     pub flash_violation: Option<u32>,
     /// 256-byte pages of `phys_flash` changed by the ROM erase/write
@@ -134,6 +139,7 @@ impl Bus {
             mmu: kernel_mmu(),
             mmu_index: 0,
             l2_suspended: false,
+            l2_line: 64,
             flash_violation: None,
             stale_l1d: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
             stale_l2: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
@@ -234,6 +240,7 @@ impl Bus {
         self.psram.mmu.fill(0);
         self.psram.cache = Cache::new(self.cache.mode, crate::psram::WINDOW, crate::psram::WINDOW_SIZE);
         self.l2_suspended = false;
+        self.l2_line = 64;
         if !keep_lp_sram {
             let mut x = seed | 1;
             for b in self.lp_sram.iter_mut() {
@@ -333,7 +340,7 @@ impl Bus {
             (ANA_PLL_CTRL0, 4) => return Some(self.periph.read32(addr, self.ticks()) | MSPI_CAL_END),
             _ => {}
         }
-        if (PERIPH.contains(&addr) || CLIC.contains(&addr)) && addr % size == 0 {
+        if (PERIPH.contains(&addr) || CLIC.contains(&addr) || CACHE_CTRL.contains(&addr)) && addr % size == 0 {
             let ticks = self.ticks();
             let word = self.periph.read32(addr & !3, ticks);
             let shift = (addr & 3) * 8;
@@ -398,7 +405,7 @@ impl Bus {
             }
             _ => {}
         }
-        if (PERIPH.contains(&addr) || CLIC.contains(&addr)) && addr % size == 0 {
+        if (PERIPH.contains(&addr) || CLIC.contains(&addr) || CACHE_CTRL.contains(&addr)) && addr % size == 0 {
             let ticks = self.ticks();
             let a = addr & !3;
             let word = if size == 4 {

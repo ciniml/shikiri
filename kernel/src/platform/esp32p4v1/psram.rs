@@ -543,6 +543,31 @@ fn map(size: usize) {
     super::cache_invalidate(ALIAS, size, true);
 }
 
+// Cache autoload: on a miss in a section, the cache also loads the next
+// lines (cache_reg.h: L1 D 0x134-0x144, L2 0x2B4-0x2C4; control, then the
+// address and size of sections 0 and 1). Off after reset and in ESP-IDF
+// (cache_hal.c:49-54 keeps the ROM's setting). doc/43 §4.
+const CACHE: usize = 0x3FF1_0000;
+pub const L1D_AUTOLOAD: usize = CACHE + 0x134;
+pub const L2_AUTOLOAD: usize = CACHE + 0x2B4;
+/// ENA, ascending, sections 0 and 1; trigger (bits 3-4) 0: on a miss.
+const AUTOLOAD_WINDOWS: u32 = 1 | (1 << 8) | (1 << 9);
+
+/// Autoload in L1 D and L2 on the first `size` bytes of both linear maps of
+/// the PSRAM.
+pub fn autoload(size: usize) {
+    for ctrl in [L1D_AUTOLOAD, L2_AUTOLOAD] {
+        unsafe {
+            wr(ctrl, 0);
+            wr(ctrl + 4, WINDOW as u32);
+            wr(ctrl + 8, size as u32);
+            wr(ctrl + 12, ALIAS as u32);
+            wr(ctrl + 16, size as u32);
+            wr(ctrl, AUTOLOAD_WINDOWS);
+        }
+    }
+}
+
 fn pattern(i: usize) -> u32 {
     let x = (i as u32).wrapping_mul(0x9E37_79B9);
     x ^ (x >> 15) ^ 0xA5A5_0F0F
@@ -650,6 +675,7 @@ pub fn init() -> Result<usize, &'static str> {
     axi_init();
     tune()?;
     map(size);
+    autoload(size);
     let bad = memtest(size, QUICK_STEP);
     event!(Info, "psram.ready", window = Addr(WINDOW as u32), size = size as u32, ms = (Esp32p4v1::now() - started) / 16_000);
     if bad != 0 {

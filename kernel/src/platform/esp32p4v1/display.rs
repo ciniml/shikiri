@@ -768,6 +768,18 @@ pub fn log_stats() -> Result<u32, &'static str> {
     Ok(s.frames)
 }
 
+/// Stops the frame DMA for a measurement (doc/43); the panel shows
+/// underruns until `resume`. Returns whether it was running.
+pub fn pause() -> bool {
+    state().is_some() && stop()
+}
+
+pub fn resume() {
+    if let Some(s) = state() {
+        start(s.fb);
+    }
+}
+
 /// Stops the DMA before a software reset: it would keep writing across the
 /// reset (system_internal.c:66-70).
 /// Returns whether the channel was running.

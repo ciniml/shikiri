@@ -545,6 +545,11 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         // The full test overwrites the whole PSRAM, processes included.
         Command::Psram if s.slots.iter().any(Option::is_some) => Err("processes running"),
         Command::Psram => Current::psram_test(),
+        Command::Membench { pause } => match s.free_slot().map(slot) {
+            Some((base, size)) if size >= 2 << 20 => Current::membench(base, pause),
+            Some(_) => Err("slot too small"),
+            None => Err("no free slot"),
+        },
     };
     match result {
         Ok(value) => event!(Info, "ctl.done", request_id = id, cmd = cmd.name(), ok = true, value = value),

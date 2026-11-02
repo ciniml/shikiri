@@ -97,6 +97,10 @@ const ROM_CACHE_SUSPEND_L2: u32 = 0x4FC0_0508;
 const ROM_CACHE_RESUME_L2: u32 = 0x4FC0_050C;
 /// esp32p4.rom.ld:198.
 const ROM_CACHE_WRITEBACK_ALL: u32 = 0x4FC0_0414;
+/// esp32p4.rom.ld:180, 182, 194 (doc/43 §3).
+const ROM_CACHE_GET_L2_LINE_SIZE: u32 = 0x4FC0_03CC;
+const ROM_CACHE_SET_L2_MODE: u32 = 0x4FC0_03D4;
+const ROM_CACHE_INVALIDATE_ALL: u32 = 0x4FC0_0404;
 /// esp32p4.rom.ld:99-101: direct SPI commands (the kernel drives the
 /// PSRAM's MSPI3 with them).
 const ROM_SPI_CMD_CONFIG: u32 = 0x4FC0_0108;
@@ -638,6 +642,15 @@ impl Machine {
                     self.bus.psram.cache.writeback_d(0, u32::MAX);
                 }
             }
+            // rom/cache.h:107-110: CACHE_LINE_SIZE_64B = 3, _128B = 4.
+            ROM_CACHE_SET_L2_MODE => self.bus.l2_line = if a2 == 4 { 128 } else { 64 },
+            ROM_CACHE_GET_L2_LINE_SIZE => {
+                self.bus.cycles += 50;
+                self.cpu.x[10] = self.bus.l2_line;
+                self.cpu.pc = self.cpu.x[1] & !1;
+                return Ok(());
+            }
+            ROM_CACHE_INVALIDATE_ALL => self.bus.invalidate_window(a0, 0, u32::MAX),
             ROM_SPI_SET_OP_MODE | ROM_UPDATE_CPU_FREQUENCY => {}
             ROM_SPI_CMD_CONFIG => {
                 // esp_rom_spi_cmd_t: u16 cmd, u16 cmd_bits, u32 *addr,

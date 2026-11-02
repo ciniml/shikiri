@@ -235,17 +235,21 @@ impl Term {
             (r0, c0, r1, c1) = (0, 0, ROWS, COLS);
             dmg = vt::Damage { row0: 0, col0: 0, row1: ROWS, col1: COLS };
         }
-        for r in dmg.row0..dmg.row1 {
-            for c in dmg.col0..dmg.col1 {
-                let now = (*self.screen.at(r, c), cursor == Some((r, c)));
-                if self.shown[r][c] == now {
-                    continue;
-                }
-                self.shown[r][c] = now;
-                draw_cell(d, r, c, &now.0, now.1);
-                drawn += 1;
-                (r0, c0, r1, c1) = (r0.min(r), c0.min(c), r1.max(r + 1), c1.max(c + 1));
+        // In the framebuffer's order: when the user's y runs along its rows
+        // (90° and 270°), a column of cells is one stretch of framebuffer
+        // rows, written while those cache lines are held (doc/43 §5).
+        let (h, w) = (dmg.row1 - dmg.row0, dmg.col1 - dmg.col0);
+        let by_column = d.steps().1.unsigned_abs() == 1;
+        for i in 0..h * w {
+            let (r, c) = if by_column { (dmg.row0 + i % h, dmg.col0 + i / h) } else { (dmg.row0 + i / w, dmg.col0 + i % w) };
+            let now = (*self.screen.at(r, c), cursor == Some((r, c)));
+            if self.shown[r][c] == now {
+                continue;
             }
+            self.shown[r][c] = now;
+            draw_cell(d, r, c, &now.0, now.1);
+            drawn += 1;
+            (r0, c0, r1, c1) = (r0.min(r), c0.min(c), r1.max(r + 1), c1.max(c + 1));
         }
         self.cursor_drawn = cursor;
         if drawn == 0 && !moved {
