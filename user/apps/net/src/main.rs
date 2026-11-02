@@ -194,6 +194,9 @@ pub struct EthLink {
     /// The default router and the first DNS server DHCP gave.
     pub router: Option<u32>,
     dns_server: Option<u32>,
+    /// The DNS server the upstream RA named (RDNSS, doc/46), used when
+    /// DHCP gave none (smoltcp keeps one server).
+    dns6: Option<u128>,
     /// While it has no address: when to log the counters next.
     report_at: u64,
     /// Its address changed: the interfaces' addresses are to be redone.
@@ -222,6 +225,7 @@ impl EthLink {
             dns: None,
             router: None,
             dns_server: None,
+            dns6: None,
             report_at: clock_ns() + 5_000_000_000,
             changed: true,
             v6_logged: None,
@@ -261,6 +265,23 @@ impl EthLink {
         self.changed = true;
     }
 
+    /// The DNS server to ask: DHCP's (IPv4), else the RA's (IPv6).
+    pub fn dns_pick(&self) -> Option<IpAddress> {
+        self.dns_server.map(|d| IpAddress::Ipv4(Ipv4Address::from_bits(d))).or(self.dns6.map(|d| IpAddress::Ipv6(Ipv6Address::from_bits(d))))
+    }
+
+    /// Points the resolver at `dns_pick` (made the first time there is one).
+    fn update_dns(&mut self) {
+        let Some(server) = self.dns_pick() else { return };
+        match self.dns {
+            Some(d) => self.sockets.get_mut::<dns::Socket>(d).update_servers(&[server]),
+            None => {
+                let q = unsafe { &mut *core::ptr::addr_of_mut!(DNS_SLOTS) };
+                self.dns = Some(self.sockets.add(dns::Socket::new(&[server], &mut q[..])));
+            }
+        }
+    }
+
     /// Applies what DHCP says (address, default route, DNS servers).
     fn dhcp(&mut self) {
         let name = LINK_NAMES[self.dev.link];
@@ -274,23 +295,11 @@ impl EthLink {
             Some(dhcpv4::Event::Configured(c)) => {
                 let (addr, prefix) = (c.address.address().to_bits(), c.address.prefix_len());
                 let router = c.router.map(|r| r.to_bits());
-                let mut servers = [IpAddress::v4(0, 0, 0, 0); 3];
-                let n = c.dns_servers.len().min(servers.len());
-                for (s, d) in servers.iter_mut().zip(c.dns_servers.iter()) {
-                    *s = IpAddress::Ipv4(*d);
-                }
                 event!(Info, "net.dhcp", link = name, addr = addr, prefix = prefix as u32, router = router.unwrap_or(0), dns = c.dns_servers.first().map_or(0, |d| d.to_bits()));
                 let dns_server = c.dns_servers.first().map(|d| d.to_bits());
                 self.set_addr(addr, prefix, router);
                 self.dns_server = dns_server;
-                match self.dns {
-                    Some(d) => self.sockets.get_mut::<dns::Socket>(d).update_servers(&servers[..n]),
-                    None if n > 0 => {
-                        let q = unsafe { &mut *core::ptr::addr_of_mut!(DNS_SLOTS) };
-                        self.dns = Some(self.sockets.add(dns::Socket::new(&servers[..n], &mut q[..])));
-                    }
-                    None => {}
-                }
+                self.update_dns();
             }
             Some(dhcpv4::Event::Deconfigured) => {
                 self.iface.update_ip_addrs(|a| a.retain(|c| matches!(c, IpCidr::Ipv6(_))));
@@ -462,7 +471,16 @@ impl Stack {
                 }
             }
         }
-        let dns = self.eth[WLAN - 1].as_ref().and_then(|w| w.dns_server);
+        let d6 = self.dns6();
+        if let Some(w) = self.eth[WLAN - 1].as_mut()
+            && w.dns6 != d6
+        {
+            w.dns6 = d6;
+            w.update_dns();
+        }
+        let dns = self.eth[WLAN - 1].as_ref().and_then(|w| w.dns_pick());
+        // DHCP hands out IPv4 servers only.
+        let dns4 = self.eth[WLAN - 1].as_ref().and_then(|w| w.dns_server);
         if let Some(r) = &mut self.relay
             && let (Some(w), Some(d)) = {
                 let (a, b) = self.eth.split_at_mut(1);
@@ -476,7 +494,7 @@ impl Stack {
         let Some(e) = self.eth[srv.cfg.link as usize - 1].as_mut() else { return };
         let Some(own) = e.dev.own else { return };
         // The relay answers for names on the link itself.
-        let given = if relaying { own.0 } else { dns.unwrap_or(own.0) };
+        let given = if relaying { own.0 } else { dns4.unwrap_or(own.0) };
         srv.poll(&mut e.sockets, own, given);
     }
 

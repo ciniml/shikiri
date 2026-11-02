@@ -7,7 +7,7 @@
 
 use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::udp;
-use smoltcp::wire::{IpEndpoint, IpListenEndpoint, Ipv4Address};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 use t5_rt::event;
 
 const PORT: u16 = 53;
@@ -72,8 +72,9 @@ impl Relay {
         up_set.remove(self.up);
     }
 
-    /// Moves queries up and answers down. `server`: Wi-Fi's DNS server.
-    pub fn poll(&mut self, down_set: &mut SocketSet<'static>, up_set: &mut SocketSet<'static>, server: Option<u32>) {
+    /// Moves queries up and answers down. `server`: Wi-Fi's DNS server
+    /// (DHCP's, else the RA's, doc/46).
+    pub fn poll(&mut self, down_set: &mut SocketSet<'static>, up_set: &mut SocketSet<'static>, server: Option<IpAddress>) {
         let now = crate::clock_ns();
         for q in self.pending.iter_mut() {
             if q.is_some_and(|q| now - q.at > TIMEOUT_NS) {
@@ -97,7 +98,7 @@ impl Relay {
             let up_id = self.next_id;
             self.next_id = self.next_id.wrapping_add(1).max(1);
             msg[..2].copy_from_slice(&up_id.to_be_bytes());
-            if up.send_slice(&msg[..n], IpEndpoint::new(Ipv4Address::from_bits(server).into(), PORT)).is_ok() {
+            if up.send_slice(&msg[..n], IpEndpoint::new(server, PORT)).is_ok() {
                 *slot = Some(Query { from: meta.endpoint, id, up_id, at: now });
             } else {
                 self.dropped += 1;

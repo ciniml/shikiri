@@ -217,7 +217,26 @@ fn link_local(mac: [u8; 6]) -> u128 {
 
 const ALL_NODES: u128 = 0xff02_0000_0000_0000_0000_0000_0000_0001;
 
+// ICMPv6 errors (RFC 4443 §3): types and codes.
+const DEST_UNREACHABLE: u8 = 1;
+const PACKET_TOO_BIG: u8 = 2;
+const TIME_EXCEEDED: u8 = 3;
+const NO_ROUTE: u8 = 0;
+const ADMIN_PROHIBITED: u8 = 1;
+const ADDRESS_UNREACHABLE: u8 = 3;
+/// Errors sent per second at most (RFC 4443 §2.4 (f)), as for IPv4.
+const ICMP6_PER_S: u32 = 10;
+/// An error and its quote fit the IPv6 minimum MTU (RFC 4443 §2.4 (c)).
+const MIN_MTU: usize = 1280;
+/// RDNSS servers kept, and the RA option's type (RFC 8106 §5.1).
+const RDNSS_MAX: usize = 2;
+const OPT_RDNSS: u8 = 25;
+/// `route6_fwd`'s `from` for packets of our own (any link will do).
+const FROM_US: usize = usize::MAX;
+
 struct Pending {
+    /// Where the packet came in (for an error if no neighbor answers).
+    from: usize,
     link: usize,
     next_hop: u128,
     since: u64,
@@ -233,6 +252,8 @@ struct Stats {
     no_neighbor: u32,
     proxied: u32,
     ra_sent: u32,
+    icmp_sent: u32,
+    icmp_limited: u32,
 }
 
 pub struct Fwd6 {
@@ -245,15 +266,42 @@ pub struct Fwd6 {
     rs_sent: u32,
     /// The downstream prefix last advertised (logged when it changes).
     advertised: Option<u128>,
+    /// The one before, advertised deprecated (preferred lifetime 0) until
+    /// then, so hosts move to the new one (doc/46 §3).
+    retired: Option<(u128, u64)>,
     stats: Stats,
     logged: Stats,
     stats_at: u64,
+    icmp_until: u64,
+    icmp_left: u32,
+    /// DNS servers the upstream router's RA named (RDNSS, RFC 8106), and
+    /// until when (doc/46).
+    rdnss: [u128; RDNSS_MAX],
+    rdnss_n: usize,
+    rdnss_until: u64,
 }
 
 impl Fwd6 {
     pub const fn new() -> Fwd6 {
-        let z = Stats { forwarded: 0, no_route: 0, hop_limit: 0, no_neighbor: 0, proxied: 0, ra_sent: 0 };
-        Fwd6 { pending: [const { None }; PENDING], router: None, ra_at: 0, ra_now: false, rs_at: 0, rs_sent: 0, advertised: None, stats: z, logged: z, stats_at: 0 }
+        let z = Stats { forwarded: 0, no_route: 0, hop_limit: 0, no_neighbor: 0, proxied: 0, ra_sent: 0, icmp_sent: 0, icmp_limited: 0 };
+        Fwd6 {
+            pending: [const { None }; PENDING],
+            router: None,
+            ra_at: 0,
+            ra_now: false,
+            rs_at: 0,
+            rs_sent: 0,
+            advertised: None,
+            retired: None,
+            stats: z,
+            logged: z,
+            stats_at: 0,
+            icmp_until: 0,
+            icmp_left: 0,
+            rdnss: [0; RDNSS_MAX],
+            rdnss_n: 0,
+            rdnss_until: 0,
+        }
     }
 }
 
@@ -330,21 +378,100 @@ impl Stack {
         let dst = be128(&p[24..40]);
         let Some((link, next_hop)) = self.route6_fwd(from, dst) else {
             self.v6.stats.no_route += 1;
+            self.icmp6_error(from, DEST_UNREACHABLE, NO_ROUTE, 0, p);
             return;
         };
-        if filter::check(filter::FORWARD, from as u8, link as u8, p) != Action::Pass {
-            return;
+        match filter::check(filter::FORWARD, from as u8, link as u8, p) {
+            Action::Pass => {}
+            Action::Drop => return,
+            Action::Reject => return self.icmp6_error(from, DEST_UNREACHABLE, ADMIN_PROHIBITED, 0, p),
         }
         if p[7] <= 1 {
             self.v6.stats.hop_limit += 1;
+            self.icmp6_error(from, TIME_EXCEEDED, 0, 0, p);
+            return;
+        }
+        if link != IFACE0 && p.len() > MTU {
+            self.icmp6_error(from, PACKET_TOO_BIG, 0, MTU as u32, p);
             return;
         }
         p[7] -= 1;
         self.v6.stats.forwarded += 1;
-        self.send6(link, next_hop, p);
+        self.send6(from, link, next_hop, p);
     }
 
-    fn send6(&mut self, link: usize, next_hop: u128, p: &[u8]) {
+    /// An address of ours on `link` to send an error to `to` from: one in
+    /// `to`'s /64, else a global one (the error may have to cross routers),
+    /// else the link-local one; never loopback.
+    fn own6_on(&self, link: usize, to: u128) -> Option<u128> {
+        let addrs = if link == IFACE0 { self.iface.ip_addrs() } else { self.eth[link - 1].as_ref()?.iface.ip_addrs() };
+        let v6 = || {
+            addrs.iter().filter_map(|c| match c {
+                IpCidr::Ipv6(c) if !c.address().is_loopback() => Some(c.address()),
+                _ => None,
+            })
+        };
+        v6().find(|a| same64(a.to_bits(), to))
+            .or_else(|| v6().find(|a| !a.is_unicast_link_local()))
+            .or_else(|| v6().next())
+            .map(|a| a.to_bits())
+    }
+
+    /// Answers packet `p` (which came in on `from`) with an ICMPv6 error
+    /// (RFC 4443): not for errors, nor to multicast or unspecified sources
+    /// or for multicast destinations (§2.4 (e)), at most `ICMP6_PER_S` a
+    /// second. `param` is the 4 bytes after the checksum (the MTU of a
+    /// Packet Too Big).
+    pub fn icmp6_error(&mut self, from: usize, kind: u8, code: u8, param: u32, p: &[u8]) {
+        if p.len() < 40 {
+            return;
+        }
+        let (src, dst) = (be128(&p[8..24]), be128(&p[24..40]));
+        if src == 0 || src >> 120 == 0xFF || (dst >> 120 == 0xFF && kind != PACKET_TOO_BIG) {
+            return;
+        }
+        // An ICMPv6 error message (types below 128) is never answered.
+        if p[6] == NEXT_ICMPV6 && p.get(40).is_some_and(|&t| t < 128) {
+            return;
+        }
+        let Some(own) = self.own6_on(from, src) else { return };
+        let now = crate::clock_ns();
+        if now >= self.v6.icmp_until {
+            self.v6.icmp_until = now + 1_000_000_000;
+            self.v6.icmp_left = ICMP6_PER_S;
+        }
+        if self.v6.icmp_left == 0 {
+            self.v6.stats.icmp_limited += 1;
+            return;
+        }
+        self.v6.icmp_left -= 1;
+        let Some((link, next_hop)) = self.route6_fwd(FROM_US, src) else { return };
+        let quoted = p.len().min(MIN_MTU - 40 - 8);
+        let len = 40 + 8 + quoted;
+        let mut out = [0u8; MIN_MTU];
+        out[0] = 0x60;
+        out[4..6].copy_from_slice(&((8 + quoted) as u16).to_be_bytes());
+        out[6] = NEXT_ICMPV6;
+        out[7] = 64;
+        out[8..24].copy_from_slice(&own.to_be_bytes());
+        out[24..40].copy_from_slice(&src.to_be_bytes());
+        out[40] = kind;
+        out[41] = code;
+        out[44..48].copy_from_slice(&param.to_be_bytes());
+        out[48..len].copy_from_slice(&p[..quoted]);
+        let c = icmp6_checksum(&own.to_be_bytes(), &src.to_be_bytes(), &out[40..len]);
+        out[42..44].copy_from_slice(&c.to_be_bytes());
+        self.v6.stats.icmp_sent += 1;
+        event!(Debug, "net.icmp6_error", kind = kind, code = code, link = link as u32);
+        self.send6(link, link, next_hop, &out[..len]);
+    }
+
+    /// A packet to us that the filter rejected (IN).
+    pub fn reject6(&mut self, from: usize, p: &[u8]) {
+        self.icmp6_error(from, DEST_UNREACHABLE, ADMIN_PROHIBITED, 0, p);
+    }
+
+    fn send6(&mut self, from: usize, link: usize, next_hop: u128, p: &[u8]) {
         if link == IFACE0 {
             if let Some(h) = &self.dev.host {
                 let _ = h.write(p);
@@ -373,7 +500,7 @@ impl Stack {
         e.dev.port.write(&f[..n]);
         match self.v6.pending.iter_mut().find(|s| s.is_none()) {
             Some(slot) if p.len() <= MTU => {
-                let mut w = Pending { link, next_hop, since: crate::clock_ns(), len: p.len(), packet: [0; MTU] };
+                let mut w = Pending { from, link, next_hop, since: crate::clock_ns(), len: p.len(), packet: [0; MTU] };
                 w.packet[..p.len()].copy_from_slice(p);
                 *slot = Some(w);
             }
@@ -389,10 +516,14 @@ impl Stack {
             let Some(w) = &self.v6.pending[i] else { continue };
             if neighbors().lookup(w.link, w.next_hop).is_some() {
                 let w = self.v6.pending[i].take().unwrap();
-                self.send6(w.link, w.next_hop, &w.packet[..w.len]);
+                self.send6(w.from, w.link, w.next_hop, &w.packet[..w.len]);
             } else if now - w.since > PENDING_NS {
-                self.v6.pending[i] = None;
+                let w = self.v6.pending[i].take().unwrap();
                 self.v6.stats.no_neighbor += 1;
+                // Not for our own errors that waited (`from` is their link).
+                if w.from != w.link {
+                    self.icmp6_error(w.from, DEST_UNREACHABLE, ADDRESS_UNREACHABLE, 0, &w.packet[..w.len]);
+                }
             }
         }
         self.ndp();
@@ -403,7 +534,18 @@ impl Stack {
             let s = self.v6.stats;
             if s != self.v6.logged {
                 self.v6.logged = s;
-                event!(Info, "net.fwd6", forwarded = s.forwarded, no_route = s.no_route, hop_limit = s.hop_limit, no_neighbor = s.no_neighbor, proxied = s.proxied, ra_sent = s.ra_sent);
+                event!(
+                    Info,
+                    "net.fwd6",
+                    forwarded = s.forwarded,
+                    no_route = s.no_route,
+                    hop_limit = s.hop_limit,
+                    no_neighbor = s.no_neighbor,
+                    proxied = s.proxied,
+                    ra_sent = s.ra_sent,
+                    icmp_sent = s.icmp_sent,
+                    icmp_limited = s.icmp_limited
+                );
             }
         }
     }
@@ -420,11 +562,14 @@ impl Stack {
                     if self.v6.router.is_none_or(|(r, _)| r != src) {
                         // Router lifetime, and whether a prefix option comes.
                         let lifetime = u16::from_be_bytes([ip[46], ip[47]]);
-                        event!(Info, "net.ra", router = &ip[8..24], lifetime = lifetime, len = (len - ETH_HDR) as u32);
+                        // flags: M (0x80, addresses by DHCPv6), O (0x40, other
+                        // settings such as DNS by DHCPv6).
+                        event!(Info, "net.ra", router = &ip[8..24], lifetime = lifetime, flags = ip[45], len = (len - ETH_HDR) as u32);
                     }
                     if u16::from_be_bytes([ip[46], ip[47]]) > 0 {
                         self.v6.router = Some((src, mac));
                     }
+                    self.take_rdnss(ip.get(56..).unwrap_or(&[]));
                 }
                 RS if self.proxy().is_some_and(|(_, down)| down == link) => self.v6.ra_now = true,
                 NS => {
@@ -492,6 +637,41 @@ impl Stack {
 
     /// Router advertisements downstream: every `RA_EVERY_NS`, and at once
     /// after a Router Solicitation.
+    /// RDNSS options among RA options `opts`: the servers, and how long
+    /// they hold (0 drops them).
+    fn take_rdnss(&mut self, mut opts: &[u8]) {
+        while opts.len() >= 8 {
+            let len = opts[1] as usize * 8;
+            if len == 0 || len > opts.len() {
+                return;
+            }
+            if opts[0] == OPT_RDNSS && len >= 24 {
+                let lifetime = u32::from_be_bytes([opts[4], opts[5], opts[6], opts[7]]);
+                let mut servers = [0u128; RDNSS_MAX];
+                let n = ((len - 8) / 16).min(RDNSS_MAX);
+                for (k, s) in servers[..n].iter_mut().enumerate() {
+                    *s = be128(&opts[8 + 16 * k..24 + 16 * k]);
+                }
+                let changed = servers[..n] != self.v6.rdnss[..self.v6.rdnss_n] || (lifetime == 0) != (self.v6.rdnss_n == 0);
+                if lifetime == 0 {
+                    self.v6.rdnss_n = 0;
+                } else {
+                    (self.v6.rdnss, self.v6.rdnss_n) = (servers, n);
+                    self.v6.rdnss_until = crate::clock_ns() + lifetime as u64 * 1_000_000_000;
+                }
+                if changed {
+                    event!(Info, "net.rdnss", servers = n as u32, first = &servers[0].to_be_bytes()[..], lifetime = lifetime);
+                }
+            }
+            opts = &opts[len..];
+        }
+    }
+
+    /// The first DNS server the upstream RA named, while it holds.
+    pub fn dns6(&self) -> Option<u128> {
+        (self.v6.rdnss_n > 0 && crate::clock_ns() < self.v6.rdnss_until).then_some(self.v6.rdnss[0])
+    }
+
     fn advertise(&mut self) {
         let Some((up, down)) = self.proxy() else { return };
         let Some(prefix) = self.upstream_prefix(up) else { return };
@@ -502,12 +682,15 @@ impl Stack {
         self.v6.ra_now = false;
         self.v6.ra_at = now + RA_EVERY_NS;
         if self.v6.advertised != Some(prefix) {
+            if let Some(old) = self.v6.advertised {
+                self.v6.retired = Some((old, now + PREFIX_VALID as u64 * 1_000_000_000));
+            }
             self.v6.advertised = Some(prefix);
             event!(Info, "net.ndp_proxy", up = crate::fwd::LINK_NAMES[up], down = crate::fwd::LINK_NAMES[down], prefix = &prefix.to_be_bytes()[..8]);
         }
         let Some(e) = self.eth[down - 1].as_mut() else { return };
         let mac = e.dev.mac;
-        let mut msg = [0u8; 64];
+        let mut msg = [0u8; 64 + 32 + 8 + 16 * RDNSS_MAX];
         msg[0] = RA;
         msg[4] = 64; // current hop limit
         msg[6..8].copy_from_slice(&ROUTER_LIFETIME.to_be_bytes());
@@ -523,8 +706,32 @@ impl Stack {
         msg[36..40].copy_from_slice(&PREFIX_VALID.to_be_bytes());
         msg[40..44].copy_from_slice(&PREFIX_PREFERRED.to_be_bytes());
         msg[48..64].copy_from_slice(&prefix.to_be_bytes());
-        let mut out = [0u8; ETH_HDR + 40 + 64];
-        let n = icmp6_frame(&mut out, multicast_mac(ALL_NODES), mac, link_local(mac), ALL_NODES, &mut msg);
+        let mut len = 64;
+        // The previous prefix, deprecated: preferred 0, valid 0 (hosts keep
+        // its addresses for what is left of their lifetime, at most 2 h,
+        // RFC 4862 §5.5.3 (e)).
+        match self.v6.retired {
+            Some((old, until)) if now < until && old != prefix => {
+                msg[len..len + 4].copy_from_slice(&[3, 4, 64, 0x40]);
+                msg[len + 16..len + 32].copy_from_slice(&old.to_be_bytes());
+                len += 32;
+            }
+            _ => self.v6.retired = None,
+        }
+        // The upstream's DNS servers (the downstream hosts are on its /64).
+        let left_s = self.v6.rdnss_until.saturating_sub(now) / 1_000_000_000;
+        if self.v6.rdnss_n > 0 && left_s > 0 {
+            let n = self.v6.rdnss_n;
+            msg[len] = OPT_RDNSS;
+            msg[len + 1] = (1 + 2 * n) as u8;
+            msg[len + 4..len + 8].copy_from_slice(&(left_s.min(ROUTER_LIFETIME as u64) as u32).to_be_bytes());
+            for (k, s) in self.v6.rdnss[..n].iter().enumerate() {
+                msg[len + 8 + 16 * k..len + 24 + 16 * k].copy_from_slice(&s.to_be_bytes());
+            }
+            len += 8 + 16 * n;
+        }
+        let mut out = [0u8; ETH_HDR + 40 + 64 + 32 + 8 + 16 * RDNSS_MAX];
+        let n = icmp6_frame(&mut out, multicast_mac(ALL_NODES), mac, link_local(mac), ALL_NODES, &mut msg[..len]);
         e.dev.port.write(&out[..n]);
         self.v6.stats.ra_sent += 1;
     }

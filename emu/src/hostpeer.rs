@@ -30,6 +30,12 @@ const TAB5: IpAddress = IpAddress::v4(10, 55, 0, 2);
 const NOWHERE: IpAddress = IpAddress::v4(192, 168, 99, 1);
 const ICMP_TIME_EXCEEDED: u8 = 11;
 const ICMP_DEST_UNREACHABLE: u8 = 3;
+/// The Tab5 on the host link over IPv6, an address no route leads to, and
+/// the ICMPv6 errors (doc/46).
+const TAB5_V6: IpAddress = IpAddress::v6(0xfd55, 0, 0, 0, 0, 0, 0, 2);
+const NOWHERE_V6: IpAddress = IpAddress::v6(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+const ICMPV6_TIME_EXCEEDED: u8 = 3;
+const ICMPV6_DEST_UNREACHABLE: u8 = 1;
 const ECHO_PORT: u16 = 7777;
 const MTU: usize = 1500;
 const PINGS: u16 = 3;
@@ -104,8 +110,9 @@ pub struct HostPeer {
     sockets: SocketSet<'static>,
     icmp: SocketHandle,
     tcp: SocketHandle,
-    /// Every ICMP packet that arrives (for the errors).
+    /// Every ICMP and ICMPv6 packet that arrives (for the errors).
     raw: SocketHandle,
+    raw6: SocketHandle,
     target: IpAddress,
     step: Step,
     since: i64,
@@ -145,6 +152,12 @@ impl HostPeer {
             raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 16], vec![0; 4096]),
             raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 1], vec![0; 64]),
         ));
+        let raw6 = sockets.add(raw::Socket::new(
+            Some(IpVersion::Ipv6),
+            Some(IpProtocol::Icmpv6),
+            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 16], vec![0; 8192]),
+            raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 1], vec![0; 64]),
+        ));
         // Deterministic contents that are not periodic in the window size.
         let mut x = 0x2545_F491u32;
         let data = (0..bytes)
@@ -162,6 +175,7 @@ impl HostPeer {
             icmp,
             tcp,
             raw,
+            raw6,
             target,
             step: Step::Idle,
             since: 0,
@@ -306,9 +320,10 @@ impl HostPeer {
                 if self.checked == self.data.len() {
                     s.close();
                     self.tcp_ms = now_ms - self.since;
-                    // The ICMP errors are checked when forwarding over IPv4.
-                    let forwarded = matches!(self.target, IpAddress::Ipv4(_)) && self.target != TAB5;
-                    self.step = if forwarded { self.send_probe(ICMP_TIME_EXCEEDED, now_ms) } else { Step::Passed };
+                    // The ICMP errors are checked when forwarding.
+                    let forwarded = self.target != TAB5 && self.target != TAB5_V6;
+                    let first = if self.v6() { ICMPV6_TIME_EXCEEDED } else { ICMP_TIME_EXCEEDED };
+                    self.step = if forwarded { self.send_probe(first, now_ms) } else { Step::Passed };
                 } else if !s.is_open() {
                     self.fail(format!("TCP closed after {} of {} bytes", self.checked, self.data.len()));
                 } else if now_ms - self.since > TIMEOUT_MS * 4 {
@@ -316,19 +331,33 @@ impl HostPeer {
                 }
             }
             Step::IcmpError { kind, sent_at } => {
-                // An IPv4 packet: the ICMP type follows the header.
+                // The ICMP type follows the IP header.
                 let mut got = false;
-                let r = self.sockets.get_mut::<raw::Socket>(self.raw);
-                while let Ok(p) = r.recv() {
-                    let ihl = (p[0] & 0xF) as usize * 4;
-                    let src = IpAddress::v4(p[12], p[13], p[14], p[15]);
-                    if src == TAB5 && p.get(ihl) == Some(&kind) {
-                        got = true;
+                if self.v6() {
+                    let r = self.sockets.get_mut::<raw::Socket>(self.raw6);
+                    while let Ok(p) = r.recv() {
+                        let src = p.get(8..24).map(|a| IpAddress::Ipv6(Ipv6Address::from(<[u8; 16]>::try_from(a).unwrap())));
+                        if src == Some(TAB5_V6) && p.get(40) == Some(&kind) {
+                            got = true;
+                        }
+                    }
+                } else {
+                    let r = self.sockets.get_mut::<raw::Socket>(self.raw);
+                    while let Ok(p) = r.recv() {
+                        let ihl = (p[0] & 0xF) as usize * 4;
+                        let src = IpAddress::v4(p[12], p[13], p[14], p[15]);
+                        if src == TAB5 && p.get(ihl) == Some(&kind) {
+                            got = true;
+                        }
                     }
                 }
                 if got {
                     self.icmp_errors.push(kind);
-                    self.step = if kind == ICMP_TIME_EXCEEDED { self.send_probe(ICMP_DEST_UNREACHABLE, now_ms) } else { Step::Passed };
+                    self.step = match kind {
+                        ICMP_TIME_EXCEEDED if !self.v6() => self.send_probe(ICMP_DEST_UNREACHABLE, now_ms),
+                        ICMPV6_TIME_EXCEEDED if self.v6() => self.send_probe(ICMPV6_DEST_UNREACHABLE, now_ms),
+                        _ => Step::Passed,
+                    };
                 } else if now_ms - sent_at > TIMEOUT_MS {
                     self.fail(format!("no ICMP type {kind} from the Tab5"));
                 }
@@ -337,17 +366,38 @@ impl HostPeer {
         }
     }
 
-    /// Sends the ping that should come back as ICMP error `kind`.
+    fn v6(&self) -> bool {
+        matches!(self.target, IpAddress::Ipv6(_))
+    }
+
+    /// Sends the ping that should come back as ICMP error `kind` (ICMPv6
+    /// when the target is IPv6).
     fn send_probe(&mut self, kind: u8, now_ms: i64) -> Step {
-        // Drop what the raw socket has collected so far (echo replies).
-        let r = self.sockets.get_mut::<raw::Socket>(self.raw);
-        while r.recv().is_ok() {}
+        // Drop what the raw sockets have collected so far (echo replies).
+        for h in [self.raw, self.raw6] {
+            let r = self.sockets.get_mut::<raw::Socket>(h);
+            while r.recv().is_ok() {}
+        }
+        let v6 = self.v6();
         let s = self.sockets.get_mut::<icmp::Socket>(self.icmp);
-        let (to, ttl) = if kind == ICMP_TIME_EXCEEDED { (self.target, Some(1)) } else { (NOWHERE, None) };
+        let exceeded = kind == if v6 { ICMPV6_TIME_EXCEEDED } else { ICMP_TIME_EXCEEDED };
+        let nowhere = if v6 { NOWHERE_V6 } else { NOWHERE };
+        let (to, ttl) = if exceeded { (self.target, Some(1)) } else { (nowhere, None) };
         s.set_hop_limit(ttl);
-        let repr = Icmpv4Repr::EchoRequest { ident: IDENT, seq_no: 100 + kind as u16, data: b"t5emu probe" };
-        if let Ok(buf) = s.send(repr.buffer_len(), to) {
-            repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &ChecksumCapabilities::default());
+        let (seq_no, data) = (100 + kind as u16, b"t5emu probe");
+        match to {
+            IpAddress::Ipv4(_) => {
+                let repr = Icmpv4Repr::EchoRequest { ident: IDENT, seq_no, data };
+                if let Ok(buf) = s.send(repr.buffer_len(), to) {
+                    repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &ChecksumCapabilities::default());
+                }
+            }
+            IpAddress::Ipv6(dst) => {
+                let repr = Icmpv6Repr::EchoRequest { ident: IDENT, seq_no, data };
+                if let Ok(buf) = s.send(repr.buffer_len(), to) {
+                    repr.emit(&Ipv6Address::UNSPECIFIED, &dst, &mut Icmpv6Packet::new_unchecked(buf), &ChecksumCapabilities::default());
+                }
+            }
         }
         Step::IcmpError { kind, sent_at: now_ms }
     }

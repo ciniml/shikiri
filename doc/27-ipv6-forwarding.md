@@ -69,6 +69,7 @@ net.peer_http v6=true status=HTTP/1.1 301 Moved Permanently ms=22
 - その後、4 分間 RA が 1 つも来ないこともあった。smoltcp の SLAAC は起動時に RS を 3 回出すだけなので、Wi-Fi に全体向けのアドレスがない間は、Tab5 から 10 秒ごとに RS を出すようにした（`Stack::solicit`、`net.rs_sent`）。直後の起動ではすぐに付いたが、RS が効いたのかどうかはまだ確かめていない。
 
 ## 5. まだ
+→ ICMPv6 のエラー、下流への RDNSS、プレフィックスが変わったときの扱いは doc/46。
 - ICMPv6 のエラー（Time Exceeded、Destination Unreachable、Packet Too Big）を作る。
 - 上流から下流へ DAD を中継する（RFC 4389 の完全な形）。今は下流の機器のアドレスの重複を上流で確かめない。EUI-64 のアドレスなら実際には重ならない。
 - 下流に RDNSS（DNS サーバ）を広告する。

@@ -483,7 +483,7 @@ pub fn check(hook: u8, in_link: u8, out_link: u8, ip: &[u8]) -> Action {
             (f.rules.policy[hook as usize], f.rules.policy_log[hook as usize])
         }
     };
-    let action = if (hook == OUT || p.family == 6) && action == Action::Reject { Action::Drop } else { action };
+    let action = if hook == OUT && action == Action::Reject { Action::Drop } else { action };
     if action == Action::Pass {
         f.record(&p, state, slot, now);
     } else if log {

@@ -220,7 +220,9 @@ impl Stack {
         while let Some((link, len)) = rejects().pop(buf) {
             let link = link as usize;
             let off = if link == IFACE0 { 0 } else { ETH_HDR };
-            if len >= off + 20 {
+            if len >= off + 40 && buf[off] >> 4 == 6 {
+                self.reject6(link, &buf[off..len]);
+            } else if len >= off + 20 {
                 self.icmp_error(link, ICMP_DEST_UNREACHABLE, ADMIN_PROHIBITED, &buf[off..len]);
             }
         }
