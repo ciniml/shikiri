@@ -835,10 +835,6 @@ impl Platform for Esp32p4v1 {
                 ppa::start_fill(&at(x, y), bw as u32, bh as u32, rgb565)
             }
             super::Gfx::Copy { sx, sy, dx, dy, w: bw, h: bh } => {
-                let overlap = sx < dx + bw && dx < sx + bw && sy < dy + bh && dy < sy + bh;
-                if overlap && (dy > sy || (dy == sy && dx > sx)) {
-                    return Err("copy would overwrite its source");
-                }
                 let (a, n) = rows(sy, bh);
                 cache_writeback(a, n, true);
                 let (a, n) = rows(dy, bh);

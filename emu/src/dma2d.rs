@@ -54,13 +54,18 @@ pub fn on_write(bus: &mut Bus, addr: u32, v: u32) {
         let raw = peek(bus, RX1_INT_RAW);
         bus.periph.poke(RX1_INT_RAW, raw & !v);
     } else if addr == RX1 + LINK_CONF && v & IN_LINK_START != 0 && peek(bus, RX1 + IN_PERI_SEL) & 7 == PERI_M2M_RX {
-        let (src, dst) = (peek(bus, tx(1) + LINK_ADDR), peek(bus, RX1 + LINK_ADDR));
-        let (src, dst) = (desc(bus, src), desc(bus, dst));
-        for j in 0..dst.vb {
-            for i in 0..dst.hb {
-                let px = bus.dma_read(src.at(i, j), 2);
-                bus.dma_write(dst.at(i, j), 2, px);
+        // The two lists in step, block by block (the kernel cuts copies
+        // over themselves into pieces, doc/44).
+        let (mut s, mut d) = (peek(bus, tx(1) + LINK_ADDR), peek(bus, RX1 + LINK_ADDR));
+        while s != 0 && d != 0 {
+            let (src, dst) = (desc(bus, s), desc(bus, d));
+            for j in 0..dst.vb {
+                for i in 0..dst.hb {
+                    let px = bus.dma_read(src.at(i, j), 2);
+                    bus.dma_write(dst.at(i, j), 2, px);
+                }
             }
+            (s, d) = (src.next, dst.next);
         }
         end(bus);
     } else if addr == BLEND_TRANS_MODE && v & TRANS_UPDATE != 0 && v & TRANS_EN != 0 {
@@ -110,6 +115,7 @@ struct Desc {
     y: u32,
     buffer: u32,
     bpp: u32,
+    next: u32,
 }
 
 impl Desc {
@@ -120,12 +126,12 @@ impl Desc {
 
 fn desc(bus: &mut Bus, addr: u32) -> Desc {
     let w = |bus: &mut Bus, k: u32| bus.read(addr + 4 * k, 4).unwrap_or(0);
-    let (w0, w1, w2, buffer) = (w(bus, 0), w(bus, 1), w(bus, 2), w(bus, 3));
+    let (w0, w1, w2, buffer, next) = (w(bus, 0), w(bus, 1), w(bus, 2), w(bus, 3), w(bus, 4));
     let bpp = match w1 >> 28 {
         1 => 1,
         3 => 2,
         5 => 4,
         _ => 2,
     };
-    Desc { vb: w0 & 0x3FFF, hb: w0 >> 14 & 0x3FFF, ha: w1 >> 14 & 0x3FFF, y: w2 & 0x3FFF, x: w2 >> 14 & 0x3FFF, buffer, bpp }
+    Desc { vb: w0 & 0x3FFF, hb: w0 >> 14 & 0x3FFF, ha: w1 >> 14 & 0x3FFF, y: w2 & 0x3FFF, x: w2 >> 14 & 0x3FFF, buffer, bpp, next }
 }

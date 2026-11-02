@@ -119,23 +119,33 @@ pub const MAX_SIDE: u32 = 0x3FFF;
 /// Descriptors: bg, fg, out (24 bytes each, 8-byte aligned), in L2MEM and
 /// written through the non-cacheable alias, as the display's list.
 #[repr(C, align(64))]
-struct Descriptors([[u32; 6]; 3]);
-static mut DESC: Descriptors = Descriptors([[0; 6]; 3]);
+struct Descriptors([[u32; 6]; 3 + 2 * MAX_STRIPS]);
+static mut DESC: Descriptors = Descriptors([[0; 6]; 3 + 2 * MAX_STRIPS]);
+/// Pieces a copy may be cut into (§ `start_copy`): its TX descriptors from
+/// index 3, its RX ones from 3 + MAX_STRIPS.
+pub const MAX_STRIPS: usize = 32;
 const L2MEM_NON_CACHE: usize = 0x4000_0000;
 
 fn desc_addr(i: usize) -> usize {
     core::ptr::addr_of!(DESC) as usize + 24 * i
 }
 
-/// Writes descriptor `i` for block `b` of `w` x `h` pixels.
+/// Writes descriptor `i` for block `b` of `w` x `h` pixels, the last of
+/// its list.
 fn describe(i: usize, b: &Block, w: u32, h: u32, pbyte: u32) {
+    describe_linked(i, b, w, h, pbyte, None);
+}
+
+/// Writes descriptor `i`; `next` continues the list (suc_eof only on the
+/// last).
+fn describe_linked(i: usize, b: &Block, w: u32, h: u32, pbyte: u32, next: Option<usize>) {
     // vb hb | en2d suc_eof owner; va ha pbyte; y x mode(single); buffer.
     let words = [
-        h | w << 14 | 1 << 29 | 1 << 30 | 1 << 31,
+        h | w << 14 | 1 << 29 | (next.is_none() as u32) << 30 | 1 << 31,
         b.height | b.width << 14 | pbyte << 28,
         b.y | b.x << 14,
         b.base as u32,
-        0,
+        next.map_or(0, |n| desc_addr(n) as u32),
         0,
     ];
     let p = (desc_addr(i) + L2MEM_NON_CACHE) as *mut u32;
@@ -425,21 +435,42 @@ pub fn glyph(out: &Block, alpha: &Block, w: u32, h: u32, rgb888: u32) -> Result<
     wait()
 }
 
-/// Starts copying `w` x `h` pixels (RGB565) from `src` to `dst`. Where
-/// they overlap, the hardware reads ahead of what it writes (doc/44 §3).
+/// Starts copying `w` x `h` pixels (RGB565) from `src` to `dst`. The
+/// hardware reads ahead of what it writes, so where the two overlap and
+/// the destination comes later in memory (rows down, or columns right in
+/// the same rows) the copy is cut into pieces no taller (wider) than the
+/// shift, taken from the far end, as one list (doc/44 §2-3).
 pub fn start_copy(dst: &Block, src: &Block, w: u32, h: u32) -> Result<(), &'static str> {
     check(dst, w, h)?;
     check(src, w, h)?;
     if busy() {
         return Err("busy");
     }
+    let overlap = dst.base == src.base && src.x < dst.x + w && dst.x < src.x + w && src.y < dst.y + h && dst.y < src.y + h;
+    // (rows per piece, columns per piece)
+    let (ph, pw) = match (overlap, dst.y > src.y, dst.y == src.y && dst.x > src.x) {
+        (true, true, _) => ((dst.y - src.y).min(h), w),
+        (true, false, true) => (h, (dst.x - src.x).min(w)),
+        _ => (h, w),
+    };
+    let n = (h.div_ceil(ph) * w.div_ceil(pw)) as usize;
+    if n > MAX_STRIPS {
+        return Err("copy needs too many pieces");
+    }
     init();
-    describe(1, src, w, h, PBYTE_RGB565);
-    describe(2, dst, w, h, PBYTE_RGB565);
+    for k in 0..n {
+        // Piece k from the bottom (or the right): rows [y0, y1), columns [x0, x1).
+        let (y1, x1) = if ph < h { (h - ph * k as u32, w) } else { (h, w - pw * k as u32) };
+        let (y0, x0) = if ph < h { (y1.saturating_sub(ph), 0) } else { (0, x1.saturating_sub(pw)) };
+        let at = |b: &Block| Block { x: b.x + x0, y: b.y + y0, ..*b };
+        let next = |base: usize| (k + 1 < n).then_some(base + k + 1);
+        describe_linked(3 + k, &at(src), x1 - x0, y1 - y0, PBYTE_RGB565, next(3));
+        describe_linked(3 + MAX_STRIPS + k, &at(dst), x1 - x0, y1 - y0, PBYTE_RGB565, next(3 + MAX_STRIPS));
+    }
     tx_connect(RX_OUT, PERI_M2M_TX)?;
     rx_connect(RX_OUT, PERI_M2M_RX, true)?;
-    tx_start(RX_OUT, 1);
-    rx_start(RX_OUT, 2);
+    tx_start(RX_OUT, 3);
+    rx_start(RX_OUT, 3 + MAX_STRIPS);
     begin(&[RX_OUT]);
     Ok(())
 }

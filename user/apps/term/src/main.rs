@@ -334,8 +334,9 @@ impl Term {
             return false;
         }
         let (h, dy) = ((ROWS * CH) as isize, k.unsigned_abs() as isize * CH as isize);
-        // Up with the 2D hardware where the kernel takes it (doc/44): at 270°
-        // the copy runs toward lower addresses. Else with the CPU.
+        // Up with the 2D hardware (doc/44). Down, at 270° the copy goes
+        // right over itself and the kernel cuts it into 32-pixel strips,
+        // slower than the CPU (§3): with the CPU.
         let hw = k > 0 && d.start_copy(0, dy as usize, 0, 0, COLS * CW, (h - dy) as usize).is_ok();
         if hw && d.wait_done().is_err() {
             // Partly copied: draw every cell again.

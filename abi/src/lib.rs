@@ -379,10 +379,10 @@ pub mod display {
     pub mod op {
         /// `FILL, x, y, w, h, rgb565`
         pub const FILL: u16 = 1;
-        /// `COPY, src_x, src_y, dst_x, dst_y, w, h`. When the two overlap,
-        /// the destination must not come after the source in memory (rows,
-        /// then columns): the hardware reads ahead of what it writes, so a
-        /// copy down or to the right is refused (`Invalid`).
+        /// `COPY, src_x, src_y, dst_x, dst_y, w, h`. Any overlap works; a
+        /// copy down or to the right over itself is done in pieces no
+        /// larger than the shift, and refused (`Invalid`) if that would
+        /// take more than 32 pieces.
         pub const COPY: u16 = 2;
     }
 }

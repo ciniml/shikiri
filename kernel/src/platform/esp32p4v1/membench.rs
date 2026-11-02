@@ -262,6 +262,23 @@ pub fn ppa_bench(buf: usize) -> Result<u32, &'static str> {
     let bad = (0..H).map(|y| (0..W - 32).filter(|&x| px(buf, x, y) != pattern16(x + 32, y)).count() as u32).sum();
     report("copy_scroll_left", 1, us, bad);
     failures += bad;
+    // The other ways over itself, in pieces: 32 pixels right (21 pieces of
+    // 32 columns), 64 rows down (20 pieces of 64 rows).
+    for (case, (sx, sy, dx, dy)) in [("copy_scroll_right", (0, 0, 32, 0)), ("copy_down", (0, 0, 0, 64))] {
+        let (w, h) = (W - dx, H - dy);
+        for y in 0..H {
+            for x in 0..W {
+                unsafe { core::ptr::write_volatile((buf + ((y * W + x) * 2) as usize) as *mut u16, pattern16(x, y)) };
+            }
+        }
+        sync(IMAGE);
+        let us = timed(|| r = ppa::copy(&img(dx, dy), &img(sx, sy), w, h));
+        sync(IMAGE);
+        let bad = (0..h).map(|y| (0..w).filter(|&x| px(buf, dx + x, dy + y) != pattern16(sx + x, sy + y)).count() as u32).sum();
+        report(case, r.is_ok() as u32, us, bad);
+        failures += bad;
+        display::service();
+    }
     display::service();
     // A full-screen fill.
     sync(IMAGE);

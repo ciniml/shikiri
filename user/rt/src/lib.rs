@@ -366,9 +366,8 @@ impl Display {
     }
 
     /// Starts copying a user rectangle of `w` x `h` from (sx, sy) to
-    /// (dx, dy) with the 2D hardware. `Invalid` if, in the framebuffer,
-    /// the copy would overwrite source it has not read yet (then copy with
-    /// the CPU).
+    /// (dx, dy) with the 2D hardware. `Invalid` if the kernel cannot (a
+    /// small shift over a large overlapping area: then copy with the CPU).
     pub fn start_copy(&self, sx: usize, sy: usize, dx: usize, dy: usize, w: usize, h: usize) -> Result<(), Error> {
         let (fsx, fsy, fw, fh) = self.fb_rect(sx, sy, w, h);
         let (fdx, fdy, _, _) = self.fb_rect(dx, dy, w, h);
