@@ -65,9 +65,16 @@ pub fn verify(bytes: &[u8]) -> Result<&[u8], t5a::Error> {
 /// alike, doc/16 §2).
 pub fn check_signature(s: &t5a::Signed) -> Result<(), t5a::Error> {
     let key = TRUSTED_KEYS.iter().find(|k| t5a::key_id(k) == s.key_id).ok_or(t5a::Error::UnknownKey)?;
-    ed25519_compact::PublicKey::new(*key)
-        .verify(s.message, &ed25519_compact::Signature::new(s.signature))
-        .map_err(|_| t5a::Error::BadSignature)
+    let mut st = ed25519_compact::PublicKey::new(*key)
+        .verify_incremental(&ed25519_compact::Signature::new(s.signature))
+        .map_err(|_| t5a::Error::BadSignature)?;
+    // In pieces, feeding the watchdog: a large image (the font service's,
+    // 0.9 MiB, doc/45) takes about a second on the chip.
+    for chunk in s.message.chunks(64 << 10) {
+        st.absorb(chunk);
+        Current::feed_watchdog();
+    }
+    st.verify().map_err(|_| t5a::Error::BadSignature)
 }
 
 /// Where a process goes: its slot's memory (an XIP image's text is mapped

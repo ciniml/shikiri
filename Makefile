@@ -21,15 +21,16 @@ PERMIT_wifi   := --permit wlan:ctl --stack 16384
 PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
 PERMIT_init   := --permit proc:spawn --permit svc:fs --stack 16384
 PERMIT_keylog := --permit kbd
-PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --stack 16384
+PERMIT_font   := --permit listen:font --permit shm
+PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:kill --stack 32768
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
-XIP_APPS   := hello xipcheck spin
+XIP_APPS   := hello xipcheck spin font
 XIP_TARGET := user/target/xip/riscv32imafc-unknown-none-elf/release
 XIP_RUSTFLAGS := -C relocation-model=pie -C link-arg=-pie -C link-arg=--no-dynamic-linker \
                  -C link-arg=-z -C link-arg=text -C link-arg=-Tt5app-xip.ld
-APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS)) $(XIP_TARGET)/xipcheck
+APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS)) $(XIP_TARGET)/xipcheck $(XIP_TARGET)/font
 # All log schemas (doc/12): every event! call site in the kernel and the apps.
 SCHEMAS    := $(BUILD)/t5log.schemas
 
@@ -93,6 +94,7 @@ apps: tools $(UNTRUSTED_KEY)
 	    --name hello-badabi
 	$(ELF2T5A) build $(XIP_TARGET)/hello $(APPS_DIR)/hello-xip.t5a --key $(DEV_KEY) --name hello-xip
 	$(ELF2T5A) build $(XIP_TARGET)/xipcheck $(APPS_DIR)/xipcheck.t5a --key $(DEV_KEY)
+	$(ELF2T5A) build $(XIP_TARGET)/font $(APPS_DIR)/font.t5a --key $(DEV_KEY) $(PERMIT_font)
 	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip.t5a --key $(DEV_KEY) --name spin-xip
 	@# Not in the store image: installed over the control channel (doc/14 §3).
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter.t5a --key $(DEV_KEY) --name greeter
@@ -101,7 +103,7 @@ apps: tools $(UNTRUSTED_KEY)
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter-0.2.t5a --key $(DEV_KEY) --name greeter --version 0.2.0
 	$(ELF2T5A) build $(APP_TARGET)/fault $(APPS_DIR)/greeter-bad.t5a --key $(DEV_KEY) --name greeter --version 0.3.0
 	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip-0.2.t5a --key $(DEV_KEY) --name spin-xip --version 0.2.0
-	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-xip xipcheck))
+	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-xip xipcheck font))
 
 # The services started at boot on the Tab5 (doc/30 §5): the same apps with
 # the autostart flag, installed over RTT by `make install-auto`. The store
@@ -124,7 +126,7 @@ install-auto: apps-auto schemas-p4
 # without the autostart services, and those with the flag. Not `fault`,
 # which always faults, so its update would be rolled back. Run on the next
 # boot (`reboot`).
-STORE_APPS := $(filter-out fault $(AUTO_APPS),$(APPS)) hello-xip xipcheck
+STORE_APPS := $(filter-out fault $(AUTO_APPS),$(APPS)) hello-xip xipcheck font
 install-apps: apps-auto schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
@@ -306,7 +308,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	@# The terminal's drawing (doc/42): 100 lines that scroll, then every
 	@# pixel checked against the cells.
 	$(T5EMU) --quiet --max-ms 120000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
-	    --ctl "run term 1" --ctl "wait-ms 15000" --expect-event term.bench_ok \
+	    --ctl "run font" --ctl "wait-ms 300" --ctl "run term 1" --ctl "wait-ms 15000" \
+	    --expect-event font.ready --expect-event term.font --expect-event term.bench_ok \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Installing (M3d): the flash write path on a spare sector, an install,
 	@# running it, a rejected image, removal. Stops on any flash access the

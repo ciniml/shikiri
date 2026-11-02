@@ -387,6 +387,22 @@ pub mod display {
     }
 }
 
+/// Glyphs beyond ASCII (doc/45): the service `svc:font` grants each client
+/// the whole glyph file as shared memory (read it, do not write it).
+pub mod font {
+    pub const SVC: &str = "font";
+    /// The file: a header of little-endian u32s (`MAGIC`, then the narrow
+    /// glyphs' count, codes offset and bitmaps offset, then the same for
+    /// the wide ones); codes are sorted code points (u32).
+    pub const MAGIC: [u8; 4] = *b"T5F1";
+    pub const HEADER: usize = 28;
+    pub const HEIGHT: usize = 32;
+    /// A narrow glyph: 32 rows of u16, bit 15 the leftmost of 16 pixels.
+    pub const NARROW_BYTES: usize = 64;
+    /// A wide glyph: 32 rows of u32, bit 31 the leftmost of 32 pixels.
+    pub const WIDE_BYTES: usize = 128;
+}
+
 /// Touch input (doc/17 §6). Points are in the orientation's coordinates
 /// (`display::ORIENTATION`): x to the right, y down as the user sees it.
 pub mod touch {

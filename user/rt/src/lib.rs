@@ -9,7 +9,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, chan, display, event, fs, kbd, net, netdev, proc, rights, sd, shm, spawn, svc, sys, timer, touch, wlan};
+pub use t5_abi::{Error, FOREVER, chan, display, event, font, fs, kbd, net, netdev, proc, rights, sd, shm, spawn, svc, sys, timer, touch, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -392,6 +392,74 @@ impl Display {
                 _ => {}
             }
         }
+    }
+}
+
+/// The glyphs of the font service (doc/45). Needs `--permit svc:font`.
+pub struct Font {
+    _conn: Channel,
+    _shm: Shm,
+    mem: &'static [u8],
+    narrow: (usize, usize, usize),
+    wide: (usize, usize, usize),
+}
+
+impl Font {
+    /// Connects to `svc:font` and maps the glyphs it grants (waits up to
+    /// `ms` for the grant).
+    pub fn connect(ms: u64) -> Result<Font, Error> {
+        let conn = Channel::connect(font::SVC)?;
+        loop {
+            let ev = wait(&[&conn.0], ms * 1_000_000)?;
+            if ev.kind == chan::SHM {
+                break;
+            }
+            if ev.kind == chan::PEER_CLOSED {
+                return Err(Error::Off);
+            }
+        }
+        let shm = conn.take_shm()?;
+        let mem: &'static [u8] = shm.map()?;
+        let word = |i: usize| mem.get(4 * i..4 * i + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+        if mem.len() < font::HEADER || mem[..4] != font::MAGIC {
+            return Err(Error::Invalid);
+        }
+        let narrow = (word(1), word(2), word(3));
+        let wide = (word(4), word(5), word(6));
+        let fits = |(n, codes, bits): (usize, usize, usize), size: usize| codes + 4 * n <= mem.len() && bits + size * n <= mem.len();
+        if !fits(narrow, font::NARROW_BYTES) || !fits(wide, font::WIDE_BYTES) {
+            return Err(Error::Invalid);
+        }
+        Ok(Font { _conn: conn, _shm: shm, mem, narrow, wide })
+    }
+
+    fn find(&self, (n, codes, bits): (usize, usize, usize), size: usize, cp: char) -> Option<&[u8]> {
+        let code = |i: usize| {
+            let b = &self.mem[codes + 4 * i..codes + 4 * i + 4];
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        };
+        let (mut lo, mut hi) = (0, n);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match code(mid).cmp(&(cp as u32)) {
+                core::cmp::Ordering::Less => lo = mid + 1,
+                core::cmp::Ordering::Greater => hi = mid,
+                core::cmp::Ordering::Equal => return Some(&self.mem[bits + size * mid..bits + size * (mid + 1)]),
+            }
+        }
+        None
+    }
+
+    /// The 16 x 32 glyph of `cp`: rows, bit 15 the leftmost pixel.
+    pub fn narrow(&self, cp: char) -> Option<[u16; font::HEIGHT]> {
+        let g = self.find(self.narrow, font::NARROW_BYTES, cp)?;
+        Some(core::array::from_fn(|y| u16::from_le_bytes([g[2 * y], g[2 * y + 1]])))
+    }
+
+    /// The 32 x 32 glyph of `cp`: rows, bit 31 the leftmost pixel.
+    pub fn wide(&self, cp: char) -> Option<[u32; font::HEIGHT]> {
+        let g = self.find(self.wide, font::WIDE_BYTES, cp)?;
+        Some(core::array::from_fn(|y| u32::from_le_bytes([g[4 * y], g[4 * y + 1], g[4 * y + 2], g[4 * y + 3]])))
     }
 }
 

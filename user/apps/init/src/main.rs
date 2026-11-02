@@ -24,11 +24,13 @@ t5_rt::entry!(main);
 const LIST_FILE: &str = "T5OS/START.CFG";
 const FILE_MAX: usize = 2 << 10;
 
-/// Without a list on the SD card: the network services and the terminal.
+/// Without a list on the SD card: the network services, the font service
+/// and the terminal (doc/45: `font` first, `term` connects to it).
 const DEFAULT_LIST: &str = "\
 wifi
 net
 netctl
+font
 term
 ";
 

@@ -7,13 +7,17 @@
 //! to it are the keys. It starts `shell` as its client, and again when the
 //! shell ends.
 //!
+//! Characters beyond ASCII come from the font service (doc/45): wide ones
+//! are 32 x 32 glyphs, drawn half in each of their two cells.
+//!
 //! Built with `--permit display --permit kbd --permit listen:tty --permit
-//! proc:spawn`. Runs until stopped; exit 1 if the display cannot be had.
+//! proc:spawn --permit svc:font`. Runs until stopped; exit 1 if the display
+//! cannot be had.
 
 mod keys;
 mod vt;
 
-use t5_rt::{Channel, Display, Error, FOREVER, Handle, Listener, chan, event, kbd, rgb, rights, sleep_ms, spawn, time_ns, wait_raw};
+use t5_rt::{Channel, Display, Error, FOREVER, Font, Handle, Listener, chan, event, kbd, rgb, rights, sleep_ms, spawn, time_ns, wait_raw};
 use vt::{COLS, Cell, Color, Grid, ROWS, attr};
 
 t5_rt::entry!(main);
@@ -35,6 +39,33 @@ static mut GRIDS: [Grid; 2] = [BLANK_GRID; 2];
 /// What each cell on the screen shows: the cell, and whether the cursor is
 /// on it. Cells that would be drawn the same are skipped (doc/42).
 static mut SHOWN: [[(Cell, bool); COLS]; ROWS] = [[(BLANK_GRID[0][0], false); COLS]; ROWS];
+
+/// The font service's glyphs, once connected (doc/45).
+static mut EXTRA: Option<Font> = None;
+/// When to try connecting again.
+static mut EXTRA_RETRY: u64 = 0;
+const EXTRA_RETRY_NS: u64 = 2_000_000_000;
+
+fn extra() -> Option<&'static Font> {
+    unsafe { (*core::ptr::addr_of!(EXTRA)).as_ref() }
+}
+
+/// Connects to the font service if not yet (at most every 2 s); true when
+/// it has just connected.
+fn connect_font(now: u64) -> bool {
+    if extra().is_some() || now < unsafe { EXTRA_RETRY } {
+        return false;
+    }
+    unsafe { EXTRA_RETRY = now + EXTRA_RETRY_NS };
+    match Font::connect(1000) {
+        Ok(f) => {
+            unsafe { *core::ptr::addr_of_mut!(EXTRA) = Some(f) };
+            event!(Info, "term.font");
+            true
+        }
+        Err(_) => false,
+    }
+}
 
 fn main(mode: usize, _: usize) -> usize {
     let Ok(mut d) = Display::open() else {
@@ -60,10 +91,11 @@ fn main(mode: usize, _: usize) -> usize {
         d.fill(color(Color::Default, false));
         let _ = d.flush_all();
     }
+    connect_font(time_ns());
     t.screen.mark_all();
     t.draw(&mut d);
-    if mode == 1 {
-        bench(&mut t, &mut d);
+    if mode == 1 || mode == 2 {
+        bench(&mut t, &mut d, mode == 2);
     }
     event!(Info, "term.ready", cols = COLS as u32, rows = ROWS as u32, keyboard = keyboard.is_some());
 
@@ -178,12 +210,24 @@ fn start_shell(launcher: Option<&Handle>) {
 
 /// Mode 1 (doc/42): 100 lines of 79 characters, drawn after each line
 /// (each scrolls once the screen is full), then the screen is cleared.
-fn bench(t: &mut Term, d: &mut Display) {
+/// `keep`: leave the lines on the screen (`run term 2`, to look at them).
+fn bench(t: &mut Term, d: &mut Display, keep: bool) {
     const LINES: u32 = 100;
     let t0 = time_ns();
+    // The last lines also have wide (the font service's 32 x 32), narrow
+    // non-ASCII glyphs and a wide character that wraps (doc/45).
+    const MIXED: &str = "日本語の表示：漢字かなカナ。「東京」ｶﾀｶﾅ ─│┌┐ äöü αβγ ";
     for i in 0..LINES {
-        for k in 0..79u32 {
-            t.parser.feed(b'!' + ((i + k) % 94) as u8, &mut t.screen);
+        if i >= LINES - 4 {
+            for _ in 0..2 {
+                for &b in MIXED.as_bytes() {
+                    t.parser.feed(b, &mut t.screen);
+                }
+            }
+        } else {
+            for k in 0..79u32 {
+                t.parser.feed(b'!' + ((i + k) % 94) as u8, &mut t.screen);
+            }
         }
         for &b in b"\r\n" {
             t.parser.feed(b, &mut t.screen);
@@ -192,12 +236,14 @@ fn bench(t: &mut Term, d: &mut Display) {
     }
     let us = (time_ns() - t0) / 1000;
     let wrong = t.check(d);
-    event!(Info, "term.bench", lines = LINES, total_ms = (us / 1000) as u32, per_line_us = (us / LINES as u64) as u32, wrong_cells = wrong);
+    event!(Info, "term.bench", lines = LINES, total_ms = (us / 1000) as u32, per_line_us = (us / LINES as u64) as u32, wrong_cells = wrong, font = extra().is_some());
     if wrong == 0 {
         event!(Info, "term.bench_ok");
     }
-    for &b in b"\x1b[H\x1b[2J" {
-        t.parser.feed(b, &mut t.screen);
+    if !keep {
+        for &b in b"\x1b[H\x1b[2J" {
+            t.parser.feed(b, &mut t.screen);
+        }
     }
     t.draw(d);
 }
@@ -213,6 +259,11 @@ struct Term {
 impl Term {
     /// Draws the changed cells and the cursor, and flushes those rows.
     fn draw(&mut self, d: &mut Display) {
+        if connect_font(time_ns()) {
+            // Cells drawn without their glyphs before.
+            self.shown.iter_mut().for_each(|r| r.fill(STALE));
+            self.screen.mark_all();
+        }
         let mut dmg = self.screen.take_damage();
         let cursor = self.screen.cursor_visible.then(|| self.screen.cursor());
         // The cursor's old and new cells.
@@ -246,7 +297,7 @@ impl Term {
         let by_column = d.steps().1.unsigned_abs() == 1;
         for i in 0..h * w {
             let (r, c) = if by_column { (dmg.row0 + i % h, dmg.col0 + i / h) } else { (dmg.row0 + i / w, dmg.col0 + i % w) };
-            let now = (*self.screen.at(r, c), cursor == Some((r, c)));
+            let now = (self.cell_at(r, c), cursor == Some((r, c)));
             if self.shown[r][c] == now {
                 continue;
             }
@@ -274,6 +325,20 @@ impl Term {
 }
 
 impl Term {
+    /// The cell as drawn: the trailing half of a wide character carries
+    /// the character and colours of its head (so it is drawn again when
+    /// the head changes).
+    fn cell_at(&self, r: usize, c: usize) -> Cell {
+        let cell = *self.screen.at(r, c);
+        if cell.attrs & attr::WIDE_CONT != 0 && c > 0 {
+            let head = *self.screen.at(r, c - 1);
+            if head.attrs & attr::WIDE != 0 {
+                return Cell { attrs: (head.attrs & !attr::WIDE) | attr::WIDE_CONT, ..head };
+            }
+        }
+        cell
+    }
+
     /// Cells whose pixels differ from what the screen holds (the bench's
     /// check that moving the framebuffer kept it right).
     fn check(&self, d: &mut Display) -> u32 {
@@ -281,10 +346,7 @@ impl Term {
         let mut wrong = 0;
         for r in 0..ROWS {
             for c in 0..COLS {
-                let cell = *self.screen.at(r, c);
-                if cell.attrs & attr::WIDE_CONT != 0 {
-                    continue;
-                }
+                let cell = self.cell_at(r, c);
                 let (fg, bg) = cell_colors(&cell, cursor == Some((r, c)));
                 let lines = glyph_lines(&cell);
                 let ok = (0..CH).all(|y| {
@@ -317,7 +379,7 @@ impl Term {
         if sy.abs() != 1 {
             return false;
         }
-        let same = |t: &Term, r: usize, shown_r: usize| (0..COLS).all(|c| *t.screen.at(r, c) == t.shown[shown_r][c].0);
+        let same = |t: &Term, r: usize, shown_r: usize| (0..COLS).all(|c| t.cell_at(r, c) == t.shown[shown_r][c].0);
         let in_place = (0..ROWS).filter(|&r| same(self, r, r)).count();
         // k > 0: content moved up by k rows.
         let mut best = (0isize, in_place);
@@ -430,30 +492,46 @@ fn cell_colors(cell: &Cell, cursor: bool) -> (u16, u16) {
 }
 
 /// The glyph's rows (bit 15 leftmost), underline and hiding applied.
+/// The cell's 16 x 32 pixels (bit 15 the leftmost): ASCII from `FONT`,
+/// the rest from the font service; a wide character's left half in its
+/// head cell, its right half in the trailing one (`Term::cell_at`).
 fn glyph_lines(cell: &Cell) -> [u16; CH] {
-    let glyph = match cell.ch {
-        '\0' => 0,
-        c @ ' '..='~' => c as usize - 0x20,
-        _ => MISSING,
-    };
-    let bits = &FONT[glyph * GLYPH_BYTES..(glyph + 1) * GLYPH_BYTES];
     let mut lines = [0u16; CH];
-    if cell.attrs & attr::HIDDEN == 0 {
+    if cell.attrs & attr::HIDDEN != 0 {
+        return lines;
+    }
+    let ascii = |i: usize, lines: &mut [u16; CH]| {
+        let bits = &FONT[i * GLYPH_BYTES..(i + 1) * GLYPH_BYTES];
         for (y, l) in lines.iter_mut().enumerate() {
             *l = u16::from_be_bytes([bits[2 * y], bits[2 * y + 1]]);
         }
-        if cell.attrs & attr::UNDERLINE != 0 {
-            lines[CH - 3] = 0xFFFF;
-        }
+    };
+    let cont = cell.attrs & attr::WIDE_CONT != 0;
+    match cell.ch {
+        '\0' => {}
+        c @ ' '..='~' => ascii(c as usize - 0x20, &mut lines),
+        c if cell.attrs & (attr::WIDE | attr::WIDE_CONT) != 0 => match extra().and_then(|f| f.wide(c)) {
+            Some(g) => {
+                let shift = if cont { 0 } else { 16 };
+                for (l, row) in lines.iter_mut().zip(g) {
+                    *l = (row >> shift) as u16;
+                }
+            }
+            None if !cont => ascii(MISSING, &mut lines),
+            None => {}
+        },
+        c => match extra().and_then(|f| f.narrow(c)) {
+            Some(g) => lines = g,
+            None => ascii(MISSING, &mut lines),
+        },
+    }
+    if cell.attrs & attr::UNDERLINE != 0 {
+        lines[CH - 3] = 0xFFFF;
     }
     lines
 }
 
 fn draw_cell(d: &mut Display, row: usize, col: usize, cell: &Cell, cursor: bool) {
-    // The trailing half of a wide glyph is drawn with its head.
-    if cell.attrs & attr::WIDE_CONT != 0 && !cursor {
-        return;
-    }
     let (fg, bg) = cell_colors(cell, cursor);
     let lines = glyph_lines(cell);
     // Along the axis whose pixels are adjacent in the framebuffer (doc/42).
