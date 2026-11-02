@@ -303,6 +303,11 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --expect-event term.ready --expect-event term.session --expect-event shell.exec \
 	    --expect-event shell.listed --expect-event proc.kill_failed \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# The terminal's drawing (doc/42): 100 lines that scroll, then every
+	@# pixel checked against the cells.
+	$(T5EMU) --quiet --max-ms 120000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run term 1" --ctl "wait-ms 15000" --expect-event term.bench_ok \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Installing (M3d): the flash write path on a spare sector, an install,
 	@# running it, a rejected image, removal. Stops on any flash access the
 	@# chip would not survive (doc/14 §5.3).

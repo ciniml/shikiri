@@ -32,8 +32,11 @@ const RESTART_MS: u64 = 1000;
 
 const BLANK_GRID: Grid = [[Cell { ch: '\0', fg: Color::Default, bg: Color::Default, attrs: 0 }; COLS]; ROWS];
 static mut GRIDS: [Grid; 2] = [BLANK_GRID; 2];
+/// What each cell on the screen shows: the cell, and whether the cursor is
+/// on it. Cells that would be drawn the same are skipped (doc/42).
+static mut SHOWN: [[(Cell, bool); COLS]; ROWS] = [[(BLANK_GRID[0][0], false); COLS]; ROWS];
 
-fn main(_: usize, _: usize) -> usize {
+fn main(mode: usize, _: usize) -> usize {
     let Ok(mut d) = Display::open() else {
         event!(Error, "term.no_display");
         return 1;
@@ -48,11 +51,16 @@ fn main(_: usize, _: usize) -> usize {
         screen: vt::Screen::new(unsafe { &mut *core::ptr::addr_of_mut!(GRIDS) }),
         parser: vt::Parser::new(),
         cursor_drawn: None,
+        shown: unsafe { &mut *core::ptr::addr_of_mut!(SHOWN) },
     };
+    // Matches `SHOWN`'s blank cells.
     d.fill(color(Color::Default, false));
     let _ = d.flush_all();
     t.screen.mark_all();
     t.draw(&mut d);
+    if mode == 1 {
+        bench(&mut t, &mut d);
+    }
     event!(Info, "term.ready", cols = COLS as u32, rows = ROWS as u32, keyboard = keyboard.is_some());
 
     let mut client: Option<Channel> = None;
@@ -164,11 +172,38 @@ fn start_shell(launcher: Option<&Handle>) {
     }
 }
 
+/// Mode 1 (doc/42): 100 lines of 79 characters, drawn after each line
+/// (each scrolls once the screen is full), then the screen is cleared.
+fn bench(t: &mut Term, d: &mut Display) {
+    const LINES: u32 = 100;
+    let t0 = time_ns();
+    for i in 0..LINES {
+        for k in 0..79u32 {
+            t.parser.feed(b'!' + ((i + k) % 94) as u8, &mut t.screen);
+        }
+        for &b in b"\r\n" {
+            t.parser.feed(b, &mut t.screen);
+        }
+        t.draw(d);
+    }
+    let us = (time_ns() - t0) / 1000;
+    let wrong = t.check(d);
+    event!(Info, "term.bench", lines = LINES, total_ms = (us / 1000) as u32, per_line_us = (us / LINES as u64) as u32, wrong_cells = wrong);
+    if wrong == 0 {
+        event!(Info, "term.bench_ok");
+    }
+    for &b in b"\x1b[H\x1b[2J" {
+        t.parser.feed(b, &mut t.screen);
+    }
+    t.draw(d);
+}
+
 struct Term {
     screen: vt::Screen,
     parser: vt::Parser,
     /// Where the cursor was drawn.
     cursor_drawn: Option<(usize, usize)>,
+    shown: &'static mut [[(Cell, bool); COLS]; ROWS],
 }
 
 impl Term {
@@ -190,18 +225,130 @@ impl Term {
         if dmg.is_empty() {
             return;
         }
+        let t0 = time_ns();
+        // The cells drawn, and the rectangle they span.
+        let mut drawn = 0;
+        let (mut r0, mut c0, mut r1, mut c1) = (ROWS, COLS, 0, 0);
+        let moved = dmg.row1 - dmg.row0 >= MOVE_MIN_ROWS && self.scroll(d);
+        if moved {
+            // Everything moved: every cell is compared again.
+            (r0, c0, r1, c1) = (0, 0, ROWS, COLS);
+            dmg = vt::Damage { row0: 0, col0: 0, row1: ROWS, col1: COLS };
+        }
         for r in dmg.row0..dmg.row1 {
             for c in dmg.col0..dmg.col1 {
-                let cell = *self.screen.at(r, c);
-                draw_cell(d, r, c, &cell, cursor == Some((r, c)));
+                let now = (*self.screen.at(r, c), cursor == Some((r, c)));
+                if self.shown[r][c] == now {
+                    continue;
+                }
+                self.shown[r][c] = now;
+                draw_cell(d, r, c, &now.0, now.1);
+                drawn += 1;
+                (r0, c0, r1, c1) = (r0.min(r), c0.min(c), r1.max(r + 1), c1.max(c + 1));
             }
         }
         self.cursor_drawn = cursor;
+        if drawn == 0 && !moved {
+            return;
+        }
         // The framebuffer rows the rectangle covers (the screen is turned).
-        let (x0, y0, x1, y1) = (dmg.col0 * CW, dmg.row0 * CH, dmg.col1 * CW - 1, dmg.row1 * CH - 1);
+        let (x0, y0, x1, y1) = (c0 * CW, r0 * CH, c1 * CW - 1, r1 * CH - 1);
         let rows = [d.fb_row(x0, y0), d.fb_row(x1, y0), d.fb_row(x0, y1), d.fb_row(x1, y1)];
         let (lo, hi) = (rows.iter().min().copied().unwrap_or(0), rows.iter().max().copied().unwrap_or(0));
+        let t1 = time_ns();
         let _ = d.flush(lo, hi + 1);
+        // Large redraws only (a screenful, a scroll), for doc/42.
+        if drawn >= COLS * 4 || moved {
+            let t2 = time_ns();
+            event!(Debug, "term.draw", cells = drawn as u32, moved = moved, draw_us = ((t1 - t0) / 1000) as u32, flush_us = ((t2 - t1) / 1000) as u32);
+        }
+    }
+}
+
+impl Term {
+    /// Cells whose pixels differ from what the screen holds (the bench's
+    /// check that moving the framebuffer kept it right).
+    fn check(&self, d: &mut Display) -> u32 {
+        let cursor = self.screen.cursor_visible.then(|| self.screen.cursor());
+        let mut wrong = 0;
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                let cell = *self.screen.at(r, c);
+                if cell.attrs & attr::WIDE_CONT != 0 {
+                    continue;
+                }
+                let (fg, bg) = cell_colors(&cell, cursor == Some((r, c)));
+                let lines = glyph_lines(&cell);
+                let ok = (0..CH).all(|y| {
+                    (0..CW).all(|x| {
+                        let want = if lines[y] & (0x8000 >> x) != 0 { fg } else { bg };
+                        let i = d.index(c * CW + x, r * CH + y);
+                        d.fb_mut()[i] == want
+                    })
+                });
+                wrong += !ok as u32;
+            }
+        }
+        wrong
+    }
+}
+
+/// Moving the text in the framebuffer costs about as much as drawing this
+/// many rows (doc/42: 30 ms against 2.7 ms a row).
+const MOVE_MIN_ROWS: usize = 12;
+/// A `shown` cell that matches nothing: drawn next time.
+const STALE: (Cell, bool) = (Cell { ch: '\0', fg: Color::Default, bg: Color::Default, attrs: u16::MAX }, false);
+
+impl Term {
+    /// If the screen's rows are mostly the rows shown `k` rows away (a
+    /// scroll), moves the framebuffer and `shown` by `k` rows so that only
+    /// the rest needs drawing. Only where user y runs along adjacent
+    /// pixels (the 80 x 22 landscape screen).
+    fn scroll(&mut self, d: &mut Display) -> bool {
+        let (_, sy) = d.steps();
+        if sy.abs() != 1 {
+            return false;
+        }
+        let same = |t: &Term, r: usize, shown_r: usize| (0..COLS).all(|c| *t.screen.at(r, c) == t.shown[shown_r][c].0);
+        let in_place = (0..ROWS).filter(|&r| same(self, r, r)).count();
+        // k > 0: content moved up by k rows.
+        let mut best = (0isize, in_place);
+        for k in 1..ROWS as isize {
+            for k in [k, -k] {
+                let n = (0..ROWS as isize).filter(|&r| (0..ROWS as isize).contains(&(r + k)) && same(self, r as usize, (r + k) as usize)).count();
+                if n > best.1 {
+                    best = (k, n);
+                }
+            }
+        }
+        let (k, n) = best;
+        if k == 0 || n < in_place + MOVE_MIN_ROWS {
+            return false;
+        }
+        let (h, dy) = ((ROWS * CH) as isize, k.unsigned_abs() as isize * CH as isize);
+        let fb_len = d.fb_mut().len() as isize;
+        for x in 0..COLS * CW {
+            let b = d.index(x, 0) as isize;
+            // [src, src + len) to dst, in framebuffer indices.
+            let len = h - dy;
+            let (src, dst) = match (k > 0, sy > 0) {
+                (true, true) => (b + dy, b),
+                (true, false) => (b + 1 - h, b + 1 - h + dy),
+                (false, true) => (b, b + dy),
+                (false, false) => (b + 1 - h + dy, b + 1 - h),
+            };
+            debug_assert!(src >= 0 && src + len <= fb_len && dst + len <= fb_len);
+            d.fb_mut().copy_within(src as usize..(src + len) as usize, dst as usize);
+        }
+        let rows = ROWS - k.unsigned_abs();
+        if k > 0 {
+            self.shown.copy_within(k as usize.., 0);
+            self.shown[rows..].iter_mut().for_each(|r| r.fill(STALE));
+        } else {
+            self.shown.copy_within(..rows, k.unsigned_abs());
+            self.shown[..k.unsigned_abs()].iter_mut().for_each(|r| r.fill(STALE));
+        }
+        true
     }
 }
 
@@ -248,11 +395,8 @@ fn color(c: Color, fg: bool) -> u16 {
     rgb(r, g, b)
 }
 
-fn draw_cell(d: &mut Display, row: usize, col: usize, cell: &Cell, cursor: bool) {
-    // The trailing half of a wide glyph is drawn with its head.
-    if cell.attrs & attr::WIDE_CONT != 0 && !cursor {
-        return;
-    }
+/// Foreground and background (RGB565) of `cell`, with the cursor on it.
+fn cell_colors(cell: &Cell, cursor: bool) -> (u16, u16) {
     let mut fg = cell.fg;
     // Bold brightens the first 8 colours.
     if cell.attrs & attr::BOLD != 0
@@ -265,20 +409,71 @@ fn draw_cell(d: &mut Display, row: usize, col: usize, cell: &Cell, cursor: bool)
     if (cell.attrs & attr::REVERSE != 0) ^ cursor {
         core::mem::swap(&mut fg, &mut bg);
     }
+    (fg, bg)
+}
+
+/// The glyph's rows (bit 15 leftmost), underline and hiding applied.
+fn glyph_lines(cell: &Cell) -> [u16; CH] {
     let glyph = match cell.ch {
         '\0' => 0,
         c @ ' '..='~' => c as usize - 0x20,
         _ => MISSING,
     };
     let bits = &FONT[glyph * GLYPH_BYTES..(glyph + 1) * GLYPH_BYTES];
-    let hidden = cell.attrs & attr::HIDDEN != 0;
-    let (x0, y0) = (col * CW, row * CH);
-    for y in 0..CH {
-        let line = u16::from_be_bytes([bits[2 * y], bits[2 * y + 1]]);
-        let under = cell.attrs & attr::UNDERLINE != 0 && y == CH - 3;
+    let mut lines = [0u16; CH];
+    if cell.attrs & attr::HIDDEN == 0 {
+        for (y, l) in lines.iter_mut().enumerate() {
+            *l = u16::from_be_bytes([bits[2 * y], bits[2 * y + 1]]);
+        }
+        if cell.attrs & attr::UNDERLINE != 0 {
+            lines[CH - 3] = 0xFFFF;
+        }
+    }
+    lines
+}
+
+fn draw_cell(d: &mut Display, row: usize, col: usize, cell: &Cell, cursor: bool) {
+    // The trailing half of a wide glyph is drawn with its head.
+    if cell.attrs & attr::WIDE_CONT != 0 && !cursor {
+        return;
+    }
+    let (fg, bg) = cell_colors(cell, cursor);
+    let lines = glyph_lines(cell);
+    // Along the axis whose pixels are adjacent in the framebuffer (doc/42).
+    let base = d.index(col * CW, row * CH) as isize;
+    let (sx, sy) = d.steps();
+    let fb = d.fb_mut();
+    if lines == [0; CH] {
+        // No ink: a plain fill along the adjacent axis.
+        let (along, across, n, m) = if sy.abs() == 1 { (sy, sx, CH, CW) } else { (sx, sy, CW, CH) };
+        for k in 0..m {
+            let start = (base + k as isize * across) as usize;
+            let run = if along == 1 { start..start + n } else { start + 1 - n..start + 1 };
+            fb[run].fill(bg);
+        }
+    } else if sy.abs() == 1 {
         for x in 0..CW {
-            let on = !hidden && (under || line & (0x8000 >> x) != 0);
-            d.put(x0 + x, y0 + y, if on { fg } else { bg });
+            let mask = 0x8000 >> x;
+            span(fb, base + x as isize * sx, sy, CH, |y| lines[y] & mask != 0, fg, bg);
+        }
+    } else {
+        for (y, &line) in lines.iter().enumerate() {
+            span(fb, base + y as isize * sy, sx, CW, |x| line & (0x8000 >> x) != 0, fg, bg);
+        }
+    }
+}
+
+/// `n` adjacent pixels from index `start`, going by `step` (±1): pixel k is
+/// `fg` where `on(k)`.
+fn span(fb: &mut [u16], start: isize, step: isize, n: usize, on: impl Fn(usize) -> bool, fg: u16, bg: u16) {
+    let start = start as usize;
+    if step == 1 {
+        for (k, p) in fb[start..start + n].iter_mut().enumerate() {
+            *p = if on(k) { fg } else { bg };
+        }
+    } else {
+        for (k, p) in fb[start + 1 - n..=start].iter_mut().enumerate() {
+            *p = if on(n - 1 - k) { fg } else { bg };
         }
     }
 }

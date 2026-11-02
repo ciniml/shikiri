@@ -285,7 +285,7 @@ impl Display {
 
     /// The framebuffer index of user point (x, y) (inverse of the kernel's
     /// touch mapping).
-    fn index(&self, x: usize, y: usize) -> usize {
+    pub fn index(&self, x: usize, y: usize) -> usize {
         let (w, h) = (self.fb_w, self.fb_h);
         let (px, py) = match self.quarter {
             1 => (w - 1 - y, x),
@@ -294,6 +294,24 @@ impl Display {
             _ => (x, y),
         };
         py * w + px
+    }
+
+    /// How the framebuffer index changes for user x + 1 and for y + 1. One
+    /// of them is ±1: drawing along that axis writes adjacent pixels, which
+    /// is much faster in PSRAM than the other (doc/42).
+    pub fn steps(&self) -> (isize, isize) {
+        let w = self.fb_w as isize;
+        match self.quarter {
+            1 => (w, -1),
+            2 => (-1, -w),
+            3 => (-w, 1),
+            _ => (1, w),
+        }
+    }
+
+    /// The framebuffer itself (index it with `index` and `steps`).
+    pub fn fb_mut(&mut self) -> &mut [u16] {
+        self.fb
     }
 
     /// The framebuffer row that user point (x, y) lands on.

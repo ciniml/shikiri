@@ -38,6 +38,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [39](39-term-shell.md) | ターミナルとシェル: カーネルのキーボード（`kbd`、ABI 小版 15）、VT/xterm のアプリ `term`（`svc:tty`）、別プロセスの `shell`。実機で動作を確認 |
 | [40](40-proc-info.md) | シェルの `ps`・`apps`・`kill`: カーネルのオブジェクト `proc:list`・`proc:apps`・`proc:kill`（ABI 小版 16、サービスのループが写しを取り、kill を行う） |
 | [41](41-shell-net-top.md) | シェルの `ifconfig`・`top`・`nc`: ネットワークサービスの要求 `IF_INFO`（インターフェースのアドレスと数）、1 秒ごとの CPU 使用率、行ごとの TCP クライアント |
+| [42](42-term-drawing.md) | ターミナルの描画を速くする: 隣り合う画素の向きに描く、見えているものと同じマスは描かない、スクロールはフレームバッファを動かす。全画面 223 → 60 ms、スクロール 50 → 33 ms/行 |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |
