@@ -15,6 +15,7 @@ use t5_abi::fs::{flag, status};
 use t5_abi::store::crc32;
 use t5_rt::{Files, FsError};
 
+#[derive(Clone, Copy)]
 pub struct KernelRng;
 
 impl Rng for KernelRng {

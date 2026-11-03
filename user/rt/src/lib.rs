@@ -1009,10 +1009,6 @@ pub fn exit(code: usize) -> ! {
     loop {}
 }
 
-// `no-panic-handler`: for an app that links a crate with its own handler
-// (`matter` with simple-matter-cffi, doc/49 §3); built on its own so the
-// feature does not reach the other apps.
-#[cfg(not(feature = "no-panic-handler"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write as _;

@@ -5,7 +5,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-t5-rt = { path = "../../rt", features = ["no-panic-handler"] }
+t5-rt = { path = "../../rt" }
 mtport = { path = "../../mtport" }
 simple-matter = { git = "https://github.com/ciniml/simple_matter.git", rev = "a163275", default-features = false, features = ["rustcrypto"] }
-simple-matter-cffi = { git = "https://github.com/ciniml/simple_matter.git", rev = "a163275", features = ["panic-abort"] }

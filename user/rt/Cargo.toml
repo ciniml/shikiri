@@ -7,6 +7,3 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 t5-abi = { path = "../../abi" }
-
-[features]
-no-panic-handler = []
