@@ -6,7 +6,9 @@
 //! 1a2b3c4d5e60): C1 (…5e61, write) and C2 (…5e62, read and notify).
 //! What a central writes to C1 becomes C2's value and is notified back;
 //! while it has subscribed to C2, "tick N" is also notified every second.
-//! Until the central leaves or SECONDS (60 if 0) pass. Built with
+//! When the central leaves, it advertises again (doc/48 §9: counting
+//! connections). `run bleecho [SECONDS [INTERVAL_MS]]` (100 ms if 0).
+//! Until SECONDS (60 if 0) pass. Built with
 //! `--permit svc:ble`. Exit 0, or the step that failed.
 
 use t5_rt::{Channel, ble, event, time_ns, wait};
@@ -24,7 +26,7 @@ const PROP_WRITE_NO_RESPONSE: u8 = 0x04;
 const PROP_WRITE: u8 = 0x08;
 const PROP_NOTIFY: u8 = 0x10;
 
-fn main(seconds: usize, _: usize) -> usize {
+fn main(seconds: usize, interval: usize) -> usize {
     let Ok(c) = Channel::connect(ble::SVC) else {
         event!(Error, "bleecho.no_service");
         return 1;
@@ -41,7 +43,7 @@ fn main(seconds: usize, _: usize) -> usize {
         n += b.len();
     };
     put(&[ble::ADVERTISE]);
-    put(&100u16.to_le_bytes());
+    put(&(if interval == 0 { 100 } else { interval.min(10_240) } as u16).to_le_bytes());
     put(&[NAME.len() as u8]);
     put(NAME);
     put(&[16]);
@@ -55,7 +57,8 @@ fn main(seconds: usize, _: usize) -> usize {
     put(&uuid(0x60));
     put(&[2 + NAME.len() as u8, 1 + NAME.len() as u8, 0x09]);
     put(NAME);
-    if c.send(&req[..n]).is_err() {
+    let adv = &req[..n];
+    if c.send(adv).is_err() {
         return 2;
     }
     let mut buf = [0u8; ble::MSG_MAX];
@@ -69,7 +72,7 @@ fn main(seconds: usize, _: usize) -> usize {
     let c2_cccd = u16::from_le_bytes([buf[8], buf[9]]);
     event!(Info, "bleecho.advertising", c1 = c1 as u32, c2 = c2 as u32, c2_cccd = c2_cccd as u32);
 
-    let (mut writes, mut sent) = (0u32, 0u32);
+    let (mut writes, mut sent, mut peers) = (0u32, 0u32, 0u32);
     let mut waiting = 0u32;
     let (mut subscribed, mut ticks, mut next_tick) = (false, 0u32, 0u64);
     loop {
@@ -101,7 +104,10 @@ fn main(seconds: usize, _: usize) -> usize {
             }
         };
         match buf[0] {
-            ble::PEER => event!(Info, "bleecho.peer", addr = &buf[2..8], addr_type = buf[1]),
+            ble::PEER => {
+                peers += 1;
+                event!(Info, "bleecho.peer", addr = &buf[2..8], addr_type = buf[1], count = peers);
+            }
             ble::PEER_WRITE if n >= 3 => {
                 let handle = u16::from_le_bytes([buf[1], buf[2]]);
                 event!(Info, "bleecho.write", handle = handle as u32, data = &buf[3..n.min(3 + 32)]);
@@ -131,10 +137,16 @@ fn main(seconds: usize, _: usize) -> usize {
                 event!(Warn, "bleecho.failed", got = buf[0], request = buf[1], code = buf[2]);
                 waiting = waiting.saturating_sub(1);
             }
-            ble::DISCONNECTED => break,
+            ble::DISCONNECTED => {
+                // Again, for the next central (the handles stay the same).
+                subscribed = false;
+                if c.send(adv).is_err() {
+                    return 4;
+                }
+            }
             _ => {}
         }
     }
-    event!(Info, "bleecho.done", writes = writes, ticks = ticks, sent = sent);
+    event!(Info, "bleecho.done", peers = peers, writes = writes, ticks = ticks, sent = sent);
     0
 }

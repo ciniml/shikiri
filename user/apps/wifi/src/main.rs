@@ -37,6 +37,7 @@ const FEATURE_BT_INIT: u64 = 1;
 const FEATURE_BT_ENABLE: u64 = 3;
 /// wifi_ps_type_t: WIFI_PS_NONE.
 const PS_NONE: u64 = 0;
+const PS_MIN_MODEM: u64 = 1;
 const RESP_OFFSET: u32 = 256;
 const EVENT_ESP_INIT: u32 = 769;
 const EVENT_HEARTBEAT: u32 = 770;
@@ -62,9 +63,11 @@ const TLV_EPNAME: u8 = 0x01;
 const TLV_DATA: u8 = 0x02;
 const EP_REQUEST: &[u8] = b"RPCRsp";
 
-/// `arg0` bit 0: also start the Bluetooth controller on the chip (doc/48).
+/// `arg0` bit 0: also start the Bluetooth controller on the chip (doc/48);
+/// bit 1: leave the chip's modem sleep on (BLE gets more of the radio,
+/// Wi-Fi answers later; doc/48 §9).
 fn main(arg0: usize, _: usize) -> usize {
-    match run(arg0 & 1 != 0) {
+    match run(arg0 & 1 != 0, arg0 & 2 != 0) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "wifi.failed", step = step);
@@ -331,7 +334,7 @@ impl Rpc {
     }
 }
 
-fn run(bluetooth: bool) -> Result<(), u32> {
+fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     let ctl = Handle::open(wlan::CTL, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).map_err(|_| 1u32)?;
     let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX] };
     // The chip announces itself once the data path is open.
@@ -420,7 +423,11 @@ fn run(bluetooth: bool) -> Result<(), u32> {
     rpc.call(REQ_WIFI_START, 1, |_| {})?;
     // No modem sleep: with it the AP holds frames for the Tab5 until the
     // next beacon it listens to (25-210 ms pings from the LAN, doc/22 §7.5).
-    if rpc.call(REQ_WIFI_SET_PS, 1, |p| p.uint(1, PS_NONE)).is_err() {
+    if modem_sleep {
+        // Set, not left: the chip keeps what an earlier `wifi` set.
+        let r = rpc.call(REQ_WIFI_SET_PS, 1, |p| p.uint(1, PS_MIN_MODEM));
+        event!(Info, "wifi.power_save_kept", ok = r.is_ok());
+    } else if rpc.call(REQ_WIFI_SET_PS, 1, |p| p.uint(1, PS_NONE)).is_err() {
         event!(Warn, "wifi.power_save_left_on");
     }
     // Connect once the station has started, as ESP-IDF's host does (TCC:
