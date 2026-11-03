@@ -93,12 +93,12 @@ fn ldo_vo2_on() -> Result<(), &'static str> {
 }
 
 // ---- MPLL at 400 MHz through regi2c (clk_tree_ll.h:150-160,450-468) -------
-const PMU_RF_PWC: usize = 0x5011_515C;
+pub(super) const PMU_RF_PWC: usize = 0x5011_515C;
 const PMU_MSPI_PHY_XPD: u32 = 1 << 24;
 const LP_CLKRST_HP_CLK_CTRL: usize = 0x5011_1040;
 const HP_MPLL_500M_CLK_EN: u32 = 1 << 28;
-const LPPERI_CLK_EN: usize = 0x5012_0000;
-const CK_EN_LP_I2CMST: u32 = 1 << 27;
+pub(super) const LPPERI_CLK_EN: usize = 0x5012_0000;
+pub(super) const CK_EN_LP_I2CMST: u32 = 1 << 27;
 const HP_SYS_CLKRST: usize = 0x500E_6000;
 const ANA_PLL_CTRL0: usize = HP_SYS_CLKRST + 0xBC;
 const MSPI_CAL_END: u32 = 1 << 8;
@@ -108,45 +108,59 @@ const I2C_ANA_MST: usize = 0x5012_4000;
 const I2C0_CTRL: usize = I2C_ANA_MST;
 const ANA_CONF1: usize = I2C_ANA_MST + 0x1C;
 const ANA_CONF2: usize = I2C_ANA_MST + 0x20;
-const REGI2C_MSPI_XTAL_MST_SEL: u32 = 1 << 9;
 const REGI2C_BUSY: u32 = 1 << 25;
 const REGI2C_WRITE: u32 = 1 << 24;
-const I2C_MPLL: u32 = 0x63;
+
+/// A regi2c slave block: its id and its master-select bit in ANA_CONF2.
+pub(super) struct Regi2c {
+    id: u32,
+    sel: u32,
+}
+
+const I2C_MPLL: Regi2c = Regi2c { id: 0x63, sel: 1 << 9 };
+pub(super) const I2C_SAR_ADC: Regi2c = Regi2c { id: 0x69, sel: 1 << 7 };
 const I2C_MPLL_IR_CAL_RSTB: u32 = 1;
 const I2C_MPLL_DIV_REG: u32 = 2;
 const I2C_MPLL_DHREF: u32 = 3;
 pub const MPLL_MHZ: u32 = 400;
 
-fn regi2c_select() {
+fn regi2c_select(slave: &Regi2c) {
     clear_bits(ANA_CONF2, 0x00FF_FFFF);
     clear_bits(ANA_CONF1, 0x00FF_FFFF);
-    set_bits(ANA_CONF2, REGI2C_MSPI_XTAL_MST_SEL);
+    set_bits(ANA_CONF2, slave.sel);
 }
 
-fn regi2c_read(reg: u32) -> Result<u8, &'static str> {
-    regi2c_select();
+pub(super) fn regi2c_read(slave: &Regi2c, reg: u32) -> Result<u8, &'static str> {
+    regi2c_select(slave);
     let idle = || unsafe { rd(I2C0_CTRL) & REGI2C_BUSY == 0 };
     if !wait(1000, idle) {
         return Err("regi2c busy");
     }
-    unsafe { wr(I2C0_CTRL, I2C_MPLL | (reg << 8)) };
+    unsafe { wr(I2C0_CTRL, slave.id | (reg << 8)) };
     if !wait(1000, idle) {
         return Err("regi2c busy");
     }
     Ok((unsafe { rd(I2C0_CTRL) } >> 16) as u8)
 }
 
-fn regi2c_write(reg: u32, data: u8) -> Result<(), &'static str> {
-    regi2c_select();
+pub(super) fn regi2c_write(slave: &Regi2c, reg: u32, data: u8) -> Result<(), &'static str> {
+    regi2c_select(slave);
     let idle = || unsafe { rd(I2C0_CTRL) & REGI2C_BUSY == 0 };
     if !wait(1000, idle) {
         return Err("regi2c busy");
     }
-    unsafe { wr(I2C0_CTRL, I2C_MPLL | (reg << 8) | REGI2C_WRITE | ((data as u32) << 16)) };
+    unsafe { wr(I2C0_CTRL, slave.id | (reg << 8) | REGI2C_WRITE | ((data as u32) << 16)) };
     if !wait(1000, idle) {
         return Err("regi2c busy");
     }
     Ok(())
+}
+
+/// Writes bits `msb..=lsb` of a regi2c register (regi2c_write_mask_impl).
+pub(super) fn regi2c_write_mask(slave: &Regi2c, reg: u32, msb: u32, lsb: u32, data: u8) -> Result<(), &'static str> {
+    let mask = (((1u32 << (msb - lsb + 1)) - 1) << lsb) as u8;
+    let old = regi2c_read(slave, reg)?;
+    regi2c_write(slave, reg, (old & !mask) | ((data << lsb) & mask))
 }
 
 fn mpll_on() -> Result<(), &'static str> {
@@ -156,20 +170,20 @@ fn mpll_on() -> Result<(), &'static str> {
     set_bits(LPPERI_CLK_EN, CK_EN_LP_I2CMST);
     clear_bits(ANA_PLL_CTRL0, MSPI_CAL_STOP);
     let r = (|| {
-        let dhref = regi2c_read(I2C_MPLL_DHREF)?;
-        regi2c_write(I2C_MPLL_DHREF, dhref | (3 << 4))?;
-        let rstb = regi2c_read(I2C_MPLL_IR_CAL_RSTB)?;
-        regi2c_write(I2C_MPLL_IR_CAL_RSTB, rstb & 0xDF)?;
-        regi2c_write(I2C_MPLL_IR_CAL_RSTB, rstb | (1 << 5))?;
+        let dhref = regi2c_read(&I2C_MPLL, I2C_MPLL_DHREF)?;
+        regi2c_write(&I2C_MPLL, I2C_MPLL_DHREF, dhref | (3 << 4))?;
+        let rstb = regi2c_read(&I2C_MPLL, I2C_MPLL_IR_CAL_RSTB)?;
+        regi2c_write(&I2C_MPLL, I2C_MPLL_IR_CAL_RSTB, rstb & 0xDF)?;
+        regi2c_write(&I2C_MPLL, I2C_MPLL_IR_CAL_RSTB, rstb | (1 << 5))?;
         // MPLL = XTAL 40 MHz * (div + 1) / (ref_div + 1).
         let (div, ref_div) = (MPLL_MHZ / 20 - 1, 1);
-        regi2c_write(I2C_MPLL_DIV_REG, ((div << 3) | ref_div) as u8)?;
+        regi2c_write(&I2C_MPLL, I2C_MPLL_DIV_REG, ((div << 3) | ref_div) as u8)?;
         let started = Esp32p4v1::now();
         if !wait(10_000, || unsafe { rd(ANA_PLL_CTRL0) } & MSPI_CAL_END != 0) {
             return Err("MPLL calibration timeout");
         }
         let cal_us = (Esp32p4v1::now() - started) / 16;
-        let readback = regi2c_read(I2C_MPLL_DIV_REG)?;
+        let readback = regi2c_read(&I2C_MPLL, I2C_MPLL_DIV_REG)?;
         event!(Info, "psram.mpll", mhz = MPLL_MHZ, cal_us = cal_us, div_reg = readback);
         Ok(())
     })();

@@ -7,6 +7,7 @@ use super::Platform;
 
 mod clock;
 mod display;
+mod entropy;
 mod i2c;
 mod kbd;
 mod membench;
@@ -848,6 +849,7 @@ impl Platform for Esp32p4v1 {
     fn random_u32() -> u32 {
         // As esp_random (hw_random.c:49-80): XOR the register over at least
         // 14 CPU cycles per MHz (about 14 µs) between words, and the timer.
+        // Random once `clock_init` has started the SAR ADC (doc/47).
         const RNG_DATA: usize = 0x5011_01A4;
         let start = Self::now();
         let mut r = start as u32;
@@ -885,6 +887,11 @@ impl Platform for Esp32p4v1 {
     }
 
     fn clock_init() {
+        // The RNG's entropy source (doc/47), whatever the clock does.
+        match entropy::enable() {
+            Ok(distinct) => t5_abi::event!(Info, "rng.entropy", source = "sar_adc", distinct = distinct),
+            Err(why) => t5_abi::event!(Warn, "rng.no_entropy", error = why),
+        }
         // PVT first, then the clock, as ESP-IDF's pmu_init and esp_clk_init
         // do (doc/research/m4-psram-and-clock.md §10).
         if !clock::pvt_on() {

@@ -388,9 +388,9 @@ pub mod display {
 }
 
 /// Random bytes (doc/46 §4): `read` fills up to `MAX` bytes. On the
-/// ESP32-P4 from the RNG register, which is fully random only while an
-/// entropy source runs (the SAR ADC, not enabled here): use for
-/// identifiers such as temporary addresses, not for keys.
+/// ESP32-P4 from the RNG register with the SAR ADC as its entropy source
+/// (doc/47; the kernel logs `rng.entropy` when it started, else
+/// `rng.no_entropy`). On virt boards a timer mixer, not random.
 pub mod random {
     pub const NAME: &str = "random";
     pub const MAX: usize = 64;
