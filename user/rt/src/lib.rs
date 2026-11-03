@@ -895,6 +895,12 @@ impl Net {
     }
 
     /// Sends one datagram to an address of either family, waiting for room.
+    /// Joins multicast group `group` on the links UDP socket `s` is bound
+    /// on (doc/49).
+    pub fn udp_join(&self, s: u16, group: IpAddr) -> Result<(), NetError> {
+        self.call_ip(net::op::UDP_JOIN, s, group, 0).map(|_| ())
+    }
+
     pub fn udp_send_ip(&mut self, s: u16, ip: IpAddr, port: u16, data: &[u8]) -> Result<(), NetError> {
         let n = data.len().min(0xFFFF).min(self.slice.len());
         self.slice[..n].copy_from_slice(&data[..n]);
@@ -1003,6 +1009,10 @@ pub fn exit(code: usize) -> ! {
     loop {}
 }
 
+// `no-panic-handler`: for an app that links a crate with its own handler
+// (`matter` with simple-matter-cffi, doc/49 §3); built on its own so the
+// feature does not reach the other apps.
+#[cfg(not(feature = "no-panic-handler"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write as _;

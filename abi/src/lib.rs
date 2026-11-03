@@ -134,6 +134,7 @@ pub mod shm {
     /// ctl: a2 = bytes; gives the (empty) handle a new zeroed region.
     pub const ALLOC: usize = 1;
     /// ctl: maps the window read/write into the caller; returns its address.
+    /// Two windows can be mapped at once (`Busy` for a third; doc/49 §3).
     pub const MAP: usize = 2;
     /// ctl: returns the window's length in bytes.
     pub const SIZE: usize = 3;

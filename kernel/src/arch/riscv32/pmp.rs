@@ -22,6 +22,8 @@
 //! | 9     | rings.start      | OFF (bottom) |
 //! | 10    | rings.end        | TOR, RW- (only with a netdev's frame rings,
 //! |       |                  | doc/35 §5) |
+//! | 11    | shm[1].start     | OFF (bottom) |
+//! | 12    | shm[1].end       | TOR, RW- (a second mapped window, doc/49 §3) |
 
 use super::csr::{read_csr, write_csr};
 
@@ -95,8 +97,8 @@ pub struct Region {
     pub data: core::ops::Range<usize>,
     /// Memory the kernel lent the process (RW-): the framebuffer.
     pub shared: Option<core::ops::Range<usize>>,
-    /// Mapped shared memory (RW-).
-    pub shm: Option<core::ops::Range<usize>>,
+    /// Mapped shared memory (RW-): two windows (doc/49 §3).
+    pub shm: [Option<core::ops::Range<usize>>; 2],
     /// A netdev's frame rings (RW-).
     pub rings: Option<core::ops::Range<usize>>,
 }
@@ -119,10 +121,19 @@ pub fn set_process(r: &Region) {
         }
         None => 0,
     };
-    let shm = match &r.shm {
+    let shm = match &r.shm[0] {
         Some(s) => {
             write_csr!("pmpaddr7", s.start >> 2);
             write_csr!("pmpaddr8", s.end >> 2);
+            A_TOR | R | W
+        }
+        None => 0,
+    };
+    write_csr!("pmpcfg3", 0);
+    let shm1 = match &r.shm[1] {
+        Some(s) => {
+            write_csr!("pmpaddr11", s.start >> 2);
+            write_csr!("pmpaddr12", s.end >> 2);
             A_TOR | R | W
         }
         None => 0,
@@ -136,6 +147,7 @@ pub fn set_process(r: &Region) {
         None => 0,
     };
     write_csr!("pmpcfg2", u32::from_le_bytes([shm, 0, rings, 0]) as usize);
+    write_csr!("pmpcfg3", u32::from_le_bytes([shm1, 0, 0, 0]) as usize);
     let cfg0 = u32::from_le_bytes([0, 0, A_TOR | R | X, 0]);
     let cfg1 = u32::from_le_bytes([A_TOR | R | W, 0, shared, 0]);
     write_csr!("pmpcfg0", cfg0 as usize);

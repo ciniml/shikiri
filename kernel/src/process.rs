@@ -30,7 +30,8 @@ pub struct Process {
     /// extent. Its end decides that version (doc/16 §4.2).
     pub pending: Option<(u64, u16)>,
     /// The `shm` handle whose window is mapped, if any.
-    shm_mapped: Option<usize>,
+    /// The `shm` handles mapped (two windows, doc/49 §3).
+    shm_mapped: [Option<usize>; 2],
     /// The `netdev` handle whose frame rings are mapped, if any.
     ring_mapped: Option<usize>,
     /// Time (ticks) in its slices, the kernel's work on its system calls
@@ -93,7 +94,7 @@ impl Process {
             permissions: loaded.permissions,
             xip_extents: None,
             pending: None,
-            shm_mapped: None,
+            shm_mapped: [None; 2],
             ring_mapped: None,
             cpu: 0,
             cpu_mark: 0,
@@ -162,9 +163,9 @@ impl Process {
             sys::LOG_LEVEL => Ok([log::KEEP as usize, 0, 0]),
             sys::OPEN => self.open(a0, a1, a2).map(|h| [h, 0, 0]),
             sys::CLOSE => {
-                if self.shm_mapped == Some(a0) {
-                    self.shm_mapped = None;
-                    self.region.shm = None;
+                if let Some(i) = self.shm_mapped.iter().position(|&m| m == Some(a0)) {
+                    self.shm_mapped[i] = None;
+                    self.region.shm[i] = None;
                     pmp::set_process(&self.region);
                 }
                 if self.ring_mapped == Some(a0) {
@@ -271,15 +272,17 @@ impl Process {
         r
     }
 
-    /// `ctl(shm, MAP)`: one mapped window per process (doc/19 §2).
+    /// `ctl(shm, MAP)`: two mapped windows per process (doc/19 §2; one
+    /// until doc/49 §3: a service that is a client of both `net` and `fs`).
     fn map_shm(&mut self, h: usize) -> Result<usize, Error> {
-        if self.shm_mapped.is_some_and(|m| m != h) {
-            return Err(Error::Busy);
-        }
+        let i = match self.shm_mapped.iter().position(|&m| m == Some(h)) {
+            Some(i) => i,
+            None => self.shm_mapped.iter().position(Option::is_none).ok_or(Error::Busy)?,
+        };
         let addr = self.handles.ctl(h, t5_abi::shm::MAP, 0)?;
         let len = self.handles.ctl(h, t5_abi::shm::SIZE, 0)?;
-        self.region.shm = Some(addr..addr + len);
-        self.shm_mapped = Some(h);
+        self.region.shm[i] = Some(addr..addr + len);
+        self.shm_mapped[i] = Some(h);
         pmp::set_process(&self.region);
         Ok(addr)
     }

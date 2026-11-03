@@ -52,3 +52,36 @@
   - KVS は、書き換えで A と B が入れ替わり、新しい方が読めること、消したら `None` になることも確かめた。
   - PASE は、どちらの側も 1 秒に収まる。CASE は署名、検証、ECDH が数回で、0.3 秒ほどの見込み。コミッショニングには十分な速さなので、P4 の暗号の加速器は当面使わない。
 - 大きさ: `mtbench` のコードは 89 KB（暗号と SPAKE2+、KVS。スタックのコアは含まない）。
+
+## 3. MT1: デバイスの役（on-network）
+利用者の指示（2026-11-04）:「通ったら続けてください」
+
+- **`matter` サービス**（`user/apps/matter`、`--permit svc:net --permit svc:fs --permit random --stack 131072`）:
+  - simple-matter の `simple-matter-cffi`（同じ Tab5 の ESP-IDF 版 `tab5_ctrl_app` が使っている、C の ABI のつなぎ）を、Rust から直接呼ぶ。`sm_init`、`sm_udp_rx`、`sm_poll`、`sm_next_deadline`、`sm_mdns_rx`、`sm_mdns_poll`、`sm_set_addrs`、`sm_take_event`。どれも sans-IO（受けたものを渡すと、送るものと宛先が返る）。
+  - 設定: On/Off ライト（エンドポイント 1）、開発用のパスコード 20202021、discriminator 3840、試験用の DAC（VID 0xFFF1、PID 0x8001）、製品名「Tab5」、シリアルは MAC から（`T5-` と 12 桁）。
+  - KVS は `mtport::FileKvs`、乱数は `KernelRng`。コールバックの C の関数を Rust で書いた。
+  - `svc:net` で UDP 5540（Matter）と 5353（mDNS）を Wi-Fi のリンクに結び、mDNS のソケットで ff02::fb と 224.0.0.251 のグループに入る。
+  - ループ: 両方のソケットから読めるだけ読んで渡し、`sm_poll` と `sm_mdns_poll` が 0 を返すまで送り、イベントを出す。何も来なければ、次の期限か 20 ms まで眠る（UDP の受信の通知がないため）。5 秒ごとに Wi-Fi のアドレスを読み直して `sm_set_addrs`。
+  - 大きさ: コード 318 KB、BSS 52 KB（スタックのコア、暗号、BLE と コントローラの部分も入っている）。
+- **`net`**: `UDP_JOIN`（`net::op`、`Net::udp_join`）を足した。UDP のソケットが結ばれたリンクのインタフェースが、マルチキャストのグループに入る（MLD か IGMP の報告を出す）。インタフェースあたりのグループの数を 8 にした（smoltcp の既定は 4）。`net.joined` を出す。
+- **フィルタ**: `netctl` の GUARD_SET に `pass in on wlan0 proto udp port 5540` と `... port 5353` を足した。
+- **カーネル: 共有メモリの窓を 2 つに**（doc/19 §2）:
+  - `matter` は `net` と `fs` の両方のクライアントで、それぞれの切れ端を写像する。1 プロセス 1 つまでだったので、2 つ目の `MAP` が `Busy` になった。
+  - 2 つ目は PMP のエントリ 11〜12（空いていた）。`pmp::Region::shm` を 2 つの配列に、`Process::shm_mapped` も 2 つに。3 つ目は `Busy`。
+  - 自己試験（`echo` の役 4）は「2 つ目は `Busy`」を確かめていたので、「2 つ目は写像でき、3 つ目は `Busy`」に直した。
+  - 最初、自己試験を直す前のカーネルを実機に入れて、自己試験に失敗して元のカーネルに戻った（M5 の仕組みどおり）。ストアのアプリ（`echo`）を先に入れ直してから、カーネルを入れた。
+- **パニックの処理の重なり**（未解決、§4）:
+  - `simple-matter-cffi` は、feature `panic-abort` のときだけ `no_std` になり、そのとき自分の `#[panic_handler]`（`loop {}`）を持つ。`t5_rt` の処理と重なる。
+  - 当面の手当: `t5_rt` に feature `no-panic-handler` を足し、`matter` だけそれを使う。cargo の feature はワークスペースの 1 回のビルドの中でまとまるので、`matter` は `default-members` から外し、別のターゲットのディレクトリ（`user/target/matter`）で別にビルドする（`Makefile`）。
+  - このため、`matter` がパニックすると、ログを出さずに止まる（`loop {}`）。
+- **実機**（2026-11-04、Wi-Fi は iotap、PC は有線で同じ LAN、smctl は別の状態のディレクトリ）:
+  - `smctl discover commissionable`: 「0000E4B3239A1F24、discriminator 3840、VID/PID 0xfff1/0x8001、addrs fe80::e6b3:23ff:fe9a:1f24 と 192.168.2.112」が見えた。avahi-browse でも見えた。C6 は ff02::fb と 224.0.0.251 あてのフレームを上げてくる。
+  - `smctl pairing onnetwork-long 1 20202021 3840`: PASE、ArmFailSafe、Attestation（DAC の連鎖、署名、CD、VID/PID の照合）、CSR、AddTrustedRootCertificate、AddNOC、CASE、CommissioningComplete が通った。見つけてから終わるまで 3.5 秒。
+  - `onoff toggle`、`read on-off`、`off`、`on` が通り、Tab5 に `matter.event kind=1`（On/Off の変化）が出た。CASE は最初が全部の手順で 0.28 秒、2 回目からは Sigma2Resume で 0.02 秒。
+  - `matter` を止めて動かし直すと、`fabrics=1` で起動し、smctl はそのまま操作できた（fabric、ACL、resumption を SD から戻せた）。
+
+## 4. 残り
+- **パニックの処理**: simple-matter（利用者のリポジトリ）の `simple-matter-cffi` に、パニックの処理を持たない `no_std` の feature があれば、`t5_rt` の処理（ログを出して終わる）を使え、別のビルドも要らなくなる。simple-matter を変えるかどうかは利用者の判断。
+- MT1 の t5emu の試験（Wi-Fi がないので、ホストリンクか、ループバックで）。
+- UDP の受信の通知（今は 20 ms ごとに見に行く）。
+- MT2: コントローラの役と、シェルの `mt` コマンド。

@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["rt", "mtport", "apps/hello", "apps/fault", "apps/ticker", "apps/spin", "apps/timers", "apps/xipcheck", "apps/echo", "apps/paint", "apps/fs", "apps/fstest", "apps/net", "apps/nettest", "apps/wifi", "apps/netctl", "apps/init", "apps/keylog", "apps/term", "apps/shell", "apps/font", "apps/hcitest", "apps/ble", "apps/blescan", "apps/blegatt", "apps/bleecho", "apps/mtbench"]
+members = ["rt", "mtport", "apps/hello", "apps/fault", "apps/ticker", "apps/spin", "apps/timers", "apps/xipcheck", "apps/echo", "apps/paint", "apps/fs", "apps/fstest", "apps/net", "apps/nettest", "apps/wifi", "apps/netctl", "apps/init", "apps/keylog", "apps/term", "apps/shell", "apps/font", "apps/hcitest", "apps/ble", "apps/blescan", "apps/blegatt", "apps/bleecho", "apps/mtbench", "apps/matter"]
+# matter is built on its own (Makefile, doc/49 §3): its t5-rt feature
+# `no-panic-handler` must not reach the other apps.
+default-members = ["rt", "mtport", "apps/hello", "apps/fault", "apps/ticker", "apps/spin", "apps/timers", "apps/xipcheck", "apps/echo", "apps/paint", "apps/fs", "apps/fstest", "apps/net", "apps/nettest", "apps/wifi", "apps/netctl", "apps/init", "apps/keylog", "apps/term", "apps/shell", "apps/font", "apps/hcitest", "apps/ble", "apps/blescan", "apps/blegatt", "apps/bleecho", "apps/mtbench"]
 
 [profile.release]
 opt-level = "s"

@@ -154,9 +154,14 @@ fn shm_server(clients: usize) -> Result<(), u32> {
     let pool = Shm::alloc(16 * SLICE).map_err(|_| 51u32)?;
     let mem = pool.map().map_err(|_| 52u32)?;
     check(mem.len() == 16 * SLICE && mem.iter().all(|&b| b == 0), 53)?;
-    // One mapped window per process.
+    // Two mapped windows per process (doc/49 §3): a second maps, a third
+    // does not.
     let other = Shm::alloc(SLICE).map_err(|_| 54u32)?;
-    check(other.map().err() == Some(Error::Busy), 55)?;
+    let second = other.map().map_err(|_| 55u32)?;
+    second[0] = 1;
+    let third = Shm::alloc(SLICE).map_err(|_| 54u32)?;
+    check(third.map().err() == Some(Error::Busy), 55)?;
+    drop(third);
     let mut conns: [Option<Channel>; 4] = [const { None }; 4];
     for k in 0..clients {
         wait(&[&l.0], FOREVER).map_err(|_| 56u32)?;

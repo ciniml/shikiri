@@ -28,6 +28,7 @@
 //! | RESOLVE | – | name bytes from the slice (≤ `NAME_MAX`) | socket (one DNS lookup: an A record, AAAA with family 6) |
 //! | RESOLVE_RESULT | – | – | 1 once answered / IPv4 (`UNREACHABLE`: failed or no record); IPv6 after the reply |
 //! | IF_INFO | interface (0, 1, …) | – | 1 if it is up (0: not there now) / bytes put in the slice (`iface`; doc/41) |
+//! | UDP_JOIN | multicast group (IPv4, or IPv6 with family 6) | – | – (the UDP socket's links join the group; doc/49) |
 //!
 //! TCP_LISTEN and UDP_BIND (doc/23 §5): with address 0 and `link::ANY` the
 //! socket listens on every link (a TCP listener becomes the connection that
@@ -68,6 +69,7 @@ pub mod op {
     pub const RESOLVE: u8 = 12;
     pub const RESOLVE_RESULT: u8 = 13;
     pub const IF_INFO: u8 = 14;
+    pub const UDP_JOIN: u8 = 15;
 }
 
 /// IF_INFO's record in the slice (doc/41): `name[8]` (NUL-padded) | `mac[6]`

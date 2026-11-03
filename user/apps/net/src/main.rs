@@ -1133,6 +1133,38 @@ impl Stack {
                 }
             }
             op::IF_INFO => self.if_info(u32::from_le_bytes([m[4], m[5], m[6], m[7]]), mem),
+            // The interfaces the socket is bound on join the group (MLD or
+            // IGMP reports go out on the next poll); groups stay joined
+            // (doc/49: mDNS for Matter).
+            op::UDP_JOIN => {
+                self.primary(client, sock, Kind::Udp)?;
+                if !a.is_multicast() {
+                    return Err(status::BAD_REQUEST);
+                }
+                let slot = self.slots[sock as usize].unwrap();
+                for k in 0..IFACES {
+                    if slot.socks[k].is_none() {
+                        continue;
+                    }
+                    let Some((iface, _)) = self.iface_set(k) else { continue };
+                    if iface.join_multicast_group(a).is_err() {
+                        return Err(status::NO_SOCKETS);
+                    }
+                }
+                let mut g = [0u8; 16];
+                let n = match a {
+                    IpAddress::Ipv4(v4) => {
+                        g[..4].copy_from_slice(&v4.octets());
+                        4
+                    }
+                    IpAddress::Ipv6(v6) => {
+                        g.copy_from_slice(&v6.octets());
+                        16
+                    }
+                };
+                event!(Info, "net.joined", group = &g[..n], sock = sock as u32);
+                Ok((0, 0))
+            }
             _ => Err(status::BAD_REQUEST),
         }
     }

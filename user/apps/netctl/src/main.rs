@@ -47,6 +47,8 @@ policy in drop
 policy forward drop
 pass in on host
 pass in state established,related
+pass in on wlan0 proto udp port 5540
+pass in on wlan0 proto udp port 5353
 pass forward on host
 pass forward state established,related
 ";

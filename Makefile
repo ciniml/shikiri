@@ -27,6 +27,7 @@ PERMIT_blescan := --permit svc:ble
 PERMIT_blegatt := --permit svc:ble
 PERMIT_bleecho := --permit svc:ble
 PERMIT_mtbench := --permit random --permit svc:fs --stack 32768
+PERMIT_matter := --permit svc:net --permit svc:fs --permit random --stack 131072
 PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:kill --stack 32768
@@ -36,7 +37,9 @@ XIP_APPS   := hello xipcheck spin font
 XIP_TARGET := user/target/xip/riscv32imafc-unknown-none-elf/release
 XIP_RUSTFLAGS := -C relocation-model=pie -C link-arg=-pie -C link-arg=--no-dynamic-linker \
                  -C link-arg=-z -C link-arg=text -C link-arg=-Tt5app-xip.ld
-APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS)) $(XIP_TARGET)/xipcheck $(XIP_TARGET)/font
+# matter: its own target directory (doc/49 §3).
+MATTER_TARGET := user/target/matter/riscv32imafc-unknown-none-elf/release
+APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS)) $(XIP_TARGET)/xipcheck $(XIP_TARGET)/font $(MATTER_TARGET)/matter
 # All log schemas (doc/12): every event! call site in the kernel and the apps.
 SCHEMAS    := $(BUILD)/t5log.schemas
 
@@ -91,6 +94,7 @@ apps: tools $(UNTRUSTED_KEY)
 	@test -f $(DEV_KEY) || { echo "no signing key $(DEV_KEY): run make keys"; exit 1; }
 	cd user && cargo build --release
 	cd user && RUSTFLAGS="$(XIP_RUSTFLAGS)" cargo build --release --target-dir target/xip $(addprefix -p ,$(XIP_APPS))
+	cd user && cargo build --release --target-dir target/matter -p matter
 	mkdir -p $(APPS_DIR)
 	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) &&) true
 	@# Images the kernel must reject (self-test, doc/14 §1.4).
@@ -100,6 +104,7 @@ apps: tools $(UNTRUSTED_KEY)
 	    --name hello-badabi
 	$(ELF2T5A) build $(XIP_TARGET)/hello $(APPS_DIR)/hello-xip.t5a --key $(DEV_KEY) --name hello-xip
 	$(ELF2T5A) build $(XIP_TARGET)/xipcheck $(APPS_DIR)/xipcheck.t5a --key $(DEV_KEY)
+	$(ELF2T5A) build $(MATTER_TARGET)/matter $(APPS_DIR)/matter.t5a --key $(DEV_KEY) $(PERMIT_matter)
 	$(ELF2T5A) build $(XIP_TARGET)/font $(APPS_DIR)/font.t5a --key $(DEV_KEY) $(PERMIT_font)
 	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip.t5a --key $(DEV_KEY) --name spin-xip
 	@# Not in the store image: installed over the control channel (doc/14 §3).
@@ -132,7 +137,7 @@ install-auto: apps-auto schemas-p4
 # without the autostart services, and those with the flag. Not `fault`,
 # which always faults, so its update would be rolled back. Run on the next
 # boot (`reboot`).
-STORE_APPS := $(filter-out fault $(AUTO_APPS),$(APPS)) hello-xip xipcheck font
+STORE_APPS := $(filter-out fault $(AUTO_APPS),$(APPS)) hello-xip xipcheck font matter
 install-apps: apps-auto schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
