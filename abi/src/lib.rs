@@ -281,6 +281,73 @@ pub mod bt {
     pub const PKT_MAX: usize = 1 + 2 + 255;
 }
 
+/// The BLE service (doc/48 M2): clients connect to `svc:ble` and send
+/// requests as channel messages; the service answers with events on the
+/// same channel. One scan at a time.
+pub mod ble {
+    pub const SVC: &str = "ble";
+    /// Request `[SCAN, seconds, active, interval_ms: u16 LE, window_ms:
+    /// u16 LE]`: scan for `seconds` (0: until `STOP` or the channel
+    /// closes), active (1) or passive (0). The window must not be longer
+    /// than the interval; Wi-Fi shares the radio (doc/48 §5).
+    pub const SCAN: u8 = 1;
+    /// Request `[STOP]`: ends the scan.
+    pub const STOP: u8 = 2;
+    /// Event `[ADV, addr_type, addr[6] (most significant first), kind,
+    /// rssi: i8, data_len, data…]`: one advertising report.
+    pub const ADV: u8 = 1;
+    /// Event `[DONE, reports: u32 LE, dropped: u32 LE]`: the scan ended.
+    pub const DONE: u8 = 2;
+    /// Event `[FAILED, request, code]`: the request was refused or failed
+    /// (`code`: 1 bad request, 2 not now (busy or not connected), 3 the
+    /// stack failed, 4 timed out, 5 not found).
+    pub const FAILED: u8 = 3;
+
+    // ---- the central role (doc/48 M3): one connection at a time. ----
+    /// Request `[CONNECT, addr_type, addr[6] (most significant first),
+    /// timeout_s]`: connect to an advertiser (it must be advertising).
+    pub const CONNECT: u8 = 3;
+    /// Request `[DISCONNECT]`.
+    pub const DISCONNECT: u8 = 4;
+    /// Request `[SERVICES]`: discover the primary services; `SERVICE`
+    /// events, then `END`.
+    pub const SERVICES: u8 = 5;
+    /// Request `[CHARS, service]` (its index in the `SERVICE` events):
+    /// `CHAR` events, then `END`.
+    pub const CHARS: u8 = 6;
+    /// Request `[READ, handle: u16 LE]`: `VALUE`.
+    pub const READ: u8 = 7;
+    /// Request `[WRITE, handle: u16 LE, with_response, data…]`: `WRITTEN`.
+    pub const WRITE: u8 = 8;
+    /// Request `[SUBSCRIBE, handle: u16 LE, indicate]` (a characteristic
+    /// from `CHARS`): `SUBSCRIBED`, then `NOTIFY` events. One at a time.
+    pub const SUBSCRIBE: u8 = 9;
+
+    /// Event `[CONNECTED, att_mtu: u16 LE]`.
+    pub const CONNECTED: u8 = 4;
+    /// Event `[DISCONNECTED]`: the link is gone.
+    pub const DISCONNECTED: u8 = 5;
+    /// Event `[SERVICE, index, start: u16 LE, end: u16 LE, uuid…]` (2 or 16
+    /// bytes, little-endian).
+    pub const SERVICE: u8 = 6;
+    /// Event `[CHAR, handle: u16 LE, cccd: u16 LE (0: none), properties,
+    /// uuid…]`.
+    pub const CHAR: u8 = 7;
+    /// Event `[END]`: the end of a list.
+    pub const END: u8 = 8;
+    /// Event `[VALUE, handle: u16 LE, data…]`.
+    pub const VALUE: u8 = 9;
+    /// Event `[WRITTEN, handle: u16 LE]`.
+    pub const WRITTEN: u8 = 10;
+    /// Event `[SUBSCRIBED, handle: u16 LE]`.
+    pub const SUBSCRIBED: u8 = 11;
+    /// Event `[NOTIFY, handle: u16 LE, indication, data…]`.
+    pub const NOTIFY: u8 = 12;
+
+    /// Longest message (a channel message).
+    pub const MSG_MAX: usize = 256;
+}
+
 /// Starting apps (doc/38): `write` of `[arg0: u32 LE][arg1: u32 LE][name]`
 /// asks the kernel to start the store app `name` with those arguments. It
 /// returns once the request is queued (`Busy`: the queue is full); the

@@ -16,8 +16,8 @@
   |---|---|---|
   | M0 | 実機でコントローラを起動し、HCI が往復する | 済み（§4） |
   | M1 | カーネルのオブジェクト `bt:hci` と、生の HCI を送る試験アプリ | 済み（§3、§4） |
-  | M2 | `ble` サービス（TrouBLE）とスキャン | まだ |
-  | M3 | セントラルと GATT クライアント | まだ |
+  | M2 | `ble` サービス（TrouBLE）とスキャン | 済み（§6） |
+  | M3 | セントラルと GATT クライアント | 済み（§7。通知の受け取りは未確認） |
   | M4 | ペリフェラル（広告、GATT サーバ） | まだ |
   | M5 | ペアリング（LE Secure Connections） | まだ |
   | M6 | on/off と、Wi-Fi との共存 | 測っただけ（§5） |
@@ -68,7 +68,75 @@ PC（有線、同じ LAN）から Tab5 へ、50 ms おきに ping を 200 回。
 - 窓と間隔が同じスキャンは、無線を BLE がずっと使うので、Wi-Fi が大きく遅れる。M2 のスキャンは、窓を間隔より短くする（例えば窓 30 ms、間隔 100 ms 以上）。
 - 測り方の失敗: 3 回目の ping の後、フィルタを戻すコマンドが、裏で動いていた別の t5log（`hcitest` を走らせたもの）とプローブを取り合って届かなかった。気づいて戻すまでの 1〜2 分、フィルタが外れていた。プローブを使う t5log は 1 つずつにする。
 
-## 6. 次（M2）
-- `ble` サービス: `bt-hci` と TrouBLE を `third_party/` に置き、版を固定する。`ble` の中に executor、時刻ドライバ、`critical-section`。
-- `svc:ble` の決まりごと（スキャンの開始と結果、の最小から）。
-- コードの大きさと RAM、取りこぼしを測り、TrouBLE を続けるかを決める（判定の基準: 土台が無理なく書けること、取りこぼしや遅れがないこと、大きさ）。
+## 6. M2: `ble` サービスとスキャン
+利用者の指示（2026-11-04）:「すすめて」
+
+- **`ble`**（`user/apps/ble`、`--permit bt:hci --permit listen:ble --stack 65536`）:
+  - TrouBLE（`trouble-host` 0.8.0、features: central、scan、gatt、default-packet-pool）と `bt-hci` 0.10.1。crates.io から（`Cargo.lock` で固定）。
+  - **Transport**（`hci.rs`）: bt-hci の `Transport` を `bt:hci` の上に。`read` は 1 パケットを読み、種類のバイトから `PacketToHost::read_hci` で解く。`write` は種類のバイトと `write_hci` の結果を 1 回の `write` で送る（`Busy` なら 1 ms 待って再送）。
+  - **executor**（`exec.rs`、この OS で初めての async。この中だけ）:
+    - トップレベルの Future（TrouBLE の `Runner::run_with_handler` と、サービスの処理の `select`）を 1 つ回す。
+    - Waker が呼ばれたら、すぐもう一度 poll する。呼ばれなければ、Pending を返した読み出しが登録したハンドル（`want`）だけを `wait` する。待ち時間は embassy-time の一番早い期限まで。
+    - チャネルの相手が閉じたことは、`wait` のイベント（`PEER_CLOSED`）でしか分からない（`read` は `Busy` のまま）。executor が覚えておき（`closed`）、読み出しは `None` を返す。
+    - embassy-time の時刻ドライバ（カーネルの時刻、1 MHz）と、何もしない `critical-section`（1 プロセス 1 スレッド）。
+  - **`svc:ble`**（`t5_abi::ble`）: 今は `SCAN`（秒、能動か、間隔、窓）と `STOP` だけ。報告は `ADV`（アドレスの種類、アドレス、種類、RSSI、データ）を、頼んだクライアントへ 1 つずつ送る。チャネルが一杯なら、その報告は捨てて数える（ホストを止めない）。終わると `DONE`（送った数、捨てた数）。スキャンは同時に 1 つ。
+  - 大きさ: コード 74 KB、データ 7.8 KB（`net` は 235 KB）。
+- **`blescan`**（`--permit svc:ble`）: `run blescan [SECONDS [WINDOW_MS]]`。間隔 100 ms、窓 WINDOW_MS（既定 30 ms）で能動スキャンし、最初の 16 の広告主とデータ、合計を出す。
+- **実機**（2026-11-04、`wifi 1` の後に `run ble`、`run blescan 10`）:
+  - `ble.ready` から 4 ms で `ble.scan`。10 秒で報告 245、捨てた数 0。広告主のデータ（名前の入った広告など）も届いた。
+  - `ble` は待っている間 CPU をほとんど使わない（起動から約 50 秒で累計 19 ms、`cpu_pm=0`）。executor は空回りしていない。
+- **Wi-Fi との共存**（PC から ping を 50 ms おきに 200 回。§5 と同じ測り方）:
+
+  | 状態 | 平均 | 最大 |
+  |---|---|---|
+  | スキャンなし（直前） | 16.0 ms | 281 ms |
+  | 窓 30 ms、間隔 100 ms | 46.2 ms | 296 ms |
+  | スキャンなし（直後） | 28.8 ms | 291 ms |
+  | 窓 10 ms、間隔 100 ms | 26.0 ms | 64 ms |
+
+  - この日の後半は、スキャンなしでも平均 16〜29 ms で揺れていた（§5 の朝の測定では 2.3 ms）。網そのものが揺れていて、細かい比較はできない。
+  - それでも、スキャン中は遅くなり、窓を短くすると最大が下がる。既定の窓（30 ms）は見直す余地がある。
+- **測り方の失敗（2 回目）**: フィルタを外している間に `blescan` を走らせたら、プロセスのスロット 8 つが全部埋まり（fs、wifi、net、font、term、shell、ble、blescan）、`run netctl 2` が `no free slot` で始まらなかった。気づいて戻すまでの約 1.5 分、フィルタが外れていた。戻した後は、`netctl.done mode=2 rules=4` と、PC からの ping が届かないことを確かめた。
+  - スロット 8 つは、常駐のプロセスが増えると足りなくなる（Matter の `matter` サービスを足すとさらに）。上限を上げるかどうかは別に決める。
+
+## 7. M3: セントラルと GATT クライアント
+利用者の指示（2026-11-04）:「上限あげてよいです。BLEを先にすすめてください。Matterでいずれにせよ必要になります。」
+
+- **プロセスの上限**を 8 から 12 に上げた（doc/30 §4）。1 スロット 2 MiB。`ppabench` は 2 つの続いたスロットを使う。
+- **`svc:ble` の要求**（`t5_abi::ble`、接続は同時に 1 つ）:
+
+  | 要求 | 答え |
+  |---|---|
+  | `CONNECT`（アドレスの種類、アドレス、秒） | `CONNECTED`（ATT MTU） |
+  | `DISCONNECT` | `DISCONNECTED` |
+  | `SERVICES` | `SERVICE`（番号、ハンドルの範囲、UUID）…、`END` |
+  | `CHARS`（サービスの番号） | `CHAR`（値のハンドル、CCCD、性質、UUID）…、`END` |
+  | `READ`（ハンドル） | `VALUE` |
+  | `WRITE`（ハンドル、応答の有無、データ） | `WRITTEN` |
+  | `SUBSCRIBE`（ハンドル、indication か） | `SUBSCRIBED`、その後 `NOTIFY` |
+
+  - 失敗は `FAILED`（要求、理由: 1 不正、2 今はできない、3 スタックの失敗、4 時間切れ、5 見つからない）。
+  - 相手が切れると `DISCONNECTED`。
+  - Matter の BLE コミッショニング（BTP）は、C1 への書き込み（応答あり）と C2 の indication を使う。これで足りる見込み。
+- **作り**（`ble`）:
+  - `CONNECT` で TrouBLE の `Central::connect`（受け入れの表に相手だけ）。つながったら `GattClient::new`（ATT MTU の交換）。
+  - つないでいる間は、`GattClient::task`（応答と通知を振り分ける）と、要求を処理する部分（`gatt`）を `select` で回す。リンクが切れると `task` が終わり、`DISCONNECTED` を送る。
+  - 要求と通知の待ちも `select`。購読は同時に 1 つ（TrouBLE の既定）。通知の待ち行列は 4（feature `gatt-client-notification-queue-size-4`）。
+  - `CHARS` で見つけた特性は、次の `SERVICES` まで積み上げておく。`WRITE`（応答なし）と `SUBSCRIBE` はここから探す。最初の版は最後の `CHARS` の分だけを持っていて、前のサービスの特性への `SUBSCRIBE` が「見つからない」になった。
+  - `ble` のコードは 103 KB（M2 の 74 KB から増えた）。
+- **`blegatt`**（`--permit svc:ble`）: `run blegatt [SECONDS]`。
+  - 受け身のスキャン（間隔 100 ms、窓 20 ms）をして、一番強いつながる広告主（ADV_IND）につなぐ。
+  - サービスと特性を一覧にし、読めるもの（12 まで）を読む。
+  - 通知か indication のできる最初の特性を購読し（CCCD だけを書く）、3 秒待ってから切る。
+  - よその機器なので、ほかの書き込みはしない。
+- **実機**（2026-11-04）: 近くの Nature Remo（`Nature-BG189D970`、公開アドレス、RSSI -35）に:
+  - 0.18 秒でつながり、ATT MTU 247。
+  - サービス 3（GAP 0x1800、GATT 0x1801、0xFFFF）、特性 7。
+  - Device Name（0x2A00）の値「Nature-BG189D970」など 5 つを読んだ。
+  - Service Changed（0x2A05、ハンドル 8）の indication を購読できた。3 秒の間に indication は来なかった（来るのは GATT の表が変わったときだけ）。通知を受け取る道筋は、まだ確かめていない。
+  - `DISCONNECT` で切れて、`DISCONNECTED` が返った。
+
+## 8. 次
+- 通知の受け取りを確かめる（通知を出す機器か、M4 のペリフェラルどうしで）。
+- M4: ペリフェラル（広告、GATT サーバ）。Matter のデバイス側の BLE コミッショニングで要る。
+- Matter（MT0〜）の BLE は、M3（コントローラ側）と M4（デバイス側）の上に作る。
