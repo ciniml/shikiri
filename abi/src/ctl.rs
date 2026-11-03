@@ -71,6 +71,11 @@ pub mod cmd {
     pub const MEMBENCH: u8 = 27;
     /// Fill, glyph and copy with the PPA and 2D-DMA on a free slot (doc/44).
     pub const PPA_BENCH: u8 = 28;
+    /// `u32 raw, u32 us`: fills 2 MiB of a free slot with random words, or
+    /// with `raw` the generator's register read once every `us` µs (0: back
+    /// to back), for a debug probe to read (doc/47 §5). The result is the
+    /// buffer's address.
+    pub const RNG_DUMP: u8 = 29;
 }
 
 /// `Command::Prof` operations.
@@ -116,6 +121,7 @@ pub enum Command<'a> {
     Prof { op: u32, a: u32, b: u32 },
     Membench { pause: bool },
     PpaBench,
+    RngDump { raw: bool, us: u32 },
 }
 
 impl Command<'_> {
@@ -149,6 +155,7 @@ impl Command<'_> {
             Command::Prof { .. } => "prof",
             Command::Membench { .. } => "membench",
             Command::PpaBench => "ppabench",
+            Command::RngDump { .. } => "rngdump",
         }
     }
 }
@@ -188,6 +195,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::WLAN_PROBE if args.is_empty() => Command::WlanProbe,
         cmd::PPA_BENCH if args.is_empty() => Command::PpaBench,
         cmd::MEMBENCH if args.len() == 4 => Command::Membench { pause: u32_at(args, 0)? != 0 },
+        cmd::RNG_DUMP if args.len() == 8 => Command::RngDump { raw: u32_at(args, 0)? != 0, us: u32_at(args, 4)? },
         cmd::PROF if args.len() == 12 => Command::Prof { op: u32_at(args, 0)?, a: u32_at(args, 4)?, b: u32_at(args, 8)? },
         cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
@@ -247,6 +255,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Prof { .. } => put(&[cmd::PROF])?,
         Command::Membench { .. } => put(&[cmd::MEMBENCH])?,
         Command::PpaBench => put(&[cmd::PPA_BENCH])?,
+        Command::RngDump { .. } => put(&[cmd::RNG_DUMP])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -257,6 +266,10 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::SdRead { lba } => put(&lba.to_le_bytes())?,
         Command::Pvt { on } => put(&(*on as u32).to_le_bytes())?,
         Command::Membench { pause } => put(&(*pause as u32).to_le_bytes())?,
+        Command::RngDump { raw, us } => {
+            put(&(*raw as u32).to_le_bytes())?;
+            put(&us.to_le_bytes())?;
+        }
         Command::Prof { op, a, b } => {
             put(&op.to_le_bytes())?;
             put(&a.to_le_bytes())?;
@@ -343,6 +356,11 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
             Some("pause") => Command::Membench { pause: true },
             _ => return Err("membench [pause]"),
         },
+        Some("rngdump") => match w.next() {
+            None => Command::RngDump { raw: false, us: 0 },
+            Some("raw") => Command::RngDump { raw: true, us: num(w.next())? },
+            _ => return Err("rngdump [raw [US]]"),
+        },
         Some("prof") => match w.next() {
             Some("start") => {
                 let pid = num(Some(w.next().ok_or("prof start PID US")?))?;
@@ -354,7 +372,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         },
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench | rngdump [raw [US]]");
         }
     };
     if w.next().is_some() {

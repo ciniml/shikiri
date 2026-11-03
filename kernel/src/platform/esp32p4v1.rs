@@ -18,6 +18,10 @@ mod sdio;
 mod tab5;
 
 // USB Serial/JTAG (doc/06 §3.1): usb_serial_jtag_reg.h
+/// The RNG (`LP_SYSTEM_REG_RNG_DATA_REG`); random with the entropy source
+/// running (doc/47).
+const RNG_DATA: usize = 0x5011_01A4;
+const RNG_WORD_US: u64 = 56;
 const USJ_BASE: usize = 0x500D_2000;
 const USJ_EP1: usize = USJ_BASE;
 const USJ_EP1_CONF: usize = USJ_BASE + 0x4;
@@ -846,14 +850,43 @@ impl Platform for Esp32p4v1 {
         }
     }
 
+    fn rng_dump(buf: usize, len: usize, raw: Option<u32>) -> Result<u32, &'static str> {
+        let start = Self::now();
+        for i in 0..len / 4 {
+            let v = match raw {
+                Some(us) => {
+                    let t = Self::now();
+                    while Self::now() - t < us as u64 * 16 {}
+                    unsafe { rd(RNG_DATA) }
+                }
+                None => Self::random_u32(),
+            };
+            unsafe { wr(buf + 4 * i, v) };
+            if i % 4096 == 0 {
+                Self::feed_watchdog();
+                display::service();
+            }
+            // At 56 µs a word this takes half a minute; show it is alive.
+            if i % (64 * 1024) == 0 {
+                t5_abi::event!(Debug, "rng.dump_progress", words = i as u32);
+            }
+        }
+        // The probe reads memory past the caches.
+        cache_writeback(buf, len, true);
+        let ms = (Self::now() - start) / 16_000;
+        t5_abi::event!(Info, "rng.dump", addr = t5_abi::log::Addr(buf as u32), bytes = len as u32, raw = raw.is_some(), us = raw.unwrap_or(0), ms = ms as u32);
+        Ok(buf as u32)
+    }
+
     fn random_u32() -> u32 {
-        // As esp_random (hw_random.c:49-80): XOR the register over at least
-        // 14 CPU cycles per MHz (about 14 µs) between words, and the timer.
-        // Random once `clock_init` has started the SAR ADC (doc/47).
-        const RNG_DATA: usize = 0x5011_01A4;
+        // As esp_random (hw_random.c:49-80): XOR the register over the time
+        // ESP-IDF waits between words on the P4, 14 * 360 CPU cycles times
+        // the CPU/APB ratio (4), 56 µs (its tested rate, about 75 kB/s),
+        // and the timer. Random once `clock_init` has started the SAR ADC
+        // (doc/47).
         let start = Self::now();
         let mut r = start as u32;
-        while Self::now() - start < 14 * 16 {
+        while Self::now() - start < RNG_WORD_US * 16 {
             r ^= unsafe { rd(RNG_DATA) };
         }
         r ^ (Self::now() as u32).rotate_left(16)

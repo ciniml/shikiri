@@ -86,7 +86,7 @@ doc/26 §7、doc/27 §5、doc/29 に挙げた残りのうち、次の 3 つを�
     - 避けるアドレスは、ほかがあれば選ばない。
 - **乱数**（カーネルのオブジェクト `random`、ABI 小版 18、`--permit random`）:
   - `read` で最大 64 バイトを返す。
-  - ESP32-P4 では、RNG のレジスタ（`LP_SYSTEM_REG_RNG_DATA_REG`、0x5011_01A4）を、`esp_random` と同じく約 14 µs の間 XOR しながら読み、タイマーを混ぜる（`esp_hw_support/hw_random.c:49-80`）。
+  - ESP32-P4 では、RNG のレジスタ（`LP_SYSTEM_REG_RNG_DATA_REG`、0x5011_01A4）を、`esp_random` と同じく 1 語ごとに一定の時間（今は 56 µs、doc/47 §5）XOR しながら読み、タイマーを混ぜる（`esp_hw_support/hw_random.c:49-80`）。
   - ESP-IDF によれば、このレジスタが真の乱数になるのは、エントロピー源（P4 では SAR ADC）が動いているときだけ。そうでなければ疑似乱数として扱う（`bootloader_random_esp32p4.c`）。
     - SAR ADC を動かすには、アナログの新しい設定が要る。この時はしていなかった。
     - このため ABI の説明では、一時アドレスなどの識別子には使ってよいが、鍵には使わない、とした。

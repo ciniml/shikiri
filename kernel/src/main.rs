@@ -111,6 +111,10 @@ const MODE_STORE_TEXT: usize = 4;
 const MODE_BAD_LOG: usize = 5;
 const MODE_OPEN_DENIED: usize = 6;
 
+/// `rngdump` (doc/47 §5): 16 Mbit, sixteen of NIST SP 800-22's 1 Mbit
+/// sequences.
+const RNG_DUMP_BYTES: usize = 2 << 20;
+
 pub extern "C" fn kmain() -> ! {
     Current::init();
     rv::init_trap_vector(Current::MTVEC_MODE);
@@ -552,6 +556,11 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         },
         Command::PpaBench => match s.free_slot().map(slot) {
             Some((base, size)) if size >= 3 << 20 => Current::ppa_bench(base),
+            Some(_) => Err("slot too small"),
+            None => Err("no free slot"),
+        },
+        Command::RngDump { raw, us } => match s.free_slot().map(slot) {
+            Some((base, size)) if size >= RNG_DUMP_BYTES => Current::rng_dump(base, RNG_DUMP_BYTES, raw.then_some(us)),
             Some(_) => Err("slot too small"),
             None => Err("no free slot"),
         },

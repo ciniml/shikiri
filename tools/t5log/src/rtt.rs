@@ -75,6 +75,32 @@ pub fn status(probe: &str, chip: &str, chip_description: Option<&str>) -> Result
     Ok(out)
 }
 
+/// Reads `len` bytes at `address` (a multiple of 4) through the debug
+/// module's system bus, without halting a hart (`t5log read`; doc/47 §5).
+pub fn read_memory(probe: &str, chip: &str, chip_description: Option<&str>, address: u64, len: usize) -> Result<Vec<u8>, String> {
+    probe_rs_espressif::register_plugin();
+    let mut registry = Registry::from_builtin_families();
+    if let Some(path) = chip_description {
+        let yaml = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        registry.add_target_family_from_yaml(&yaml).map_err(|e| format!("{path}: {e}"))?;
+    }
+    let selector: DebugProbeSelector = probe.parse().map_err(|e| format!("--probe {probe}: {e}"))?;
+    let p = Lister::new().open(selector).map_err(|e| format!("opening probe {probe}: {e}"))?;
+    let mut session = p.attach_with_registry(chip, Permissions::default(), &registry).map_err(|e| format!("attaching to {chip}: {e}"))?;
+    let r = (|| {
+        let mut mem = session.get_riscv_interface(0).map_err(|e| e.to_string())?;
+        let mut words = vec![0u32; len / 4];
+        for (k, chunk) in words.chunks_mut(16 * 1024).enumerate() {
+            let at = address + (k * 64 * 1024) as u64;
+            mem.read_32(at, chunk).map_err(|e| format!("reading {at:#x}: {e}"))?;
+        }
+        Ok(words.iter().flat_map(|w| w.to_le_bytes()).collect())
+    })();
+    // As in `stream`: dropping the session would halt the harts.
+    std::mem::forget(session);
+    r
+}
+
 /// What the caller wants on each turn of the polling loop.
 pub enum Turn {
     Continue,

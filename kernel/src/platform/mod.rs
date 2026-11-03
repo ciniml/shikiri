@@ -189,6 +189,18 @@ pub trait Platform {
         x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         (x ^ (x >> 31)) as u32
     }
+    /// Fills `len` bytes at `buf` with `random_u32` words, or with
+    /// `raw = Some(us)` the generator's register read once every `us` µs,
+    /// where a debug probe can read them (doc/47 §5); returns `buf`.
+    fn rng_dump(buf: usize, len: usize, raw: Option<u32>) -> Result<u32, &'static str> {
+        if raw.is_some() {
+            return Err("no generator");
+        }
+        for i in 0..len / 4 {
+            unsafe { core::ptr::write_volatile((buf + 4 * i) as *mut u32, Self::random_u32()) };
+        }
+        Ok(buf as u32)
+    }
     /// Starts a 2D request on the display's framebuffer (doc/44).
     fn gfx_start(_req: Gfx) -> Result<(), &'static str> {
         Err("no 2d hardware")

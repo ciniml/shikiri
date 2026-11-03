@@ -35,6 +35,7 @@ const USAGE: &str = "usage:
             [--cmd COMMAND]... [--until-done]
   t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]
   t5log status --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML]
+  t5log read --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML] ADDR LEN -o OUT
   t5log hostlink --port SERIAL --tun NAME [--schemas FILE]... [--elf ELF]...";
 
 fn main() -> ExitCode {
@@ -46,6 +47,7 @@ fn main() -> ExitCode {
         Some("hostlink") => cmd_hostlink(&args[1..]),
         Some("rtt") => cmd_rtt(&args[1..]),
         Some("status") => cmd_status(&args[1..]),
+        Some("read") => cmd_read(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match r {
@@ -353,6 +355,46 @@ fn cmd_status(args: &[String]) -> Result<(), String> {
     for line in t5log::rtt::status(&probe, &chip, desc.as_deref())? {
         println!("{line}");
     }
+    Ok(())
+}
+
+/// `t5log read`: target memory to a file, without halting (e.g. the buffer
+/// `rngdump` fills; doc/47 §5).
+#[cfg(not(feature = "rtt"))]
+fn cmd_read(_: &[String]) -> Result<(), String> {
+    Err("t5log was built without the rtt feature".into())
+}
+
+#[cfg(feature = "rtt")]
+fn cmd_read(args: &[String]) -> Result<(), String> {
+    let (mut probe, mut chip, mut desc, mut out) = (None, "esp32p4".to_string(), None, None);
+    let mut pos = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--probe" => probe = Some(val()?),
+            "--chip" => chip = val()?,
+            "--chip-description" => desc = Some(val()?),
+            "-o" => out = Some(val()?),
+            s if !s.starts_with('-') => pos.push(s.to_string()),
+            s => return Err(format!("unknown argument {s}\n{USAGE}")),
+        }
+    }
+    let num = |s: &str| match s.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16).map_err(|e| format!("{s}: {e}")),
+        None => s.parse::<u64>().map_err(|e| format!("{s}: {e}")),
+    };
+    let [addr, len] = pos.as_slice() else { return Err(USAGE.to_string()) };
+    let (addr, len) = (num(addr)?, num(len)? as usize);
+    if addr % 4 != 0 || len % 4 != 0 {
+        return Err("ADDR and LEN must be multiples of 4".into());
+    }
+    let (probe, out) = (probe.ok_or("--probe is required")?, out.ok_or("-o is required")?);
+    let t = std::time::Instant::now();
+    let data = t5log::rtt::read_memory(&probe, &chip, desc.as_deref(), addr, len)?;
+    std::fs::write(&out, &data).map_err(|e| format!("{out}: {e}"))?;
+    eprintln!("t5log: read {len} bytes at {addr:#x} in {:.1} s", t.elapsed().as_secs_f64());
     Ok(())
 }
 
