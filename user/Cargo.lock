@@ -38,12 +38,20 @@ dependencies = [
  "bt-hci",
  "critical-section",
  "embassy-futures",
+ "embassy-sync",
  "embassy-time",
  "embassy-time-driver",
  "embedded-io",
  "heapless",
  "t5-rt",
  "trouble-host",
+]
+
+[[package]]
+name = "bleecho"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
 ]
 
 [[package]]

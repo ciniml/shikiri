@@ -56,6 +56,11 @@ impl Transport for Hci {
                 Err(_) => Poll::Ready(Err(HciError)),
             })
             .await?;
+            // Events other than advertising reports (doc/48 §8: what the
+            // controller says about connections).
+            if n >= 4 && raw[0] == bt::EVT && !(raw[1] == 0x3E && matches!(raw[3], 0x02 | 0x0D)) && raw[1] != 0x0E && raw[1] != 0x13 {
+                t5_rt::event!(Debug, "ble.hci_event", code = raw[1], head = &raw[..n.min(24)]);
+            }
             let mut reader = &raw[..n];
             let kind = PacketKind::read(&mut reader)?;
             Ok(P::read_hci(kind, &mut reader, rx)?)

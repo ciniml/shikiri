@@ -344,6 +344,40 @@ pub mod ble {
     /// Event `[NOTIFY, handle: u16 LE, indication, data…]`.
     pub const NOTIFY: u8 = 12;
 
+    // ---- the peripheral role (doc/48 M4): one GATT service of the
+    // client's, advertised until one central connects. ----
+    /// Request `[ADVERTISE, interval_ms: u16 LE, name_len, name…,
+    /// service_uuid_len (2 or 16), service_uuid… (LE), chars, then per
+    /// characteristic: uuid_len, uuid… (LE), properties; adv_len, adv…,
+    /// scan_len, scan…]` (the advertising and scan response data as sent,
+    /// at most 31 bytes each; the name is the GAP Device Name, at most 22
+    /// bytes). `ADVERTISING`, then `PEER` once a central connects, then
+    /// `PEER_WRITE`s; `DISCONNECTED` when it leaves. `STOP` ends it.
+    pub const ADVERTISE: u8 = 10;
+    /// Request `[SET, handle: u16 LE, data…]`: the value a peer reads.
+    /// `WRITTEN`.
+    pub const SET: u8 = 11;
+    /// Request `[SEND, handle: u16 LE, indicate, data…]`: a notification
+    /// (or an indication, answered by the peer) to the connected peer, if
+    /// it has subscribed. `SENT`.
+    pub const SEND: u8 = 12;
+
+    /// Event `[ADVERTISING, chars, then per characteristic: handle: u16 LE,
+    /// cccd: u16 LE (0: none)]`, in the order of the request.
+    pub const ADVERTISING: u8 = 13;
+    /// Event `[PEER, addr_type, addr[6] (most significant first)]`: a
+    /// central connected.
+    pub const PEER: u8 = 14;
+    /// Event `[PEER_WRITE, handle: u16 LE, data…]`: the peer wrote a value
+    /// (or a CCCD: subscribing).
+    pub const PEER_WRITE: u8 = 15;
+    /// Event `[SENT, handle: u16 LE]`.
+    pub const SENT: u8 = 16;
+    /// Characteristics in an `ADVERTISE`, at most.
+    pub const CHARS_MAX: usize = 4;
+    /// Longest characteristic value.
+    pub const VALUE_MAX: usize = 244;
+
     /// Longest message (a channel message).
     pub const MSG_MAX: usize = 256;
 }

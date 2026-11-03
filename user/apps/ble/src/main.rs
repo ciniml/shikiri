@@ -6,13 +6,15 @@
 //! async code in the OS). Clients connect to `svc:ble` (`t5_abi::ble`) one
 //! at a time: a scan, its advertising reports sent to the client; or, as
 //! the central, one connection and its GATT client (services,
-//! characteristics, read, write, one subscription). Needs the controller
+//! characteristics, read, write, one subscription); or, as the peripheral,
+//! a GATT service of the client's, advertised (`periph`). Needs the controller
 //! started (`wifi 1`).
 //!
 //! Built with `--permit bt:hci --permit listen:ble`.
 
 mod exec;
 mod hci;
+mod periph;
 
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
@@ -179,8 +181,9 @@ async fn serve(stack: &Host<'_>, l: &Listener, reports: &Reports) -> ! {
             let gone = match req.first().copied() {
                 Some(ble::SCAN) if n >= 7 => scan(&mut central, reports, req).await,
                 Some(ble::CONNECT) if n >= 9 => connected(stack, &mut central, reports, req).await,
+                Some(ble::ADVERTISE) => periph::advertise(stack, reports, req).await,
                 Some(r) => {
-                    reports.fail(r, if r <= ble::SUBSCRIBE { NOT_NOW } else { BAD_REQUEST }).await;
+                    reports.fail(r, if r <= ble::SEND { NOT_NOW } else { BAD_REQUEST }).await;
                     false
                 }
                 None => false,

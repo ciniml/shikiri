@@ -18,7 +18,7 @@
   | M1 | カーネルのオブジェクト `bt:hci` と、生の HCI を送る試験アプリ | 済み（§3、§4） |
   | M2 | `ble` サービス（TrouBLE）とスキャン | 済み（§6） |
   | M3 | セントラルと GATT クライアント | 済み（§7。通知の受け取りは未確認） |
-  | M4 | ペリフェラル（広告、GATT サーバ） | まだ |
+  | M4 | ペリフェラル（広告、GATT サーバ） | 済み（§8） |
   | M5 | ペアリング（LE Secure Connections） | まだ |
   | M6 | on/off と、Wi-Fi との共存 | 測っただけ（§5） |
 
@@ -136,7 +136,35 @@ PC（有線、同じ LAN）から Tab5 へ、50 ms おきに ping を 200 回。
   - Service Changed（0x2A05、ハンドル 8）の indication を購読できた。3 秒の間に indication は来なかった（来るのは GATT の表が変わったときだけ）。通知を受け取る道筋は、まだ確かめていない。
   - `DISCONNECT` で切れて、`DISCONNECTED` が返った。
 
-## 8. 次
-- 通知の受け取りを確かめる（通知を出す機器か、M4 のペリフェラルどうしで）。
-- M4: ペリフェラル（広告、GATT サーバ）。Matter のデバイス側の BLE コミッショニングで要る。
-- Matter（MT0〜）の BLE は、M3（コントローラ側）と M4（デバイス側）の上に作る。
+## 8. M4: ペリフェラル（広告と GATT サーバ）
+利用者の指示（2026-11-04）:「つづけて」
+
+- **`svc:ble` の要求**（`t5_abi::ble`）:
+  - `ADVERTISE`（間隔、名前、サービスの UUID、特性（UUID と性質、4 つまで）、広告のデータ、スキャン応答のデータ）。
+    - 答えは `ADVERTISING`（特性ごとの値のハンドルと CCCD のハンドル）。
+    - セントラルがつながると `PEER`（相手のアドレス）。相手の書き込み（CCCD への書き込み、つまり購読も）は `PEER_WRITE`。相手が切れると `DISCONNECTED`。
+  - `SET`（ハンドル、値）: 相手が読む値。答えは `WRITTEN`。
+  - `SEND`（ハンドル、indication か、値）: 購読している相手へ通知か indication。答えは `SENT`。
+  - `STOP`: 広告をやめる。つながっていれば切る。
+- **作り**（`ble/src/periph.rs`）:
+  - TrouBLE の `AttributeTable` を実行時に組み立てる。GAP（Device Name、Appearance）と GATT のサービスの後に、クライアントのサービスを 1 つ置く。
+  - 値は可変長（`heapless::Vec<u8, 244>`）で、領域は `advertise` の間だけの配列。
+  - `Peripheral::advertise`（つながる、スキャンできる広告）、`accept` で 1 つのセントラルを待つ。`with_attribute_server` で GATT のつながりにする。
+  - つないでいる間は、`GattConnection::next`（読みと書きの要求、切断）とクライアントの要求を `select` で待つ。書き込みは返事を返してからクライアントへ渡す。
+  - 診断のため、広告の報告以外の HCI のイベント（接続、切断など）を Debug の `ble.hci_event` に出す。
+- **`bleecho`**（`--permit svc:ble`）: `run bleecho [SECONDS]`。
+  - 「T5-echo」として、自前の UUID（c5d7a0a1-5b3e-4c2d-9f1e-1a2b3c4d5e60）のサービスを広告する。特性は C1（…61、書き込み）と C2（…62、読みと通知）。
+  - C1 に書かれた値を C2 の値にして通知で返す。C2 を購読している間は、1 秒ごとに「tick N」も通知する。
+- **実機**（2026-11-04、PC の BlueZ から。D-Bus の Python のスクリプト）:
+  - BlueZ のサービスの探索で GAP、GATT、c5d7a0a1-… のサービスと、C2 の CCCD が見えた。
+  - C2 の購読、C1 への書き込み（応答ありで「hello」、応答なしで「Tab5」）、C2 の読みができた。
+  - PC は 6 秒で通知を 9 つ受け取った（「tick 1」〜「tick 7」、「hello」、「Tab5」）。Tab5 の側も `sent=9`。M3 で残っていた「通知を受け取る道筋」は、向きは逆だが、ATT の通知が実際に流れることをこれで確かめた。
+  - 切断（相手から、理由 0x13）で `DISCONNECTED`。
+  - **接続が不安定**: PC からの接続は、3 回の試験で 1〜2 回目が失敗し、2〜3 回目でつながった。失敗のとき、Tab5 には接続のイベントがまったく届いていない（コントローラが接続の要求を受けていない）。C6 の無線を Wi-Fi と分け合っているためかもしれない（未確認）。広告の間隔を変える、Wi-Fi を止めて比べる、などで調べる必要がある。
+  - `gatttool` はこの PC では接続できなかった（「Function not implemented」）。BlueZ の D-Bus を使った。
+- `ble` のコード: 145 KB（M3 の 103 KB から、`peripheral` の feature と `periph.rs` の分）。
+
+## 9. 次
+- ペリフェラルの接続が不安定な理由を調べる（§8）。
+- Matter（MT0〜）。BLE のコミッショニングは、M3（コントローラ側）と M4（デバイス側）の上に作る。
+- M5: ペアリング（LE Secure Connections）。Matter の BTP はペアリングを使わないので、急がない。

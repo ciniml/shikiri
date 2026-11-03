@@ -7,10 +7,11 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 t5-rt = { path = "../../rt" }
 bt-hci = { version = "0.10", default-features = false }
-trouble-host = { version = "=0.8.0", default-features = false, features = ["central", "scan", "gatt", "default-packet-pool", "gatt-client-notification-queue-size-4"] }
+trouble-host = { version = "=0.8.0", default-features = false, features = ["central", "scan", "gatt", "default-packet-pool", "gatt-client-notification-queue-size-4", "peripheral"] }
 embassy-time = { version = "0.5.1", default-features = false }
 embassy-time-driver = { version = "0.2" }
 embassy-futures = "0.1"
 critical-section = "1.2"
 embedded-io = "0.7.1"
 heapless = "0.9"
+embassy-sync = "0.8"
