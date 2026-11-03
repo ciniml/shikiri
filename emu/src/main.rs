@@ -160,7 +160,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
                      [--linger-ms N] [--host-peer BYTES] [--host-peer-target ADDR] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
-                     [--trace-traps] [--warn-unmodelled] [--quiet] KERNEL.elf";
+                     [--trace-traps] [--warn-unmodelled] [--rng-stuck] [--quiet] KERNEL.elf";
 
 struct Opts {
     mhz: u64,
@@ -169,6 +169,7 @@ struct Opts {
     seed: u32,
     trace_traps: bool,
     warn_unmodelled: bool,
+    rng_stuck: bool,
     quiet: bool,
     json: bool,
     extra_elfs: Vec<String>,
@@ -203,6 +204,7 @@ fn parse_args() -> Result<Opts, String> {
         seed: 0x7AB5_0001,
         trace_traps: false,
         warn_unmodelled: false,
+        rng_stuck: false,
         quiet: false,
         json: false,
         extra_elfs: Vec::new(),
@@ -239,6 +241,7 @@ fn parse_args() -> Result<Opts, String> {
             }
             "--trace-traps" => o.trace_traps = true,
             "--warn-unmodelled" => o.warn_unmodelled = true,
+            "--rng-stuck" => o.rng_stuck = true,
             "--quiet" => o.quiet = true,
             "--json" => o.json = true,
             "--elf" => o.extra_elfs.push(val()?),
@@ -318,6 +321,7 @@ fn main() -> ExitCode {
 
     let mut bus = Bus::new(o.mhz * 1_000_000, o.cache, o.seed);
     bus.periph.warn_unmodelled = o.warn_unmodelled;
+    bus.rng_stuck = o.rng_stuck;
     bus.periph.i2c0.kbd = Some(Default::default());
     bus.periph.reset_cause = periph::reset_reason::POWERON;
     if let Err(e) = load_image(&mut bus, &elf) {

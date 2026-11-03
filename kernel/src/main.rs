@@ -523,6 +523,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         },
         Command::Clock { mhz } => Current::set_cpu_mhz(mhz),
         Command::Pvt { on } => Current::set_pvt(on),
+        Command::Entropy { on } => Current::set_entropy(on),
         Command::Touch { seconds } => touch_log.start(seconds),
         Command::I2cScan => Current::i2c_scan(),
         Command::Display => Current::display_stats(),

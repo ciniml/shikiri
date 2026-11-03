@@ -189,6 +189,14 @@ pub trait Platform {
         x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         (x ^ (x >> 31)) as u32
     }
+    /// Health test failures of the generator since boot (doc/47 §6).
+    fn rng_failures() -> u32 {
+        0
+    }
+    /// Starts or stops the generator's entropy source (doc/47 §7).
+    fn set_entropy(_on: bool) -> Result<u32, &'static str> {
+        Err("no entropy source")
+    }
     /// Fills `len` bytes at `buf` with `random_u32` words, or with
     /// `raw = Some(us)` the generator's register read once every `us` µs,
     /// where a debug probe can read them (doc/47 §5); returns `buf`.

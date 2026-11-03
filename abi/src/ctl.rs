@@ -76,6 +76,9 @@ pub mod cmd {
     /// to back), for a debug probe to read (doc/47 §5). The result is the
     /// buffer's address.
     pub const RNG_DUMP: u8 = 29;
+    /// `u32 on`: the RNG's entropy source (the SAR ADC) on or off, to compare
+    /// the generator without it (doc/47 §7).
+    pub const ENTROPY: u8 = 30;
 }
 
 /// `Command::Prof` operations.
@@ -122,6 +125,7 @@ pub enum Command<'a> {
     Membench { pause: bool },
     PpaBench,
     RngDump { raw: bool, us: u32 },
+    Entropy { on: bool },
 }
 
 impl Command<'_> {
@@ -156,6 +160,7 @@ impl Command<'_> {
             Command::Membench { .. } => "membench",
             Command::PpaBench => "ppabench",
             Command::RngDump { .. } => "rngdump",
+            Command::Entropy { .. } => "entropy",
         }
     }
 }
@@ -195,6 +200,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::WLAN_PROBE if args.is_empty() => Command::WlanProbe,
         cmd::PPA_BENCH if args.is_empty() => Command::PpaBench,
         cmd::MEMBENCH if args.len() == 4 => Command::Membench { pause: u32_at(args, 0)? != 0 },
+        cmd::ENTROPY if args.len() == 4 => Command::Entropy { on: u32_at(args, 0)? != 0 },
         cmd::RNG_DUMP if args.len() == 8 => Command::RngDump { raw: u32_at(args, 0)? != 0, us: u32_at(args, 4)? },
         cmd::PROF if args.len() == 12 => Command::Prof { op: u32_at(args, 0)?, a: u32_at(args, 4)?, b: u32_at(args, 8)? },
         cmd::REMOVE | cmd::ROLLBACK => {
@@ -256,6 +262,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Membench { .. } => put(&[cmd::MEMBENCH])?,
         Command::PpaBench => put(&[cmd::PPA_BENCH])?,
         Command::RngDump { .. } => put(&[cmd::RNG_DUMP])?,
+        Command::Entropy { .. } => put(&[cmd::ENTROPY])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -265,6 +272,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Rotate { degrees } => put(&degrees.to_le_bytes())?,
         Command::SdRead { lba } => put(&lba.to_le_bytes())?,
         Command::Pvt { on } => put(&(*on as u32).to_le_bytes())?,
+        Command::Entropy { on } => put(&(*on as u32).to_le_bytes())?,
         Command::Membench { pause } => put(&(*pause as u32).to_le_bytes())?,
         Command::RngDump { raw, us } => {
             put(&(*raw as u32).to_le_bytes())?;
@@ -356,6 +364,11 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
             Some("pause") => Command::Membench { pause: true },
             _ => return Err("membench [pause]"),
         },
+        Some("entropy") => match w.next() {
+            Some("on") => Command::Entropy { on: true },
+            Some("off") => Command::Entropy { on: false },
+            _ => return Err("entropy on|off"),
+        },
         Some("rngdump") => match w.next() {
             None => Command::RngDump { raw: false, us: 0 },
             Some("raw") => Command::RngDump { raw: true, us: num(w.next())? },
@@ -372,7 +385,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         },
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench | rngdump [raw [US]]");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench | rngdump [raw [US]] | entropy on|off");
         }
     };
     if w.next().is_some() {

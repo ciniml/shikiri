@@ -364,10 +364,17 @@ impl Table {
             Object::Kbd(k) => k.read(buf),
             Object::List(l) => l.read(buf),
             Object::Random => {
+                // Nothing from a read during which a health test failed
+                // (doc/47 §6).
+                let failures = Current::rng_failures();
                 let n = buf.len().min(t5_abi::random::MAX);
                 for chunk in buf[..n].chunks_mut(4) {
                     let w = Current::random_u32().to_le_bytes();
                     chunk.copy_from_slice(&w[..chunk.len()]);
+                }
+                if Current::rng_failures() != failures {
+                    buf[..n].fill(0);
+                    return Err(Error::Fail);
                 }
                 Ok(n)
             }

@@ -13,7 +13,7 @@ use super::psram::{
     CK_EN_LP_I2CMST, I2C_SAR_ADC, LPPERI_CLK_EN, PMU_RF_PWC, clear_bits, delay_us, regi2c_write_mask, set_bits,
     set_field,
 };
-use super::rd;
+use super::{RNG_DATA, rd};
 
 const HP_SYS_CLKRST: usize = 0x500E_6000;
 const HP_RST_EN2: usize = HP_SYS_CLKRST + 0xC8;
@@ -61,8 +61,9 @@ const INIT_CODE: u32 = 2166;
 /// ADC1, channel 10, 12 dB (atten 3): one pattern-table entry.
 const PATTERN: u32 = (10 << 2) | 3;
 
-/// Starts the entropy source; returns the distinct values among a few ADC
-/// samples, which shows that it converts.
+/// Starts the entropy source and runs the start-up health test (§6);
+/// returns the distinct values among a few ADC samples, which shows that it
+/// converts.
 pub fn enable() -> Result<u32, &'static str> {
     // Reset the ADC, clock it (from XTAL, undivided) and its APB side.
     set_bits(HP_RST_EN2, RST_EN_ADC);
@@ -112,5 +113,113 @@ pub fn enable() -> Result<u32, &'static str> {
             distinct += 1;
         }
     }
+    if !startup_test() {
+        return Err("start-up health test failed");
+    }
     Ok(distinct)
+}
+
+const SAR2_INITIAL_CODE_LOW: u32 = 0x3; // [7:0]
+const SAR2_INITIAL_CODE_HIGH: u32 = 0x4; // [3:0]
+const SAR2_PATT_TAB1: usize = ADC + 0x28;
+
+/// Stops the entropy source, as `bootloader_random_disable` does (only to
+/// compare the generator without it, doc/47 §7): the trigger off, the
+/// pattern tables and the calibration cleared, the regi2c and its clock
+/// off, the clock divider back to ESP-IDF's default, ADC1 back to the ULP
+/// controller.
+pub fn disable() -> Result<(), &'static str> {
+    clear_bits(ADC_CTRL2, TIMER_EN);
+    for i in 0..4 {
+        set_field(SAR1_PATT_TAB1 + 4 * i, 0, 24, 0xFF_FFFF);
+        set_field(SAR2_PATT_TAB1 + 4 * i, 0, 24, 0xFF_FFFF);
+    }
+    regi2c_write_mask(&I2C_SAR_ADC, SAR1_INITIAL_CODE_HIGH, 3, 0, 0)?;
+    regi2c_write_mask(&I2C_SAR_ADC, SAR1_INITIAL_CODE_LOW, 7, 0, 0)?;
+    regi2c_write_mask(&I2C_SAR_ADC, SAR2_INITIAL_CODE_HIGH, 3, 0, 0)?;
+    regi2c_write_mask(&I2C_SAR_ADC, SAR2_INITIAL_CODE_LOW, 7, 0, 0)?;
+    regi2c_write_mask(&I2C_SAR_ADC, SAR_DTEST_VDD_GRP1, 3, 0, 0)?;
+    regi2c_write_mask(&I2C_SAR_ADC, SAR_ENT_VDD_GRP1, 4, 4, 0)?;
+    clear_bits(PMU_RF_PWC, PMU_XPD_PERIF_I2C);
+    clear_bits(LPPERI_CLK_EN, CK_EN_LP_I2CMST);
+    set_field(PERI_CLK_CTRL23, ADC_CLK_DIV_NUM_S, 8, 4);
+    set_field(PERI_CLK_CTRL23, ADC_CLK_DIV_NUMERATOR_S, 8, 0);
+    set_field(PERI_CLK_CTRL23, ADC_CLK_DIV_DENOMINATOR_S, 8, 0);
+    set_field(PERI_CLK_CTRL22, ADC_CLK_SRC_SEL_S, 2, 0);
+    set_bits(ADC_CTRL, SAR_CLK_GATED);
+    clear_bits(MEAS1_MUX, SAR1_DIG_FORCE);
+    set_bits(MEAS1_CTRL2, MEAS1_START_FORCE | SAR1_EN_PAD_FORCE);
+    Ok(())
+}
+
+// ---- health tests (NIST SP 800-90B §4.4; doc/47 §6) ----------------------
+// On every word read from the RNG register. The cutoffs take a claimed
+// min-entropy of 16 bits a word (measured: about 25, doc/47 §5.2) and a
+// false-alarm rate of 2^-30: the repetition count test fails on 3 equal
+// words in a row (C = 1 + ceil(30 / 16)), the adaptive proportion test
+// when the first word of a 512-word window comes 5 times in it.
+const RCT_CUTOFF: u32 = 3;
+const APT_WINDOW: u32 = 512;
+const APT_CUTOFF: u32 = 5;
+
+struct Health {
+    last: u32,
+    run: u32,
+    apt_first: u32,
+    apt_seen: u32,
+    apt_n: u32,
+    failures: u32,
+}
+
+// Used under the kernel lock only.
+static mut HEALTH: Health = Health { last: 0, run: 0, apt_first: 0, apt_seen: 0, apt_n: 0, failures: 0 };
+
+/// Puts one word from the register through the tests; false when one
+/// fails (logged: the first failure and then every 1024th).
+pub fn check(v: u32) -> bool {
+    let h = unsafe { &mut *core::ptr::addr_of_mut!(HEALTH) };
+    let mut failed = None;
+    if v == h.last {
+        h.run += 1;
+        if h.run >= RCT_CUTOFF {
+            failed = Some("repetition");
+            h.run = 1;
+        }
+    } else {
+        h.last = v;
+        h.run = 1;
+    }
+    if h.apt_n == 0 {
+        h.apt_first = v;
+        h.apt_seen = 1;
+    } else if v == h.apt_first {
+        h.apt_seen += 1;
+        if h.apt_seen >= APT_CUTOFF {
+            failed = Some("proportion");
+            h.apt_n = APT_WINDOW - 1;
+        }
+    }
+    h.apt_n = (h.apt_n + 1) % APT_WINDOW;
+    let Some(test) = failed else { return true };
+    if h.failures % 1024 == 0 {
+        t5_abi::event!(Error, "rng.health_fail", test = test, failures = h.failures + 1, word = v);
+    }
+    h.failures += 1;
+    false
+}
+
+/// Health test failures since boot.
+pub fn failures() -> u32 {
+    unsafe { (*core::ptr::addr_of!(HEALTH)).failures }
+}
+
+/// The start-up test (§4.3): 1024 words through both tests, from a fresh
+/// state, before anything uses the generator.
+fn startup_test() -> bool {
+    let failures = failures();
+    unsafe { *core::ptr::addr_of_mut!(HEALTH) = Health { last: !rd(RNG_DATA), run: 0, apt_first: 0, apt_seen: 0, apt_n: 0, failures } };
+    for _ in 0..1024 {
+        check(unsafe { rd(RNG_DATA) });
+    }
+    self::failures() == failures
 }

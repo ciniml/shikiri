@@ -284,6 +284,11 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "run nosuchapp" --ctl "ps" \
 	    --expect-event ticker.tick --expect-event proc.killed --expect-event ctl.failed \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# The RNG's health tests (doc/47 §6): a stuck register fails the
+	@# start-up test, and the kernel does not start the generator.
+	$(T5EMU) --quiet --rng-stuck $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --expect-event rng.health_fail --expect-event rng.no_entropy \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Starting apps from a process (doc/38): init's test list starts hello
 	@# and asks for an app not in the store; the kernel refuses a long name.
 	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \

@@ -68,6 +68,9 @@ pub struct Bus {
     pub l2_line: u32,
     /// The RNG register's generator (LP_SYSTEM_REG_RNG_DATA_REG).
     rng: u64,
+    /// `--rng-stuck`: the register returns the same word (a failed
+    /// generator, for the kernel's health tests; doc/47 §6).
+    pub rng_stuck: bool,
     /// First flash-window access made while L2 was suspended.
     pub flash_violation: Option<u32>,
     /// 256-byte pages of `phys_flash` changed by the ROM erase/write
@@ -144,6 +147,7 @@ impl Bus {
             l2_suspended: false,
             l2_line: 64,
             rng: 0x2545_F491_4F6C_DD1D,
+            rng_stuck: false,
             flash_violation: None,
             stale_l1d: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
             stale_l2: vec![false; PHYS_FLASH_SIZE / FLASH_PAGE as usize],
@@ -349,7 +353,9 @@ impl Bus {
             let word = self.periph.read32(addr & !3, ticks);
             let word = crate::dma2d::read_state(addr & !3, word).unwrap_or(word);
             // The RNG register (soc/wdev_reg.h): a fresh word each read.
-            let word = if addr & !3 == RNG_DATA {
+            let word = if addr & !3 == RNG_DATA && self.rng_stuck {
+                0x5A5A_5A5A
+            } else if addr & !3 == RNG_DATA {
                 self.rng ^= self.rng << 13;
                 self.rng ^= self.rng >> 7;
                 self.rng ^= self.rng << 17;
