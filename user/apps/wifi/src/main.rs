@@ -28,6 +28,13 @@ const REQ_WIFI_START: u32 = 280;
 const REQ_WIFI_CONNECT: u32 = 282;
 const REQ_WIFI_SET_CONFIG: u32 = 284;
 const REQ_WIFI_SET_PS: u32 = 270;
+/// Rpc_Req_FeatureControl (esp_hosted 2.12.7, esp_hosted_rpc.proto:55-84,
+/// 262, 1674-1685): feature 1 = Bluetooth; command 1 = BT init, 3 = BT
+/// enable. The response's field 1 is an esp_err_t.
+const REQ_FEATURE_CONTROL: u32 = 387;
+const FEATURE_BLUETOOTH: u64 = 1;
+const FEATURE_BT_INIT: u64 = 1;
+const FEATURE_BT_ENABLE: u64 = 3;
 /// wifi_ps_type_t: WIFI_PS_NONE.
 const PS_NONE: u64 = 0;
 const RESP_OFFSET: u32 = 256;
@@ -55,8 +62,9 @@ const TLV_EPNAME: u8 = 0x01;
 const TLV_DATA: u8 = 0x02;
 const EP_REQUEST: &[u8] = b"RPCRsp";
 
-fn main(_: usize, _: usize) -> usize {
-    match run() {
+/// `arg0` bit 0: also start the Bluetooth controller on the chip (doc/48).
+fn main(arg0: usize, _: usize) -> usize {
+    match run(arg0 & 1 != 0) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "wifi.failed", step = step);
@@ -323,7 +331,7 @@ impl Rpc {
     }
 }
 
-fn run() -> Result<(), u32> {
+fn run(bluetooth: bool) -> Result<(), u32> {
     let ctl = Handle::open(wlan::CTL, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).map_err(|_| 1u32)?;
     let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX] };
     // The chip announces itself once the data path is open.
@@ -331,6 +339,9 @@ fn run() -> Result<(), u32> {
         && m.kind == EVENT
     {
         rpc.on_event(&m);
+    }
+    if bluetooth {
+        start_bluetooth(&mut rpc);
     }
 
     // wifi_init_config: the values TCC's host sends (its sdkconfig,
@@ -428,6 +439,23 @@ fn run() -> Result<(), u32> {
     }
     rpc.call(REQ_WIFI_CONNECT, 1, |_| {})?;
     idle(&mut rpc)
+}
+
+/// Starts the chip's Bluetooth controller: since esp_hosted 2.5.2 the host
+/// asks for it (CHANGELOG, slave_control.c:520-562); then `bt:hci` carries
+/// its packets. A failure is logged and Wi-Fi goes on.
+fn start_bluetooth(rpc: &mut Rpc) {
+    for (name, command) in [("init", FEATURE_BT_INIT), ("enable", FEATURE_BT_ENABLE)] {
+        let r = rpc.call(REQ_FEATURE_CONTROL, 1, |p| {
+            p.uint(1, FEATURE_BLUETOOTH);
+            p.uint(2, command);
+        });
+        if r.is_err() {
+            event!(Warn, "wifi.bt_failed", step = name);
+            return;
+        }
+    }
+    event!(Info, "wifi.bt_started");
 }
 
 /// Logs events; after a disconnection, connects again (every 5 s).

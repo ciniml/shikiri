@@ -30,7 +30,8 @@ pub const ABI_MAJOR: u16 = 0;
 /// (doc/38): `proc:spawn`. Minor 15 (doc/39): `kbd`. Minor 16 (doc/40):
 /// `proc:list`, `proc:apps`, `proc:kill`. Minor 17 (doc/44): the display's
 /// 2D requests (`write`, `display::DONE`). Minor 18 (doc/46): `random`.
-pub const ABI_MINOR: u16 = 18;
+/// Minor 19 (doc/48): `bt:hci`.
+pub const ABI_MINOR: u16 = 19;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -261,6 +262,23 @@ pub mod wlan {
     /// `ctl`: the station's MAC address (`arg` = its 6 bytes, little-endian),
     /// for `netdev:wlan0`'s `MAC_LO`/`MAC_HI`.
     pub const SET_MAC: usize = 1;
+}
+
+/// Bluetooth (doc/48): `bt:hci` carries HCI packets to and from the
+/// controller on the Wi-Fi chip (the ESP32-C6), once the Wi-Fi service has
+/// started it. `read` and `write` move one packet in the UART (H4) form:
+/// the packet type (`CMD`, `ACL`, `SCO`, `EVT`, `ISO`), then the packet.
+/// One handle at a time; `NoDevice` before the chip runs.
+pub mod bt {
+    pub const HCI: &str = "bt:hci";
+    pub const CMD: u8 = 1;
+    pub const ACL: u8 = 2;
+    pub const SCO: u8 = 3;
+    pub const EVT: u8 = 4;
+    pub const ISO: u8 = 5;
+    /// Longest packet with its type byte: an event (2 + 255 bytes) or LE
+    /// ACL data of 251 bytes (4 + 251).
+    pub const PKT_MAX: usize = 1 + 2 + 255;
 }
 
 /// Starting apps (doc/38): `write` of `[arg0: u32 LE][arg1: u32 LE][name]`

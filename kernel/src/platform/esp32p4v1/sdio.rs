@@ -105,6 +105,7 @@ const ESP_OPEN_DATA_PATH: u8 = 0;
 // esp_hosted's payload header and the INIT event (esp_hosted_header.h,
 // esp_hosted_transport.h, esp_hosted_transport_init.h).
 const HEADER_LEN: usize = 12;
+const IF_STA: u8 = 1;
 const IF_PRIV: u8 = 5;
 const PRIV_EVENT: u8 = 0x33;
 const PRIV_EVENT_INIT: u8 = 0x22;
@@ -532,7 +533,7 @@ fn drain(l: &mut Link, sink: &mut dyn FnMut(u8, &[u8])) -> Result<(), &'static s
             0x47, 1, 80, // SLV_CONFIG_THROTTLE_HIGH_THRESHOLD
             0x48, 1, 60, // SLV_CONFIG_THROTTLE_LOW_THRESHOLD
         ];
-        send(IF_PRIV, &config)?;
+        send(IF_PRIV, 0, &config)?;
         event!(Info, "wlan.host_config_sent");
     }
     Ok(())
@@ -584,10 +585,13 @@ fn split(flags: &mut RxFlags, buf: &[u8], sink: &mut dyn FnMut(u8, &[u8])) -> us
     at
 }
 
-/// Sends one payload on interface `if_type` (sdio_drv.c:586-770). `Err`
-/// "busy" when the C6 has no free buffer, "throttled" while it asked us to
-/// pause.
-pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
+/// Sends one payload on interface `if_type` (sdio_drv.c:586-770), with
+/// `pkt_type` in the header's last byte (`hci_pkt_type` for HCI: the C6
+/// hands the controller that byte and the payload, slave_bt.c:79-103).
+/// `Err` "busy" when the C6 has no free buffer, "throttled" while it asked
+/// us to pause the station's frames (only those, as ESP-IDF's host:
+/// transport_drv.c:341).
+pub fn send(if_type: u8, pkt_type: u8, payload: &[u8]) -> Result<(), &'static str> {
     let l = link();
     if !l.up {
         return Err("Wi-Fi not up");
@@ -596,7 +600,7 @@ pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
     if total > BUF_SIZE {
         return Err("too long");
     }
-    if l.throttled {
+    if l.throttled && if_type == IF_STA {
         return Err("throttled");
     }
     if l.tx_free == 0 {
@@ -612,6 +616,7 @@ pub fn send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
     h[2..4].copy_from_slice(&(payload.len() as u16).to_le_bytes());
     h[4..6].copy_from_slice(&(HEADER_LEN as u16).to_le_bytes());
     h[8..10].copy_from_slice(&l.tx_seq.to_le_bytes());
+    h[11] = pkt_type;
     // Gathered straight into the DMA's buffer (doc/35 §2).
     rw_extended(CMD53_END_ADDR - total as u32, Data::WriteParts(&[&h, payload, &ZEROS[..xfer - total]]))?;
     l.tx_seq = l.tx_seq.wrapping_add(1);

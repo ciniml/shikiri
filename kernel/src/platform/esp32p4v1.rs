@@ -1074,8 +1074,8 @@ impl Platform for Esp32p4v1 {
         sdio::poll(sink)
     }
 
-    fn wlan_send(if_type: u8, payload: &[u8]) -> Result<(), &'static str> {
-        sdio::send(if_type, payload)
+    fn wlan_send(if_type: u8, pkt_type: u8, payload: &[u8]) -> Result<(), &'static str> {
+        sdio::send(if_type, pkt_type, payload)
     }
 
     fn wlan_pending() -> bool {

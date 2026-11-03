@@ -1,8 +1,9 @@
 //! Wi-Fi (N2b-3, doc/22): the esp_hosted transport to the ESP32-C6 (the
-//! platform's SDIO driver) split into two objects. `wlan:ctl` carries the
+//! platform's SDIO driver) split into three objects. `wlan:ctl` carries the
 //! serial interface (RPC) for the Wi-Fi service; `netdev:wlan0` carries the
-//! station's Ethernet frames for the network service. The kernel only
-//! moves payloads; it does not look into them.
+//! station's Ethernet frames for the network service; `bt:hci` carries the
+//! Bluetooth controller's HCI packets (doc/48). The kernel only moves
+//! payloads; it does not look into them.
 //!
 //! The chip is started by the first `wlan:ctl` open and then read from the
 //! scheduler loop (`poll`) while either object is open.
@@ -10,17 +11,19 @@
 use core::sync::atomic::Ordering;
 
 use t5_abi::netdev::ring::{self, Rings};
-use t5_abi::{Error, event, netdev, wlan};
+use t5_abi::{Error, bt, event, netdev, wlan};
 
 use crate::platform::{Current, Platform};
 
 /// esp_hosted interface types (esp_hosted_interface.h:14-23).
 const IF_STA: u8 = 1;
 const IF_SERIAL: u8 = 3;
+const IF_HCI: u8 = 4;
 
 // Sized by the kernel RAM that is left (internal SRAM; doc/22 §6).
 const CTL_QUEUE: usize = 3;
 const STA_QUEUE: usize = 5;
+const HCI_QUEUE: usize = 6;
 /// Frames written on core 1, waiting for core 0 to send them (doc/34 §11).
 /// QEMU has no Wi-Fi, and less RAM.
 #[cfg(not(feature = "platform-virt"))]
@@ -153,8 +156,13 @@ struct Wlan {
     up: bool,
     ctl_open: bool,
     dev_open: bool,
+    hci_open: bool,
     ctl: Queue<CTL_QUEUE, { wlan::MSG_MAX }>,
     sta: Queue<STA_QUEUE, { netdev::ETH_FRAME }>,
+    /// HCI packets from the controller, with their type byte first.
+    hci: Queue<HCI_QUEUE, { bt::PKT_MAX }>,
+    hci_rx: u32,
+    hci_tx: u32,
     /// The station's frames to send (written on core 1).
     tx: Queue<TX_QUEUE, { netdev::ETH_FRAME }>,
     /// The station's MAC address (set by the Wi-Fi service), 0 = unknown.
@@ -176,8 +184,12 @@ static mut WLAN: Wlan = Wlan {
     up: false,
     ctl_open: false,
     dev_open: false,
+    hci_open: false,
     ctl: Queue::new(),
     sta: Queue::new(),
+    hci: Queue::new(),
+    hci_rx: 0,
+    hci_tx: 0,
     tx: Queue::new(),
     mac: 0,
     other: 0,
@@ -198,7 +210,7 @@ fn w() -> &'static mut Wlan {
 /// frames wait to be sent.
 pub fn pending() -> bool {
     let w = w();
-    w.up && (w.ctl_open || w.dev_open) && (Current::wlan_pending() || w.tx.count > 0 || w.rings.as_ref().is_some_and(|r| r.tx_front().is_some()))
+    w.up && (w.ctl_open || w.dev_open || w.hci_open) && (Current::wlan_pending() || w.tx.count > 0 || w.rings.as_ref().is_some_and(|r| r.tx_front().is_some()))
 }
 
 /// Sends the queued frames, oldest first, while the bus is free: one frame
@@ -238,12 +250,13 @@ pub fn flush_tx() {
 /// Reads what the chip has sent (from the scheduler loop).
 pub fn poll() {
     let w = w();
-    if !w.up || !(w.ctl_open || w.dev_open) {
+    if !w.up || !(w.ctl_open || w.dev_open || w.hci_open) {
         return;
     }
     flush_tx();
     let (ctl, sta, dev_open, rings) = (&mut w.ctl, &mut w.sta, w.dev_open, &mut w.rings);
-    let (mut other, mut sta_rx) = (0, 0);
+    let (hci, hci_open, hci_seen) = (&mut w.hci, w.hci_open, w.hci_rx);
+    let (mut other, mut sta_rx, mut hci_rx) = (0, 0, 0);
     let r = Current::wlan_poll(&mut |if_type, p| match if_type {
         IF_SERIAL => ctl.push(p),
         IF_STA => {
@@ -257,9 +270,20 @@ pub fn poll() {
                 sta.push(p);
             }
         }
+        // The payload starts with the packet type (slave_bt.c:41-72).
+        IF_HCI => {
+            if hci_seen + hci_rx < 4 {
+                event!(Debug, "wlan.hci_rx", len = p.len() as u32, open = hci_open, head = &p[..p.len().min(32)]);
+            }
+            hci_rx += 1;
+            if hci_open {
+                hci.push(p);
+            }
+        }
         _ => other += 1,
     });
     w.other += other;
+    w.hci_rx += hci_rx;
     w.sta_rx += sta_rx;
     let now = Current::now();
     if now >= w.stats_at {
@@ -279,7 +303,11 @@ pub fn poll() {
 }
 
 fn send(if_type: u8, data: &[u8]) -> Result<usize, Error> {
-    match Current::wlan_send(if_type, data) {
+    send_typed(if_type, 0, data)
+}
+
+fn send_typed(if_type: u8, pkt_type: u8, data: &[u8]) -> Result<usize, Error> {
+    match Current::wlan_send(if_type, pkt_type, data) {
         Ok(()) => Ok(data.len()),
         Err("busy") => {
             w().tx_busy += 1;
@@ -451,5 +479,60 @@ impl Drop for WlanDev {
         w.tx.clear();
         let ring_dropped = w.rings.take().map_or(0, |r| r.rx_dropped);
         event!(Info, "wlan.dev_closed", rx = w.sta_rx, tx = w.sta_tx, dropped = w.sta.dropped + ring_dropped, tx_dropped = w.tx.dropped);
+    }
+}
+
+/// The handle on `bt:hci` (doc/48); one at a time.
+pub struct BtHci;
+
+impl BtHci {
+    /// Only once the chip runs. Whether its controller is started is the
+    /// Wi-Fi service's business; before that, nothing answers.
+    pub fn open() -> Result<BtHci, Error> {
+        let w = w();
+        if !w.up {
+            return Err(Error::NoDevice);
+        }
+        if w.hci_open {
+            return Err(Error::Busy);
+        }
+        w.hci.clear();
+        w.hci_open = true;
+        Ok(BtHci)
+    }
+
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        w().hci.pop(out)
+    }
+
+    /// One packet, type byte first: the type goes into the transport
+    /// header and the rest after it. `Busy` when the chip has no room.
+    pub fn write(&mut self, pkt: &[u8]) -> Result<usize, Error> {
+        let w = w();
+        if !w.up {
+            return Err(Error::Busy);
+        }
+        match pkt.first() {
+            Some(&t) if (bt::CMD..=bt::ISO).contains(&t) && pkt.len() <= bt::PKT_MAX => {
+                send_typed(IF_HCI, t, &pkt[1..])?;
+                w.hci_tx += 1;
+                Ok(pkt.len())
+            }
+            Some(_) => Err(Error::Invalid),
+            None => Err(Error::Size),
+        }
+    }
+
+    pub fn poll(&self) -> Option<(usize, usize)> {
+        let n = w().hci.count;
+        (n > 0).then_some((netdev::READABLE, n))
+    }
+}
+
+impl Drop for BtHci {
+    fn drop(&mut self) {
+        let w = w();
+        w.hci_open = false;
+        event!(Info, "wlan.hci_closed", rx = w.hci_rx, tx = w.hci_tx, dropped = w.hci.dropped);
     }
 }

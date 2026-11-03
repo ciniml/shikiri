@@ -253,7 +253,9 @@ pub trait Platform {
         (0, 0, 0, 0)
     }
     /// Sends one payload to the Wi-Fi chip; `Err("busy")` when it has no room.
-    fn wlan_send(_if_type: u8, _payload: &[u8]) -> Result<(), &'static str> {
+    /// `pkt_type` goes into the header's last byte (the HCI packet type on
+    /// interface 4, doc/48).
+    fn wlan_send(_if_type: u8, _pkt_type: u8, _payload: &[u8]) -> Result<(), &'static str> {
         Err("no Wi-Fi")
     }
     /// Initialises the SD card if needed and logs what is on it (M7a).
