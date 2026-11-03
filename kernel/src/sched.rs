@@ -27,9 +27,9 @@ use crate::prof;
 use crate::smp;
 use crate::time;
 
-/// Processes at once (doc/30 §4). With the PSRAM, each gets 1/8 of the app
-/// pool (3 MiB).
-pub const MAX_PROCS: usize = 8;
+/// Processes at once (doc/30 §4; 12 since doc/48 §6, 8 before). With the
+/// PSRAM, each gets 1/12 of the app pool (2 MiB).
+pub const MAX_PROCS: usize = 12;
 pub const SLICE_MS: u64 = 10;
 /// Cores.
 pub const CORES: usize = 2;
@@ -121,7 +121,14 @@ impl Scheduler {
     }
 
     pub fn free_slot(&self) -> Option<usize> {
-        (0..MAX_PROCS).find(|&i| self.slots[i].is_none() && self.on_core[i] == NONE)
+        self.free_span(1)
+    }
+
+    /// The first of `n` free slots in a row (memory for a bench larger
+    /// than one slot).
+    pub fn free_span(&self, n: usize) -> Option<usize> {
+        let free = |i: usize| self.slots[i].is_none() && self.on_core[i] == NONE;
+        (0..=MAX_PROCS.saturating_sub(n)).find(|&i| (i..i + n).all(free))
     }
 
     /// Stops the process with `pid`. Its slot is freed by `reap`. If the

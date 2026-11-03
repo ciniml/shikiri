@@ -555,8 +555,9 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             Some(_) => Err("slot too small"),
             None => Err("no free slot"),
         },
-        Command::PpaBench => match s.free_slot().map(slot) {
-            Some((base, size)) if size >= 3 << 20 => Current::ppa_bench(base),
+        // Two slots: the bench needs 3 MiB (doc/44).
+        Command::PpaBench => match s.free_span(2).map(slot) {
+            Some((base, size)) if 2 * size >= 3 << 20 => Current::ppa_bench(base),
             Some(_) => Err("slot too small"),
             None => Err("no free slot"),
         },
@@ -776,7 +777,12 @@ fn selftest_m2(apps: &Apps) -> u32 {
         return 1;
     };
     let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), Some(d), Some(e), None, None, None];
+    s.slots = [const { None }; sched::MAX_PROCS];
+    s.slots[0] = Some(a);
+    s.slots[1] = Some(b);
+    s.slots[2] = Some(c);
+    s.slots[3] = Some(d);
+    s.slots[4] = Some(e);
 
     let start = Current::now();
     sched::run(&mut s, Some(3000), &mut |_| {});
@@ -834,7 +840,10 @@ fn selftest_m3d(apps: &Apps) -> u32 {
         return 1;
     };
     let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), None, None, None, None, None];
+    s.slots = [const { None }; sched::MAX_PROCS];
+    s.slots[0] = Some(a);
+    s.slots[1] = Some(b);
+    s.slots[2] = Some(c);
     sched::run(&mut s, Some(2000), &mut |_| {});
     let mut failures = 0;
     for p in s.slots.iter().flatten() {
@@ -938,7 +947,8 @@ fn selftest_m6c(apps: &Apps) -> u32 {
             continue;
         };
         let mut s = sched::Scheduler::new();
-        s.slots = [Some(p), None, None, None, None, None, None, None];
+        s.slots = [const { None }; sched::MAX_PROCS];
+        s.slots[0] = Some(p);
         sched::run(&mut s, Some(limit), &mut |_| {});
         let p = s.slots[0].as_ref().unwrap();
         let exit = p.exit().unwrap();
@@ -973,7 +983,10 @@ fn selftest_m4b(apps: &Apps) -> u32 {
         return 1;
     };
     let mut s = sched::Scheduler::new();
-    s.slots = [Some(a), Some(b), Some(c), None, None, None, None, None];
+    s.slots = [const { None }; sched::MAX_PROCS];
+    s.slots[0] = Some(a);
+    s.slots[1] = Some(b);
+    s.slots[2] = Some(c);
     sched::run(&mut s, Some(2000), &mut |_| {});
     let mut failures = 0;
     for p in s.slots.iter().flatten() {
