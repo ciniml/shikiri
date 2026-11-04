@@ -24,6 +24,7 @@ mod blelink;
 mod controller;
 mod device;
 mod store;
+mod wifilink;
 
 use core::cell::RefCell;
 use core::fmt::Write as _;
@@ -35,6 +36,7 @@ use controller::{ARGS, Controller, Op, Outcome, Val};
 use device::{Change, Device, Identity};
 use mtport::{FileKvs, KernelRng};
 use store::{MemKvs, Store};
+use wifilink::WifiLink;
 use simple_matter::controller::{DEFAULT_WINDOW_ITERATIONS, OpenWindowParams};
 use simple_matter::crypto::Rng as _;
 use simple_matter::discovery::onboarding;
@@ -195,6 +197,25 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             (Some(node), Some(passcode), Some(ip), Some(port)) => ctrl.pair_addr(node, passcode as u32, SocketAddr::new(ip, port as u16), now),
             _ => Err("pairaddr NODE PASSCODE IP PORT"),
         },
+        // The passphrase is not logged (nor is the request).
+        "netcred" => {
+            let r = match (w.next(), w.next()) {
+                (Some(ssid), Some(psk)) => ctrl.set_wifi(Some((ssid.as_bytes(), psk.as_bytes()))).map(|_| "set: given to devices commissioned over BLE"),
+                (None, _) => ctrl.set_wifi(None).map(|_| "cleared"),
+                _ => Err("netcred [SSID PASSPHRASE]"),
+            };
+            match r {
+                Ok(t) => {
+                    reply(c, t);
+                    end(c, true);
+                }
+                Err(e) => {
+                    reply(c, e);
+                    end(c, false);
+                }
+            }
+            return false;
+        }
         "pairble" => match (num(w.next()), num(w.next()), num(w.next())) {
             (Some(node), Some(passcode), Some(d)) if !ctrl.busy() => {
                 ble.central_start(d as u16, now).and_then(|_| ctrl.pair_ble(node, passcode as u32, now))
@@ -290,7 +311,7 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
     };
     match started {
         Ok(()) => true,
@@ -429,9 +450,12 @@ fn run(test: bool) -> Result<(), u32> {
 
     let mut client: Option<Client> = None;
     let mut ble = BleLink::new();
+    let mut wifi = WifiLink::new();
     let mut rx = [0u8; PKT];
     let mut tx = [0u8; PKT];
     let mut next_addrs = now_ms() + ADDRS_MS;
+    // After a join, the addresses are read every 500 ms until then.
+    let mut fast_addrs_until = 0;
     let mut has_v4 = addrs.ipv4.is_some();
     let mdns_group = |v4: bool| if v4 { SocketAddr::new(IpAddr::V4(MDNS_V4), MDNS_PORT) } else { SocketAddr::new(IpAddr::V6(MDNS_V6), MDNS_PORT) };
     let send = |net: &mut Net, sock: u16, tx: &[u8], to: SocketAddr| {
@@ -499,6 +523,16 @@ fn run(test: bool) -> Result<(), u32> {
             }
         }
         ble.advertise(if test { None } else { dev.ble_adv() }, now_ms());
+        // Wi-Fi: a commissioner's ConnectNetwork, `wifi`'s answers.
+        if !test {
+            busy |= wifi.pump(dev, now_ms());
+            // After a join the old address goes at once (DHCP has started
+            // over); the new one comes within `ADDRS_MS`.
+            if wifi.take_joined() {
+                next_addrs = now_ms();
+                fast_addrs_until = now_ms() + 10_000;
+            }
+        }
         while let Some(k) = dev.mdns_poll(now_ms(), &mut tx) {
             send(&mut net, mdns, &tx[..k], mdns_group(has_v4));
         }
@@ -532,7 +566,7 @@ fn run(test: bool) -> Result<(), u32> {
         }
         let now = now_ms();
         if now >= next_addrs && !test {
-            next_addrs = now + ADDRS_MS;
+            next_addrs = now + if now < fast_addrs_until { 500 } else { ADDRS_MS };
             if let Some(a) = wifi_addrs(&net) {
                 has_v4 = a.ipv4.is_some();
                 dev.set_addrs(a.ipv4, a.ipv6_ll, now);
@@ -551,7 +585,7 @@ fn run(test: bool) -> Result<(), u32> {
                 continue;
             }
             // `net` (a datagram), a new client or its request, `ble`.
-            let mut hs: [&Handle; 4] = [net.handle(); 4];
+            let mut hs: [&Handle; 5] = [net.handle(); 5];
             let mut n = 1;
             hs[n] = &listener.0;
             n += 1;
@@ -571,6 +605,14 @@ fn run(test: bool) -> Result<(), u32> {
                 }
                 None => usize::MAX,
             };
+            let wifi_at = match wifi.handle() {
+                Some(h) => {
+                    hs[n] = h;
+                    n += 1;
+                    n - 1
+                }
+                None => usize::MAX,
+            };
             if let Ok(ev) = wait(&hs[..n], ms * 1_000_000)
                 && ev.kind == chan::PEER_CLOSED
             {
@@ -578,6 +620,8 @@ fn run(test: bool) -> Result<(), u32> {
                     client = None;
                 } else if ev.index == ble_at {
                     ble.closed(now);
+                } else if ev.index == wifi_at {
+                    wifi.closed(now);
                 }
             }
         }

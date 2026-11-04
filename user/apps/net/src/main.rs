@@ -1034,6 +1034,17 @@ impl Stack {
                     Err(_) => Err(status::UNREACHABLE),
                 }
             }
+            op::LINK_RENEW => {
+                // Only Wi-Fi changes networks under the stack.
+                if b != proto::link::WLAN0 as u32 {
+                    return Err(status::BAD_REQUEST);
+                }
+                let w = self.eth[WLAN - 1].as_mut().ok_or(status::NO_ADDRESS)?;
+                let h = w.dhcp.ok_or(status::NO_ADDRESS)?;
+                w.sockets.get_mut::<dhcpv4::Socket>(h).reset();
+                event!(Info, "net.link_renew", link = "wlan0");
+                Ok((0, 0))
+            }
             op::UDP_WAIT => {
                 if self.udp_ready(client) {
                     return Ok((1, 0));

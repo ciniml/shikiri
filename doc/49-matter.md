@@ -295,8 +295,49 @@
   - 何もしていないときの `matter` の CPU は約 4.9 ms/秒（cpu_pm 4。前は 5〜8）。LAN の mDNS が来るたびに起きるので、0 にはならない。`net` は 12〜13 で、前と変わらない。
 - **t5emu**: §16 の試験がそのまま通った（`matter` は `waiting` で待つ）。
 
-## 19. 残り
+## 19. 残り（§18 の時点）
 - BLE: Wi-Fi の資格情報を BLE で渡すコミッショニング（`AddOrUpdateWiFiNetwork` と `ConnectNetwork`）。Tab5 はどちらの側も、相手がもうネットワークにいる前提。
 - 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。
 - t5emu の試験は、デバイスとコントローラが同じプロセスで同じコア。別の実装（chip-tool など）との相互接続は実機でしか見ていない（PC の smctl と例）。
 - `UDP_WAIT` は、まだ `matter` しか使っていない（他のクライアントは今までどおり）。
+
+## 20. BLE のコミッショニングで Wi-Fi を渡す
+利用者の指示（2026-11-04）:「つづけてください。」（コントローラの側と、Tab5 が試験用の網 `matter-test` へ移ってから戻る、デバイスの側の両方）。
+
+- **コントローラの側**:
+  - `netcred SSID PASSPHRASE` で、BLE でコミッショニングするデバイスに渡す網を覚える。メモリの中だけで、ログに出さない。`netcred` だけなら消す。シェルの `mt` は要求の文をログに出さない（`shell.exec` はコマンドの名前だけ）。
+  - `pairble` は、覚えた網があれば `Commissioner::set_wifi_credentials` で渡す。AddNOC の後に AddOrUpdateWiFiNetwork と ConnectNetwork を BLE で行い、それから BLE を閉じて CASE。
+  - `mtreq` の OP 15 は `netcred t5-test not-a-secret`（PC の試験用のデバイスは、つながったふりをするだけ）。OP 16 で消す。
+  - 実機: PC の `ble-onoff-light` をノード 21 として 22.7 秒（`add_wifi_network`、`connect_network` の段を通った）。
+- **`svc:wifi`**（`t5_abi::wifi`、`wifi` サービス、クライアントは 1 つずつ）:
+  - `JOIN`（SSID と passphrase）: 今のアクセスポイントを離れ（`Req_WifiDisconnect`、283）、設定を変えて接続する。
+    - 結果は、つながれば `JOINED`。切断の理由が来れば `FAILED`（自分で離れたときの理由 8、`ASSOC_LEAVE` は数えない）、20 秒で答えがなくても `FAILED`。
+    - 後は組み込みの網と同じく 5 秒ごとにつなぎ直す。passphrase はチップへ送るだけで、ログに出さず、サービスが終われば忘れる。
+  - `STATUS`: つながっているかと SSID。
+  - 起動したときは、まず切断する。チップはサービスより長く生きるので、`JOIN` で移った網にいたままだった（`wifi` を起動し直しても `matter-test` に残った）。
+  - **網が変わったら `net` の DHCP をやり直す**: `wifi` は、前と違う SSID につながったら（このプロセスで最初の接続も）、`svc:net` の新しい要求 `LINK_RENEW`（`link::WLAN0`）を送る。`net` は wlan0 の DHCP のソケットを `reset` する。
+    - 最初はこれがなく、`matter-test` に移った後も `iotap` のアドレス（192.168.2.112）が残った。mDNS もそれを広告したので、smctl の CASE が届かなかった。
+    - `t5_rt::Net::connect` は、`net` の共有メモリを 5 秒まで待つようにした（前は永遠。`net` のクライアントの枠が埋まっていると、`wifi` が止まるおそれがあった）。
+- **デバイスの側**（`matter`）:
+  - NetworkCommissioning を Wi-Fi の版（`NetworkCommissioningWifi`）にした。ドライバ（`wifilink.rs` の `TabWifi`）は `connect` を覚えておく。ループの `WifiLink` がそれを `JOIN` として `svc:wifi` へ渡し、答えを `WifiStatus` にする。ConnectNetwork の答えは、コアがそれを待ってから返す。
+  - 起動したら `STATUS` を聞き、今の網を `seed_network` で入れておく。コミッショナには、ネットワークが設定済みに見える。
+  - `JOIN` が通ったら、10 秒の間、アドレスを 500 ms ごとに読み直す（ふだんは 5 秒ごと）。新しいアドレスがすぐ mDNS に載る。
+- **実機**（2026-11-04、smctl の `pairing ble-wifi 7 … matter-test … 1234`、passphrase はファイルから渡し、画面にもログにも出していない。smctl とログに passphrase がないことを毎回確かめた）:
+  - BLE で PASE から ConnectNetwork まで行い、Tab5 は `iotap` を離れて、0.34 秒で `matter-test` につながった。`wifi.renewed` の 30〜70 ms 後に `net.dhcp`（192.168.8.181）。
+  - smctl は PC の Wi-Fi のアダプタ（`matter-test` 側）越しに 192.168.8.181 を引いて CASE と CommissioningComplete を通した。合計 13.9 秒。その fabric から toggle、unpair も通った。
+  - 戻すときは `kill`（`wifi`）と `run wifi 1`。組み込みの `iotap` につながり、`LINK_RENEW` で 192.168.2.112 に戻った。`matter` も起動し直して、seed を `iotap` にした。守りの規則は `net` を起動し直したときに `netctl 2` で戻した（rules=6、PC からの ping 0/2）。
+- **試験の途中で起きたこと**:
+  - 1 回目は `net` が古いアドレスのままで CASE が届かず失敗した。そのとき AddNOC で増えた fabric が、`matter` の起動し直しで fail-safe ごと忘れられて残った（fabrics=2）。fabric 1 の smctl から RemoveFabric（index 2）で消した。fail-safe の間に足した fabric を、起動し直した後にどう扱うかは、コアとの境目でまだ決めていない。
+  - **アプリのストアが一杯**: `make install-apps` は rc=0 でも、カーネルが `store full` で断った分が入っていなかった。この日は font が毎回、matter が 3 回（MT4 の後、`UDP_WAIT` の最初、この節の途中）。そのとき動いていたのは前の版の matter だった。
+    - `install-apps` の後に、入らなかったアプリを `install-apps: NOT INSTALLED: NAME` と出すようにした（`tools/install-failures.py`）。
+    - 今回は `remove matter` と `install build/apps/matter.t5a` で入れ直した。font は中身が変わっていないので、そのままにしてある。
+- **残すこと**:
+  - `JOIN` した網は Tab5 の側には保存しない。`wifi` を起動し直すと組み込みの網へ戻るので、スマホでコミッショニングした後に再起動すると、その網から外れる。保存するなら SD に passphrase を置くことになり、利用者の判断が要る。
+  - C6 の esp_hosted は Wi-Fi の設定を自分のフラッシュ（NVS）に持つと思われる（組み込みの網のときから同じ。確かめていない）。
+  - IPv6 は、前の網の SLAAC のアドレスが残る（DHCP は v4 だけ）。
+
+## 21. 残り
+- 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。
+- t5emu の試験は、デバイスとコントローラが同じプロセスで同じコア。別の実装（chip-tool など）との相互接続は実機でしか見ていない（PC の smctl と例）。
+- `UDP_WAIT` は、まだ `matter` しか使っていない。
+- §20 の残すこと（`JOIN` した網の保存、IPv6 のアドレス、fail-safe の間の fabric）。

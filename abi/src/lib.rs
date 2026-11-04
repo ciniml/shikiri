@@ -387,6 +387,27 @@ pub mod ble {
     pub const MSG_MAX: usize = 256;
 }
 
+/// The Wi-Fi service's requests (doc/49 §20): one client at a time.
+pub mod wifi {
+    pub const SVC: &str = "wifi";
+    /// Request `[JOIN, ssid_len, ssid…, psk_len, psk…]`: leave the access
+    /// point and join this one (the passphrase goes to the chip only; it is
+    /// neither logged nor kept beyond the process). `JOINED` once
+    /// associated, or `FAILED` (a disconnection's reason, or 0 for no
+    /// answer in 20 s); the service goes on retrying every 5 s as for the
+    /// built-in network.
+    pub const JOIN: u8 = 1;
+    /// Request `[STATUS]`: `[STATUS, connected, ssid_len, ssid…]` (the
+    /// network it is on or tries to join).
+    pub const STATUS: u8 = 2;
+    /// Event `[JOINED, ssid_len, ssid…]`.
+    pub const JOINED: u8 = 3;
+    /// Event `[FAILED, reason: u16 LE]`.
+    pub const FAILED: u8 = 4;
+    pub const SSID_MAX: usize = 32;
+    pub const PSK_MAX: usize = 64;
+}
+
 /// The Matter service (doc/49 MT2): a client connects to `svc:matter` and
 /// sends one request as text (`status`, `nodes`, `pair NODE PASSCODE
 /// DISCRIMINATOR`, `on NODE`, `off NODE`, `toggle NODE`, `read NODE EP

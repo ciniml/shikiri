@@ -168,6 +168,9 @@ pub struct Controller {
     /// Messages for the device over BLE; whether the link can go.
     ble_txq: heapless::Deque<Tx, TX_QUEUE>,
     ble_close: bool,
+    /// The Wi-Fi network a device commissioned over BLE is given (SSID,
+    /// passphrase): in memory only, never logged.
+    wifi: Option<(heapless::Vec<u8, 32>, heapless::Vec<u8, 64>)>,
     kvs: &'static RefCell<Store>,
     last_phase: Option<Phase>,
     outcome: Option<Outcome>,
@@ -234,6 +237,7 @@ impl Controller {
                 txq: heapless::Deque::new(),
                 ble_txq: heapless::Deque::new(),
                 ble_close: false,
+                wifi: None,
                 kvs,
                 last_phase: None,
                 outcome: None,
@@ -412,6 +416,19 @@ impl Controller {
         Ok(())
     }
 
+    /// The Wi-Fi network for devices commissioned over BLE (`None`: none,
+    /// they are on the network already).
+    pub fn set_wifi(&mut self, net: Option<(&[u8], &[u8])>) -> Result<(), &'static str> {
+        self.wifi = match net {
+            Some((ssid, psk)) => Some((
+                heapless::Vec::from_slice(ssid).map_err(|_| "SSID: 32 bytes at most")?,
+                heapless::Vec::from_slice(psk).map_err(|_| "passphrase: 64 bytes at most")?,
+            )),
+            None => None,
+        };
+        Ok(())
+    }
+
     /// Commissions the device that `blelink` finds over BLE (its
     /// `central_start`, by the caller) as node `node`.
     pub fn pair_ble(&mut self, node: u64, passcode: u32, now: u64) -> Result<(), &'static str> {
@@ -426,8 +443,16 @@ impl Controller {
     pub fn ble_linked(&mut self, now: u64) {
         let Activity::BleLink { node, passcode, since } = self.activity else { return };
         let mut comm = Commissioner::new(&self.o.ca, &self.o.crypto, AttestationPolicy::VerifyNoPaa);
-        // CASE over the network after AddNOC: the link goes then.
+        // CASE over the network after AddNOC (and the Wi-Fi network, if
+        // there is one to give): the link goes then.
         comm.suspend_before_case();
+        if let Some((ssid, psk)) = &self.wifi
+            && comm.set_wifi_credentials(ssid, psk).is_err()
+        {
+            self.finish(Outcome::PairFailed { stage: 0, reason: "Wi-Fi credentials" });
+            self.ble_close = true;
+            return;
+        }
         if comm.commission(BLE, passcode, node, now).is_err() {
             self.finish(Outcome::PairFailed { stage: 0, reason: "start" });
             self.ble_close = true;

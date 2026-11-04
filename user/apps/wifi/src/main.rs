@@ -6,12 +6,17 @@
 //! common/proto/esp_hosted_rpc.proto) and joins the access point given at
 //! build time (build.rs). Tells the kernel the station's MAC address for
 //! `netdev:wlan0`, then stays to log connection events and to reconnect.
+//! Clients of `svc:wifi` (`t5_abi::wifi`, doc/49 §20: Matter's
+//! ConnectNetwork) can ask it to join another access point, until the
+//! service restarts. On joining another network than the last one it
+//! asks `net` to start DHCP over (`LINK_RENEW`), or the old address stays.
 //!
 //! The passphrase is only sent to the chip; it is never logged.
 //!
-//! Built with `--permit wlan:ctl`.
+//! Built with `--permit wlan:ctl --permit listen:wifi --permit svc:net`.
 
-use t5_rt::{Error, Handle, event, rights, sleep_ms, time_ns, wait_raw, wlan};
+use t5_rt::net::link;
+use t5_rt::{Channel, Error, Handle, Listener, Net, chan, event, rights, sleep_ms, time_ns, wait_raw, wifi, wlan};
 
 include!(concat!(env!("OUT_DIR"), "/credentials.rs"));
 
@@ -26,6 +31,7 @@ const REQ_SET_MODE: u32 = 260;
 const REQ_WIFI_INIT: u32 = 278;
 const REQ_WIFI_START: u32 = 280;
 const REQ_WIFI_CONNECT: u32 = 282;
+const REQ_WIFI_DISCONNECT: u32 = 283;
 const REQ_WIFI_SET_CONFIG: u32 = 284;
 const REQ_WIFI_SET_PS: u32 = 270;
 /// Rpc_Req_FeatureControl (esp_hosted 2.12.7, esp_hosted_rpc.proto:55-84,
@@ -57,6 +63,11 @@ const IF_STA: u64 = 0;
 const INIT_MAGIC: u64 = 0x1F2F_3F4F;
 
 const RESPONSE_NS: u64 = 5_000_000_000;
+/// How long a client's JOIN may take to associate.
+const JOIN_NS: u64 = 20_000_000_000;
+/// wifi_err_reason_t WIFI_REASON_ASSOC_LEAVE: the station left (our own
+/// disconnect before a JOIN).
+const REASON_ASSOC_LEAVE: u32 = 8;
 
 // The serial interface's TLVs (virtual_serial_if/serial_if.c:20-62).
 const TLV_EPNAME: u8 = 0x01;
@@ -202,6 +213,15 @@ struct Rpc {
     ctl: Handle,
     uid: u64,
     buf: [u8; wlan::MSG_MAX],
+    /// The access point it is on or tries to join, and whether it is on.
+    ssid: [u8; wifi::SSID_MAX],
+    ssid_len: usize,
+    connected: bool,
+    /// The last disconnection's reason.
+    reason: u32,
+    /// The network last associated with (`net` renews when it changes).
+    last: [u8; wifi::SSID_MAX],
+    last_len: usize,
 }
 
 /// A message from the chip: its type, id and payload (the oneof field
@@ -303,7 +323,8 @@ impl Rpc {
 
     /// Logs an event; returns the connection state it implies, if any.
     fn on_event(&mut self, m: &Msg) -> Option<bool> {
-        let p = self.payload(m);
+        // (The buffer alone, so the other fields can change.)
+        let p = &self.buf[..m.len];
         match m.id {
             EVENT_ESP_INIT => event!(Info, "wifi.chip_init", reset_reason = uint(p, 2) as u32),
             EVENT_HEARTBEAT => {}
@@ -311,7 +332,10 @@ impl Rpc {
             EVENT_STA_CONNECTED => {
                 let c = bytes(p, 2);
                 let ssid = bytes(c, 1);
-                let ssid = &ssid[..(uint(c, 2) as usize).min(ssid.len())];
+                let ssid = &ssid[..(uint(c, 2) as usize).min(ssid.len()).min(wifi::SSID_MAX)];
+                self.ssid[..ssid.len()].copy_from_slice(ssid);
+                self.ssid_len = ssid.len();
+                self.connected = true;
                 event!(
                     Info,
                     "wifi.connected",
@@ -325,7 +349,9 @@ impl Rpc {
             }
             EVENT_STA_DISCONNECTED => {
                 let d = bytes(p, 2);
-                event!(Info, "wifi.disconnected", reason = uint(d, 4) as u32, rssi = int(d, 5));
+                self.connected = false;
+                self.reason = uint(d, 4) as u32;
+                event!(Info, "wifi.disconnected", reason = self.reason, rssi = int(d, 5));
                 return Some(false);
             }
             id => event!(Info, "wifi.other_event", id = id, len = p.len() as u32),
@@ -336,7 +362,10 @@ impl Rpc {
 
 fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     let ctl = Handle::open(wlan::CTL, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).map_err(|_| 1u32)?;
-    let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX] };
+    let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX], ssid: [0; wifi::SSID_MAX], ssid_len: 0, connected: false, reason: 0, last: [0; wifi::SSID_MAX], last_len: usize::MAX };
+    let n = SSID.len().min(wifi::SSID_MAX);
+    rpc.ssid[..n].copy_from_slice(&SSID[..n]);
+    rpc.ssid_len = n;
     // The chip announces itself once the data path is open.
     if let Ok(m) = rpc.recv(3_000_000_000)
         && m.kind == EVENT
@@ -405,20 +434,11 @@ fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
         rpc.call(REQ_WIFI_START, 1, |_| {})?;
         return idle(&mut rpc);
     }
-    rpc.call(REQ_WIFI_SET_CONFIG, 1, |p| {
-        p.uint(1, IF_STA);
-        p.msg(2, |cfg| {
-            cfg.msg(2, |sta| {
-                sta.bytes(1, SSID);
-                sta.bytes(2, PSK);
-                // wifi_scan_threshold.authmode = WIFI_AUTH_WPA2_PSK, as TCC
-                // sets it (wifi_setup.cpp:164).
-                sta.msg(9, |t| t.uint(2, AUTH_WPA2_PSK));
-                // wifi_pmf_config: capable.
-                sta.msg(10, |pmf| pmf.uint(1, 1));
-            })
-        })
-    })?;
+    // The chip outlives this service: it may still be on the network a
+    // client's JOIN chose (doc/49 §20). Leave it, so the built-in one is
+    // joined (an error only means it was not connected).
+    let _ = rpc.call(REQ_WIFI_DISCONNECT, 1, |_| {});
+    set_config(&mut rpc, SSID, PSK)?;
     event!(Info, "wifi.configured", ssid = core::str::from_utf8(SSID).unwrap_or("?"));
     rpc.call(REQ_WIFI_START, 1, |_| {})?;
     // No modem sleep: with it the AP holds frames for the Tab5 until the
@@ -448,6 +468,25 @@ fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     idle(&mut rpc)
 }
 
+/// The station's access point (sent to the chip only).
+fn set_config(rpc: &mut Rpc, ssid: &[u8], psk: &[u8]) -> Result<(), u32> {
+    rpc.call(REQ_WIFI_SET_CONFIG, 1, |p| {
+        p.uint(1, IF_STA);
+        p.msg(2, |cfg| {
+            cfg.msg(2, |sta| {
+                sta.bytes(1, ssid);
+                sta.bytes(2, psk);
+                // wifi_scan_threshold.authmode = WIFI_AUTH_WPA2_PSK, as TCC
+                // sets it (wifi_setup.cpp:164).
+                sta.msg(9, |t| t.uint(2, AUTH_WPA2_PSK));
+                // wifi_pmf_config: capable.
+                sta.msg(10, |pmf| pmf.uint(1, 1));
+            })
+        })
+    })
+    .map(|_| ())
+}
+
 /// Starts the chip's Bluetooth controller: since esp_hosted 2.5.2 the host
 /// asks for it (CHANGELOG, slave_control.c:520-562); then `bt:hci` carries
 /// its packets. A failure is logged and Wi-Fi goes on.
@@ -465,25 +504,145 @@ fn start_bluetooth(rpc: &mut Rpc) {
     event!(Info, "wifi.bt_started");
 }
 
-/// Logs events; after a disconnection, connects again (every 5 s).
+/// Logs events; after a disconnection, connects again (every 5 s). Serves
+/// `svc:wifi`'s client.
 fn idle(rpc: &mut Rpc) -> Result<(), u32> {
+    let listener = Listener::open(wifi::SVC).ok();
+    let mut client: Option<Channel> = None;
     let mut retry_at: Option<u64> = None;
+    // A client's JOIN, until it associates or fails.
+    let mut joining: Option<u64> = None;
     loop {
         let now = time_ns();
-        let timeout = retry_at.map_or(t5_rt::FOREVER, |t| t.saturating_sub(now).max(1));
-        match rpc.recv(timeout) {
-            Ok(m) if m.kind == EVENT => match rpc.on_event(&m) {
-                Some(false) if !SSID.is_empty() => retry_at = Some(time_ns() + 5_000_000_000),
-                Some(true) => retry_at = None,
-                _ => {}
-            },
-            Ok(m) => event!(Warn, "wifi.unexpected", id = m.id, kind = m.kind as u32),
-            Err(Error::TimedOut) => {
-                retry_at = None;
-                event!(Info, "wifi.reconnect");
-                rpc.call(REQ_WIFI_CONNECT, 1, |_| {})?;
-            }
-            Err(_) => return Err(9),
+        let until = match (retry_at, joining) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let timeout = until.map_or(t5_rt::FOREVER, |t| t.saturating_sub(now).max(1));
+        let mut hs = [rpc.ctl.raw(); 3];
+        let mut n = 1;
+        if let Some(l) = &listener {
+            hs[n] = l.0.raw();
+            n += 1;
         }
+        if let Some(c) = &client {
+            hs[n] = c.0.raw();
+            n += 1;
+        }
+        let ev = wait_raw(&hs[..n], timeout);
+        if let Ok(ev) = ev
+            && ev.kind == chan::PEER_CLOSED
+            && client.as_ref().is_some_and(|c| c.0.raw() == hs[ev.index])
+        {
+            client = None;
+        }
+        // The chip's messages.
+        loop {
+            match rpc.recv(0) {
+                Ok(m) if m.kind == EVENT => match rpc.on_event(&m) {
+                    Some(false) => {
+                        if rpc.ssid_len > 0 {
+                            retry_at = Some(time_ns() + 5_000_000_000);
+                        }
+                        // Our own leaving (before a JOIN) is not a failure.
+                        if joining.is_some() && rpc.reason != REASON_ASSOC_LEAVE {
+                            joining = None;
+                            answer(&client, &[wifi::FAILED, rpc.reason as u8, (rpc.reason >> 8) as u8]);
+                        }
+                    }
+                    Some(true) => {
+                        retry_at = None;
+                        renew(rpc);
+                        if joining.take().is_some() {
+                            let mut m = [0u8; 2 + wifi::SSID_MAX];
+                            m[0] = wifi::JOINED;
+                            m[1] = rpc.ssid_len as u8;
+                            m[2..2 + rpc.ssid_len].copy_from_slice(&rpc.ssid[..rpc.ssid_len]);
+                            answer(&client, &m[..2 + rpc.ssid_len]);
+                        }
+                    }
+                    None => {}
+                },
+                Ok(m) => event!(Warn, "wifi.unexpected", id = m.id, kind = m.kind as u32),
+                Err(Error::TimedOut | Error::Busy) => break,
+                Err(_) => return Err(9),
+            }
+        }
+        let now = time_ns();
+        if joining.is_some_and(|t| now >= t) {
+            joining = None;
+            event!(Warn, "wifi.join_timeout");
+            answer(&client, &[wifi::FAILED, 0, 0]);
+        }
+        if retry_at.is_some_and(|t| now >= t) {
+            retry_at = None;
+            event!(Info, "wifi.reconnect");
+            rpc.call(REQ_WIFI_CONNECT, 1, |_| {})?;
+        }
+        // A new client (one at a time), and its requests.
+        if client.is_none()
+            && let Some(c) = listener.as_ref().and_then(|l| l.accept().ok())
+        {
+            client = Some(c);
+        }
+        let mut req = [0u8; 4 + wifi::SSID_MAX + wifi::PSK_MAX];
+        while let Some(Ok(k)) = client.as_ref().map(|c| c.0.read(&mut req)) {
+            match req[0] {
+                wifi::STATUS => {
+                    let mut m = [0u8; 3 + wifi::SSID_MAX];
+                    m[0] = wifi::STATUS;
+                    m[1] = rpc.connected as u8;
+                    m[2] = rpc.ssid_len as u8;
+                    m[3..3 + rpc.ssid_len].copy_from_slice(&rpc.ssid[..rpc.ssid_len]);
+                    answer(&client, &m[..3 + rpc.ssid_len]);
+                }
+                wifi::JOIN => {
+                    let r = &req[..k];
+                    let sl = *r.get(1).unwrap_or(&0) as usize;
+                    let pl = r.get(2 + sl).map_or(usize::MAX, |&p| p as usize);
+                    let (Some(ssid), Some(psk)) = (r.get(2..2 + sl), r.get(3 + sl..3 + sl + pl.min(wifi::PSK_MAX + 1))) else {
+                        answer(&client, &[wifi::FAILED, 0, 0]);
+                        continue;
+                    };
+                    if sl == 0 || sl > wifi::SSID_MAX || psk.len() > wifi::PSK_MAX {
+                        answer(&client, &[wifi::FAILED, 0, 0]);
+                        continue;
+                    }
+                    event!(Info, "wifi.join", ssid = core::str::from_utf8(ssid).unwrap_or("?"));
+                    // Leave, set the new access point, connect.
+                    let _ = rpc.call(REQ_WIFI_DISCONNECT, 1, |_| {});
+                    set_config(rpc, ssid, psk)?;
+                    rpc.ssid[..sl].copy_from_slice(ssid);
+                    rpc.ssid_len = sl;
+                    rpc.connected = false;
+                    retry_at = None;
+                    joining = Some(time_ns() + JOIN_NS);
+                    rpc.call(REQ_WIFI_CONNECT, 1, |_| {})?;
+                }
+                _ => answer(&client, &[wifi::FAILED, 0, 0]),
+            }
+        }
+    }
+}
+
+/// Another network than the last one (or the first this process saw):
+/// `net` starts DHCP over on Wi-Fi. `net` may not be up yet (at boot);
+/// then it asks for an address anyway.
+fn renew(rpc: &mut Rpc) {
+    let ssid = &rpc.ssid[..rpc.ssid_len];
+    if rpc.last_len == ssid.len() && &rpc.last[..rpc.last_len] == ssid {
+        return;
+    }
+    rpc.last[..ssid.len()].copy_from_slice(ssid);
+    rpc.last_len = ssid.len();
+    match Net::connect().and_then(|n| n.link_renew(link::WLAN0)) {
+        Ok(()) => event!(Info, "wifi.renewed"),
+        Err(_) => event!(Debug, "wifi.no_renew"),
+    }
+}
+
+fn answer(client: &Option<Channel>, m: &[u8]) {
+    if let Some(c) = client {
+        let _ = c.0.write(m);
     }
 }

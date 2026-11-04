@@ -13,6 +13,7 @@ use core::ptr::addr_of_mut;
 use mtport::KernelRng;
 
 use crate::store::Store;
+use crate::wifilink::TabWifi;
 use simple_matter::acl::{AclHandle, AclTable};
 use simple_matter::btp::AdvData;
 use simple_matter::btp::gatt::ADV_TOTAL_LEN;
@@ -21,7 +22,7 @@ use simple_matter::discovery::{Commissionable, CommissioningMode, Host, MATTER_P
 use simple_matter::dm::clusters::{
     AccessControlCluster, AdminCommissioningCluster, BasicInfoConfig, BasicInformationCluster, CommissioningWindow,
     DescriptorCluster, GeneralCommissioning, GroupKeyManagementCluster, GroupsCluster, IdentifyCluster,
-    NetworkCommissioning, OnOffCluster, OpCredsCluster, TestDacProvider, WindowEvent,
+    NetworkCommissioningWifi, OnOffCluster, OpCredsCluster, TestDacProvider, WindowEvent,
 };
 use simple_matter::dm::meta::{ClusterId, DeviceType, EndpointId, EndpointMeta, EventId};
 use simple_matter::dm::{DataModel, ServerCluster, tick_clusters};
@@ -73,7 +74,8 @@ pub struct Light {
     access_control: AccessControlCluster<'static, NACL>,
     basic: BasicInformationCluster,
     gc: GeneralCommissioning,
-    net: NetworkCommissioning,
+    /// Wi-Fi (doc/49 §20): a commissioner over BLE gives the network.
+    net: NetworkCommissioningWifi<TabWifi>,
     admin: AdminCommissioningCluster<'static>,
     opcreds: OpCreds,
     gkm: GroupKeyManagementCluster<'static, Backend, NF, 6, 8, 8>,
@@ -253,7 +255,7 @@ impl Device {
             access_control: AccessControlCluster::new(&o.acl),
             basic: BasicInformationCluster::new(&o.basic),
             gc: GeneralCommissioning::default_config(),
-            net: NetworkCommissioning::new(b"wlan0"),
+            net: NetworkCommissioningWifi::with_driver(TabWifi::new()),
             admin: AdminCommissioningCluster::new(&o.window),
             opcreds: OpCredsCluster::new_shared(&o.fabrics, RustCrypto::new(KernelRng), dac),
             gkm: GroupKeyManagementCluster::new_shared(&o.groups, &o.fabrics, RustCrypto::new(KernelRng)),
@@ -387,6 +389,22 @@ impl Device {
         self.mdns.notify_change(now);
     }
 
+    /// The Wi-Fi driver (its join request and state).
+    pub fn wifi(&mut self) -> &mut TabWifi {
+        self.stack.device_mut().net.driver_mut()
+    }
+
+    /// The network the Tab5 is on, as if it had been given by a
+    /// commissioner (commissioners then see it set up).
+    pub fn seed_wifi(&mut self, ssid: &[u8], connected: bool) {
+        let net = &mut self.stack.device_mut().net;
+        if connected {
+            net.driver_mut().status = simple_matter::wifi::WifiStatus::Connected;
+        }
+        net.seed_network(ssid, b"");
+        net.update_from_driver();
+    }
+
     /// The BLE advertisement while the node is commissionable.
     pub fn ble_adv(&self) -> Option<[u8; ADV_TOTAL_LEN]> {
         let (discriminator, _) = self.commissionable?;
@@ -405,6 +423,7 @@ impl Device {
     /// After each datagram and poll (cffi's `housekeep`): On/Off events,
     /// saving what changed, the advertisements, the commissioning window.
     pub fn housekeep(&mut self, now: u64, mut changed: impl FnMut(Change)) {
+        self.stack.device_mut().net.update_from_driver();
         let on = self.on();
         if on != self.last_on {
             self.last_on = on;

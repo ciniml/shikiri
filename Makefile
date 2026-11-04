@@ -17,7 +17,7 @@ PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
 PERMIT_net    := --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
 PERMIT_nettest := --permit svc:net --stack 32768
-PERMIT_wifi   := --permit wlan:ctl --stack 16384
+PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net --stack 16384
 PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
 PERMIT_init   := --permit proc:spawn --permit svc:fs --stack 16384
 PERMIT_keylog := --permit kbd
@@ -28,7 +28,7 @@ PERMIT_blegatt := --permit svc:ble
 PERMIT_bleecho := --permit svc:ble
 PERMIT_mtbench := --permit random --permit svc:fs --stack 32768
 PERMIT_mtreq  := --permit svc:matter
-PERMIT_matter := --permit svc:net --permit svc:fs --permit random --permit listen:matter --permit svc:ble --stack 131072
+PERMIT_matter := --permit svc:net --permit svc:fs --permit random --permit listen:matter --permit svc:ble --permit svc:wifi --stack 131072
 PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:kill --permit svc:matter --stack 32768
@@ -127,7 +127,9 @@ install-auto: apps-auto schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
 	    $(foreach a,$(AUTO_APPS),--cmd "install $(AUTO_DIR)/$(a).t5a") --until-done \
-	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS)) | tee $(BUILD)/install-auto.log
+	@# A refused install (`store full`) left the app's earlier copy: say which.
+	@python3 tools/install-failures.py $(BUILD)/install-auto.log | sed 's/^/install-auto: NOT INSTALLED: /'
 
 # Every app the Tab5's store holds, from the current sources (the store
 # keeps what was installed last; the self-test runs it): the store apps
@@ -140,7 +142,9 @@ install-apps: apps-auto schemas-p4
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
 	    $(foreach a,$(STORE_APPS),--cmd "install $(APPS_DIR)/$(a).t5a") \
 	    $(foreach a,$(AUTO_APPS),--cmd "install $(AUTO_DIR)/$(a).t5a") --until-done \
-	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS))
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS)) | tee $(BUILD)/install-apps.log
+	@# A refused install (`store full`) left the app's earlier copy: say which.
+	@python3 tools/install-failures.py $(BUILD)/install-apps.log | sed 's/^/install-apps: NOT INSTALLED: /'
 
 kernel-virt: apps
 	cd kernel && cargo build --release \

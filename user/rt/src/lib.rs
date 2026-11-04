@@ -9,7 +9,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, ble, bt, chan, display, event, font, fs, kbd, matter, net, netdev, proc, random, rights, sd, shm, spawn, svc, sys, timer, touch, wlan};
+pub use t5_abi::{Error, FOREVER, ble, bt, chan, display, event, font, fs, kbd, matter, net, netdev, proc, random, rights, sd, shm, spawn, svc, sys, timer, touch, wifi, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -687,7 +687,9 @@ pub struct Received {
 impl Net {
     pub fn connect() -> Result<Net, NetError> {
         let chan = Channel::connect(net::SERVICE).map_err(NetError::Ipc)?;
-        let ev = wait(&[&chan.0], FOREVER).map_err(NetError::Ipc)?;
+        // The service grants the slice at once, unless all its client
+        // slots are taken: then this would wait forever.
+        let ev = wait(&[&chan.0], 5_000_000_000).map_err(NetError::Ipc)?;
         if ev.kind != chan::SHM {
             return Err(NetError::Ipc(Error::Off));
         }
@@ -735,6 +737,12 @@ impl Net {
             self.armed.set(true);
         }
         Ok(())
+    }
+
+    /// DHCP starts over on `link` (WLAN0): the Wi-Fi service joined
+    /// another network (doc/49 §20).
+    pub fn link_renew(&self, link: u8) -> Result<(), NetError> {
+        self.call(net::op::LINK_RENEW, 0, 0, link as u32).map(|_| ())
     }
 
     /// The channel to the service, to `wait` on after `udp_arm`.
