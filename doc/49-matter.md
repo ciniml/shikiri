@@ -189,6 +189,7 @@
     - 96c0171（slot が尽きたら、再送前の応答もあきらめる）では、同じ試験が 3/3 成功した。revoke 8 回（2.2 秒）→ open-window を 4 回くり返す試験も、古い smctl と新しい smctl の両方で 4/4 成功した。
   - smctl の表示: 「status Failure (cluster status 4 = WindowNotOpen)」。
   - smctl の BLE の MTU（8c3990d。BlueZ から読む）: att_mtu 242、フラグメント 239 で、ble-handoff は 19.6 秒と 19.9 秒だった（スキャンと接続の約 4.5 秒を含む）。C1 への書き込みは 17、indication は 20。Attestation から CSRRequest まではまだ約 8.6 秒かかる（原因は見ていない）。
+  - その 8.6 秒は、コアの `Commissioner::drive` の問題だった（応答を受けた呼び出しで次の要求を出さず、smctl の BLE のループが BTP の ACK のタイマー、約 2.3 秒まで止まっていた）。simple-matter の 1544fae で直った。その smctl で ble-handoff は 12.2 秒と 11.4 秒、Attestation は約 2 秒（Tab5 はコミット済みの版のまま）。Tab5 のコントローラも同じ `Commissioner` を使う。
   - 依存をこれらに上げれば、デバイスの exchange と再送バッファを 16 にした手当て（§8）は要らなくなる見込み。上げるかどうかは利用者が決める。
 - `ble` のログ: HCI のイベントの頭を 24 バイトから 32 バイトにした（接続の間隔まで見えるように）。
 
