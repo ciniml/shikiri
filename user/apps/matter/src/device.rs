@@ -199,7 +199,7 @@ pub struct Device {
     o: &'static Owned,
     stack: Stack,
     mdns: MdnsResponder<NF>,
-    kvs: FileKvs,
+    kvs: &'static RefCell<FileKvs>,
     id: Identity,
     instance_id: u64,
     ipv4: Option<[u8; 4]>,
@@ -216,7 +216,7 @@ impl Device {
     /// Builds the node in static memory, restores fabrics, ACL, groups and
     /// CASE resumption from `kvs`, and starts advertising (commissionable
     /// until it has a fabric). Only once per process.
-    pub fn init(id: Identity, mut kvs: FileKvs, now: u64) -> Result<&'static mut Device, &'static str> {
+    pub fn init(id: Identity, kvs: &'static RefCell<FileKvs>, now: u64) -> Result<&'static mut Device, &'static str> {
         let basic = BasicInfoConfig {
             vendor_name: "tab5-os",
             vendor_id: id.vendor_id,
@@ -265,10 +265,13 @@ impl Device {
         let _ = stack.post_startup_event(o.basic.software_version, 0);
         stack.device_mut().opcreds.pregenerate_keypair();
 
-        let _ = o.fabrics.borrow_mut().load_from(&mut kvs, &o.crypto, 0);
-        let _ = o.acl.borrow_mut().load_from(&mut kvs);
-        let _ = o.groups.borrow_mut().load_from(&mut kvs);
-        let _ = stack.load_resumptions_from(&mut kvs);
+        {
+            let mut kvs = kvs.borrow_mut();
+            let _ = o.fabrics.borrow_mut().load_from(&mut *kvs, &o.crypto, 0);
+            let _ = o.acl.borrow_mut().load_from(&mut *kvs);
+            let _ = o.groups.borrow_mut().load_from(&mut *kvs);
+            let _ = stack.load_resumptions_from(&mut *kvs);
+        }
         let count = o.fabrics.borrow().len();
         if count > 0 {
             stack.set_pase_enabled(false);
@@ -391,7 +394,9 @@ impl Device {
         let generation = self.o.fabrics.borrow().generation();
         if generation != self.last_fabric_gen {
             self.last_fabric_gen = generation;
-            let saved = self.o.fabrics.borrow().save_to(&mut self.kvs).and(self.o.acl.borrow().save_to(&mut self.kvs));
+            let mut kvs = self.kvs.borrow_mut();
+            let saved = self.o.fabrics.borrow().save_to(&mut *kvs).and(self.o.acl.borrow().save_to(&mut *kvs));
+            drop(kvs);
             if saved.is_err() {
                 event!(Warn, "matter.save_failed", what = "fabrics");
             }
@@ -425,14 +430,14 @@ impl Device {
         let generation = self.o.groups.borrow().generation();
         if generation != self.last_group_gen {
             self.last_group_gen = generation;
-            if self.o.groups.borrow().save_to(&mut self.kvs).is_err() {
+            if self.o.groups.borrow().save_to(&mut *self.kvs.borrow_mut()).is_err() {
                 event!(Warn, "matter.save_failed", what = "groups");
             }
         }
         let generation = self.stack.resumption_generation();
         if generation != self.last_resumption_gen {
             self.last_resumption_gen = generation;
-            if self.stack.save_resumptions_to(&mut self.kvs).is_err() {
+            if self.stack.save_resumptions_to(&mut *self.kvs.borrow_mut()).is_err() {
                 event!(Warn, "matter.save_failed", what = "resumption");
             }
         }

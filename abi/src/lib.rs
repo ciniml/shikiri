@@ -383,6 +383,19 @@ pub mod ble {
     pub const MSG_MAX: usize = 256;
 }
 
+/// The Matter service (doc/49 MT2): a client connects to `svc:matter` and
+/// sends one request as text (`status`, `nodes`, `pair NODE PASSCODE
+/// DISCRIMINATOR`, `on NODE`, `off NODE`, `toggle NODE`, `read NODE EP
+/// CLUSTER ATTR`; numbers decimal or 0x hex); the answer is `LINE`
+/// messages, then `END`. One request at a time.
+pub mod matter {
+    pub const SVC: &str = "matter";
+    /// `[LINE, text…]`: a line of the answer.
+    pub const LINE: u8 = 1;
+    /// `[END, ok]`: the end of the answer.
+    pub const END: u8 = 2;
+}
+
 /// Starting apps (doc/38): `write` of `[arg0: u32 LE][arg1: u32 LE][name]`
 /// asks the kernel to start the store app `name` with those arguments. It
 /// returns once the request is queued (`Busy`: the queue is full); the

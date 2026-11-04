@@ -651,6 +651,7 @@ checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 name = "matter"
 version = "0.1.0"
 dependencies = [
+ "heapless",
  "mtport",
  "simple-matter",
  "t5-rt",
@@ -671,6 +672,13 @@ version = "0.1.0"
 dependencies = [
  "simple-matter",
  "t5-abi",
+ "t5-rt",
+]
+
+[[package]]
+name = "mtreq"
+version = "0.1.0"
+dependencies = [
  "t5-rt",
 ]
 

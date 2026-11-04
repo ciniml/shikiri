@@ -19,7 +19,7 @@
   | MT0 | ワークスペースに入れる。乱数と KVS のアダプタ。実機で暗号の速さを測る | 済み（§2） |
   | MT1a | デバイスの役（On/Off）。試験アプリでループバックのコミッショニング、CASE、再起動後の CASE。t5emu の試験に入れる | まだ |
   | MT1b | `net` にマルチキャストの参加、受けた宛先、送り元の固定。mDNS のレスポンダ。PC の chip-tool か smctl から on-network でコミッショニング | まだ |
-  | MT2 | コントローラの役と、シェルの `mt` コマンド。運用中の NanoC6 をコミッショニング | まだ |
+  | MT2 | コントローラの役と、シェルの `mt` コマンド | 済み（§6。運用中の機器ではなく PC の試験用のデバイスで） |
   | MT3 | Tab5 のデバイスの窓を開ける（OCW）、複数の fabric | まだ |
   | MT4 | BLE のコミッショニング（`ble` の M3/M4 の上） | まだ |
   | MT5 | アプリがエンドポイントを持ち込む仕組みと、GUI | まだ |
@@ -96,7 +96,36 @@
   - cffi の版が SD に保存した fabric を、そのまま戻せた（`fabrics=1`）。smctl から読み、toggle、読みが通った。
   - `smctl pairing unpair 1`（RemoveFabric）で `matter.fabric_removed fabrics=0`。すぐ commissionable の広告に戻り、`pairing onnetwork-long` で 3.8 秒でコミッショニングし直せた（`matter.commissioned fabrics=1`）。On/Off も通った。
 
-## 5. 残り
-- MT1 の t5emu の試験（Wi-Fi がないので、ホストリンクか、ループバックで）。
+## 5. 残り（§4 の時点）
+- MT2 は §6 で済んだ。
+
+## 6. MT2: コントローラの役
+利用者の指示（2026-11-04）:「はい。」（コアを直接使う方針）の後、そのまま MT2 へ。
+
+- **`matter/src/controller.rs`**: コアの `ControllerStack` と `Commissioner` を、cffi のコントローラ（`CtrlShim`、`pump`、`start_operation`）にならって使う。cffi の 3,500 行のうち、次だけにした。
+  - 見つける: `_matterc._udp` を QU（ユニキャストの応答を頼む）で 1 秒ごとに問い合わせ、答えの TXT の discriminator で絞る。10 秒で見つからなければ失敗。IPv4 のアドレスを優先する（リンクローカルの IPv6 はスコープが要るため）。
+  - コミッショニング: `Commissioner`（証明書の確かめは smctl の既定と同じ `VerifyNoPaa`）。
+  - 操作: On/Off の invoke（on、off、toggle）と、属性の読み（スカラ）。生きたセッションがあればそのまま、なければ CASE（resumption の材料があれば Sigma2Resume）を張ってから。タイムアウトしたら、そのセッションを捨てて次は CASE から。
+  - 保存（デバイスと同じ SD の KVS。キーは cffi と同じ）: CA（`cast`）、ノードの一覧（`nods`）、ノードごとの resumption（`rsm` と 16 進のノード ID）。CA は初回に作る（fabric ID は乱数、コントローラのノード ID 0x7AB50001、VID 0xFFF1）。
+  - 1 度に 1 つの要求。コントローラは自分の UDP ポート 5541 を使う（返事はそこへ来て、フィルタの established で通る）。
+- **`svc:matter`**（`t5_abi::matter`、`--permit listen:matter`）: 1 つの接続で 1 つの要求（テキスト）。`status`、`nodes`、`pair NODE PASSCODE DISCRIMINATOR`、`on`/`off`/`toggle NODE`、`read NODE EP CLUSTER ATTR`。答えは `LINE` のテキスト、最後に `END`（成否）。答えたら接続を閉じる（閉じたチャネルは `wait` のイベントでしか分からず、`read` は `Busy` のままなので、待たない）。
+- **シェルの `mt`**: `mt pair 2 20202021 3841` のように、残りの単語を `svc:matter` に送り、答えを表示する（`--permit svc:matter`）。
+- **試験アプリ `mtreq`**（`--permit svc:matter`）: `run mtreq OP NODE`。キーボードで打てない試験のため、数だけで要求を組む（0 status、1 nodes、2 pair（20202021、discriminator 3841）、3 on、4 off、5 toggle、6 OnOff の読み）。
+- **デバイスとコントローラで 1 つの KVS**: `fs` への接続を 2 つにすると、共有メモリの窓が 3 つ要る（2 つまで）。`RefCell<FileKvs>` を静的な領域に置いて両方が借りる。
+- **つまずいたこと**:
+  1. 最初の要求のあと、次のクライアントが受け付けられなかった。去ったクライアントのチャネルを持ち続けていた（上の「答えたら閉じる」）。
+  2. 見つからなかった。`_L<d>` のサブタイプの問い合わせに、simple-matter の例のデバイスは答えなかった（smctl と同じく全体を問い合わせて絞る形にした）。さらに、PC のデバイスがマルチキャストで返す 792 バイトの答えが、Tab5 にほとんど届かなかった（PC で見ると毎回答えている。有線から Wi-Fi への大きなマルチキャストが落ちていると見られる。未確認）。QU にして、ユニキャストで返してもらうと、すぐ見つかった。小さなマルチキャスト（smctl の問い合わせ、デバイスの告知）は届いていた。
+  3. AddNOC に返事がなく、30 秒で失敗した。前の返事（AddTrustedRoot）への ACK を出す前に、23 ms で AddNOC を送っていた（`handle_rx` の中ですぐ次へ進めていた）。cffi は、次へ進めるのを `poll` の中で、トランスポートに保留がない（`transport_deadline()` が空）ときだけにしている。同じにすると通った。PC のデバイスは、ACK の来ていない返事を抱えたまま次の要求を受け、fabric は足したが返事を出さなかった。
+- **実機**（2026-11-04）: PC で simple-matter の `onoff-light` の例（`SM_DISCRIMINATOR=3841`、状態を保存しない）を試験用のデバイスとして動かし、Tab5 から:
+  - `pair 2 20202021 3841`: 見つけてから PASE、証明書の確かめ、CSR、AddTrustedRoot、AddNOC、CASE、CommissioningComplete まで 3.8 秒。
+  - `read 2 1 6 0` → 0、`on 2` → status 0、読み → 1、`toggle 2` → status 0、読み → 0。PC のデバイスは「light is now ON」「OFF」を出した。
+  - `nodes` → 「node 2 at 192.168.2.14:5540 (session)」。
+  - `matter` を動かし直すと「nodes=1 new_ca=false」で起動し、`on 2` は CASE の resumption（`resumed=true`）で通った。
+  - 運用中の機器（NanoC6 など）はコミッショニングしていない（よその fabric に入れることになるため）。
+
+## 7. 残り
+- MT3: Tab5 のデバイスの窓を開ける（OCW）、複数の fabric。
+- MT4: BLE のコミッショニング（`ble` の M3/M4 の上）。
+- 購読（subscribe）、書き込み、任意のコマンド（引数つき）。
+- MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
 - UDP の受信の通知（今は 20 ms ごとに見に行く）。
-- MT2: コントローラの役（`ControllerStack`、`Commissioner`）と、シェルの `mt` コマンド。

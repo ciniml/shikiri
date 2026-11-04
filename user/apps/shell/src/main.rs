@@ -332,6 +332,7 @@ impl Shell {
                  top                   CPU use per process (any key ends)\n\
                  nc HOST PORT          a TCP connection, a line at a time\n\
                                        (Ctrl-C or Ctrl-D ends)\n\
+                 mt REQUEST            ask the Matter service (mt help)\n\
                  exit                  end the shell (term starts a new one)\n",
             ),
             "echo" => {
@@ -396,6 +397,7 @@ impl Shell {
                 Some(h) => ping(o, h),
                 None => o.str("usage: ping HOST\n"),
             },
+            "mt" => mt(o, args),
             "exit" => return true,
             _ => {
                 o.str(cmd);
@@ -403,6 +405,47 @@ impl Shell {
             }
         }
         false
+    }
+}
+
+/// `mt REQUEST`: one request to the Matter service (doc/49 MT2), its
+/// answer printed line by line.
+fn mt(o: &mut Out, args: &[&str]) {
+    let mut req = [0u8; 120];
+    let mut n = 0;
+    for (i, a) in args.iter().enumerate() {
+        let sep = (i > 0) as usize;
+        if n + sep + a.len() > req.len() {
+            break;
+        }
+        if sep == 1 {
+            req[n] = b' ';
+        }
+        req[n + sep..n + sep + a.len()].copy_from_slice(a.as_bytes());
+        n += sep + a.len();
+    }
+    let Ok(c) = Channel::connect(t5_rt::matter::SVC) else {
+        o.str("mt: no Matter service (run matter)\n");
+        return;
+    };
+    if c.send(&req[..n]).is_err() {
+        o.str("mt: failed\n");
+        return;
+    }
+    let mut m = [0u8; 128];
+    loop {
+        match c.recv(&mut m) {
+            Ok(k) if k >= 1 && m[0] == t5_rt::matter::LINE => {
+                o.str(core::str::from_utf8(&m[1..k]).unwrap_or("?"));
+                o.str("\n");
+            }
+            Ok(k) if k >= 1 && m[0] == t5_rt::matter::END => return,
+            Ok(_) => {}
+            Err(_) => {
+                o.str("mt: the service went away\n");
+                return;
+            }
+        }
     }
 }
 
