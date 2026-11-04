@@ -26,7 +26,7 @@ use simple_matter::groups::DefaultGroupStore;
 use simple_matter::im::engine::InteractionModel;
 use simple_matter::im::events::PRIORITY_INFO;
 use simple_matter::sc::SecureChannel;
-use simple_matter::stack::{MultiAdminStack, SendDirective, SharedFabricCreds};
+use simple_matter::stack::{MatterStack, SendDirective, SharedFabricCreds};
 use simple_matter::tlv::TlvTag;
 use simple_matter::transport::net::PeerAddr;
 use t5_rt::event;
@@ -37,9 +37,15 @@ const NACL: usize = 20;
 
 type Backend = RustCrypto<KernelRng>;
 type OpCreds = OpCredsCluster<Backend, TestDacProvider<Backend>, NF, &'static RefCell<FabricTable<Backend, NF>>>;
-/// Several controllers at once (Apple, Google, the user's own), as the
-/// cffi's device.
-type Stack = MultiAdminStack<'static, Backend, KernelRng, Light>;
+/// Several controllers at once (Apple, Google, the user's own): the core's
+/// `MultiAdminStack` (10 sessions, 3 handshakes, 3 reads, 6 subscriptions,
+/// 16 paths) with 16 exchanges and 16 retransmission buffers, not 6 and 3.
+/// A reply that finds no buffer is not sent at all, and a reply nobody
+/// acknowledges holds its buffer through 10 transmissions (about a
+/// minute), even after its session is gone. smctl leaves without
+/// acknowledging a failed command's replies (up to 3), so with 3 buffers
+/// one failure made the next OpenCommissioningWindow time out (doc/49 §8).
+type Stack = MatterStack<'static, Backend, KernelRng, Light, NF, 10, 16, 16, 3, 3, 6, 16>;
 
 static EP0_SERVERS: &[ClusterId] = &[
     ClusterId(0x001F), // Access Control

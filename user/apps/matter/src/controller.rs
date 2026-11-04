@@ -15,7 +15,7 @@ use mtport::{FileKvs, KernelRng};
 use simple_matter::controller::ca::{CA_STATE_MAX_LEN, Ca};
 use simple_matter::controller::nodes as nodes_codec;
 use simple_matter::controller::{
-    AttestationPolicy, CONTROLLER_FABRIC_INDEX, Commissioner, ControllerCreds, ControllerStack, Phase,
+    AttestationPolicy, CONTROLLER_FABRIC_INDEX, Commissioner, ControllerCreds, ControllerStack, OpenWindowParams, Phase,
 };
 use simple_matter::crypto::rustcrypto::RustCrypto;
 use simple_matter::discovery::MATTER_PORT;
@@ -54,6 +54,9 @@ const RESUMPTION_LEN: usize = 1 + CASE_RESUMPTION_ID_LEN + SHARED_SECRET_LEN;
 pub enum Op {
     Invoke { ep: u16, cluster: u32, cmd: u32 },
     Read { ep: u16, cluster: u32, attr: u32 },
+    /// AdministratorCommissioning: open an enhanced window (OCW), revoke it.
+    OpenWindow(OpenWindowParams),
+    Revoke,
 }
 
 /// The end of a request, for the client that asked.
@@ -360,6 +363,9 @@ impl Controller {
                 now,
                 scratch,
             ),
+            // The verifier (PBKDF2, 1000 rounds) takes about 220 ms here (doc/49 §2).
+            Op::OpenWindow(p) => self.stack.start_open_commissioning_window(session, &p, now, scratch),
+            Op::Revoke => self.stack.start_revoke_commissioning(session, now, scratch),
         }
     }
 
@@ -472,7 +478,7 @@ impl Controller {
             Activity::AwaitOp { node, op } => {
                 let Some(ev) = self.stack.im_take_event() else { return };
                 match (op, ev) {
-                    (Op::Invoke { .. }, ImEvent::InvokeDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
+                    (Op::Invoke { .. } | Op::OpenWindow(_) | Op::Revoke, ImEvent::InvokeDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
                     (Op::Read { ep, cluster, attr }, ImEvent::ReadDone) => {
                         let o = self.read_value(ep, cluster, attr).map_or(Outcome::Failed { why: "no value", status: 0 }, |(value, null)| Outcome::Read { value, null });
                         self.finish(o);

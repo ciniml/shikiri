@@ -23,7 +23,10 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use controller::{Controller, Op, Outcome};
 use device::{Change, Device, Identity};
-use mtport::FileKvs;
+use mtport::{FileKvs, KernelRng};
+use simple_matter::controller::{DEFAULT_WINDOW_ITERATIONS, OpenWindowParams};
+use simple_matter::crypto::Rng as _;
+use simple_matter::discovery::onboarding;
 use simple_matter::transport::net::PeerAddr;
 use t5_rt::net::{iface, link};
 use t5_rt::log::FmtBuf;
@@ -191,7 +194,31 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, now: u6
             (Some(node), Some(ep), Some(cl), Some(attr)) => ctrl.start(node, Op::Read { ep: ep as u16, cluster: cl as u32, attr: attr as u32 }, now),
             _ => Err("read NODE EP CLUSTER ATTR"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | on|off|toggle NODE | read NODE EP CLUSTER ATTR"),
+        "ocw" => match num(w.next()) {
+            Some(node) => {
+                let secs = num(w.next()).unwrap_or(300).clamp(180, 900) as u16;
+                match window_params(secs) {
+                    Ok(p) => {
+                        let code = onboarding::manual_pairing_code(p.discriminator, p.passcode);
+                        let _ = write!(
+                            text,
+                            "passcode {} discriminator {} code {} for {secs} s",
+                            p.passcode,
+                            p.discriminator,
+                            core::str::from_utf8(&code).unwrap_or("?")
+                        );
+                        ctrl.start(node, Op::OpenWindow(p), now).inspect(|_| reply(c, text.as_str()))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            None => Err("ocw NODE [SECONDS]"),
+        },
+        "revoke" => match num(w.next()) {
+            Some(node) => ctrl.start(node, Op::Revoke, now),
+            None => Err("revoke NODE"),
+        },
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | on|off|toggle NODE | read NODE EP CLUSTER ATTR | ocw NODE [SECONDS] | revoke NODE"),
     };
     match started {
         Ok(()) => true,
@@ -201,6 +228,20 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, now: u6
             false
         }
     }
+}
+
+/// A fresh passcode, discriminator and salt for a window on another node.
+fn window_params(timeout_s: u16) -> Result<OpenWindowParams, &'static str> {
+    let mut rng = KernelRng;
+    let mut salt = [0u8; 16];
+    rng.fill_bytes(&mut salt).map_err(|_| "random")?;
+    Ok(OpenWindowParams {
+        timeout_s,
+        discriminator: onboarding::random_discriminator(&mut rng).map_err(|_| "random")?,
+        passcode: onboarding::random_passcode(&mut rng).map_err(|_| "random")?,
+        salt,
+        iterations: DEFAULT_WINDOW_ITERATIONS,
+    })
 }
 
 fn outcome(c: &Channel, o: Outcome) {

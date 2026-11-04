@@ -5,7 +5,8 @@
 //! for tests where nobody types the shell's `mt` (doc/49 MT2):
 //! `run mtreq OP NODE`. OP: 0 `status`, 1 `nodes`, 2 `pair NODE 20202021
 //! 3841` (the development passcode; discriminator 3841), 3 `on`, 4 `off`,
-//! 5 `toggle`, 6 `read NODE 1 6 0` (On/Off's OnOff). The answer's lines
+//! 5 `toggle`, 6 `read NODE 1 6 0` (On/Off's OnOff), 7 `ocw NODE` (a
+//! commissioning window on the node, MT3), 8 `revoke NODE`. The answer's lines
 //! are logged. Built with `--permit svc:matter`. Exit 0 if the answer
 //! ended well.
 
@@ -26,6 +27,8 @@ fn main(op: usize, node: usize) -> usize {
         4 => write!(req, "off {node}"),
         5 => write!(req, "toggle {node}"),
         6 => write!(req, "read {node} 1 6 0"),
+        7 => write!(req, "ocw {node}"),
+        8 => write!(req, "revoke {node}"),
         _ => return 1,
     };
     let Ok(c) = Channel::connect(matter::SVC) else {

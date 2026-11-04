@@ -20,7 +20,7 @@
   | MT1a | デバイスの役（On/Off）。試験アプリでループバックのコミッショニング、CASE、再起動後の CASE。t5emu の試験に入れる | まだ |
   | MT1b | `net` にマルチキャストの参加、受けた宛先、送り元の固定。mDNS のレスポンダ。PC の chip-tool か smctl から on-network でコミッショニング | まだ |
   | MT2 | コントローラの役と、シェルの `mt` コマンド | 済み（§6。運用中の機器ではなく PC の試験用のデバイスで） |
-  | MT3 | Tab5 のデバイスの窓を開ける（OCW）、複数の fabric | まだ |
+  | MT3 | Tab5 のデバイスの窓を開ける（OCW）、複数の fabric | 済み（§8） |
   | MT4 | BLE のコミッショニング（`ble` の M3/M4 の上） | まだ |
   | MT5 | アプリがエンドポイントを持ち込む仕組みと、GUI | まだ |
 
@@ -123,9 +123,29 @@
   - `matter` を動かし直すと「nodes=1 new_ca=false」で起動し、`on 2` は CASE の resumption（`resumed=true`）で通った。
   - 運用中の機器（NanoC6 など）はコミッショニングしていない（よその fabric に入れることになるため）。
 
-## 7. 残り
-- MT3: Tab5 のデバイスの窓を開ける（OCW）、複数の fabric。
+## 7. 残り（§6 の時点）
+- MT3 は §8 で済んだ。
+
+## 8. MT3: コミッショニングの窓と複数の fabric
+利用者の指示（2026-11-04）:「順に進めて」。
+
+- **コントローラから窓を開ける**: `controller.rs` の `Op::OpenWindow` と `Op::Revoke`（コアの `start_open_commissioning_window` と `start_revoke_commissioning`。どちらも timed invoke）。`svc:matter` の要求は `ocw NODE [SECONDS]`（既定 300 秒、180〜900 に丸める）と `revoke NODE`。
+  - passcode、discriminator、salt は `KernelRng` で毎回作る（`onboarding::random_passcode` と `random_discriminator`）。答えの最初の行に「passcode … discriminator … code（11 桁の手入力のコード） for … s」を出し、窓が開いたら `status 0x00`。デバイスに渡るのは検証子だけ（PBKDF2 1000 回、Tab5 で約 220 ms）。
+  - シェルは `mt ocw 2`、`mt revoke 2`。`mtreq` は OP 7（ocw）と 8（revoke）。
+- **デバイスの側**は MT1 のときから窓の処理（`AdminCommissioningCluster` と `CommissioningWindow`、開いたら PASE の設定と CM=2 の広告、閉じたら止める）を持っていた。fabric は 5 つまで。ここでは実機で確かめた。
+- **デバイスの再送バッファ**: コアの `MultiAdminStack` は exchange 6、再送バッファ 3。`MatterStack` を直接使い、どちらも 16 にした（`device.rs` の `Stack`）。
+  - 返事を送る再送バッファがないと、コアは返事を出さずに捨てる。
+  - ACK の来ない返事は、10 回送り終えるまで（実機で約 95 秒）バッファを持ち続ける。そのセッションが追い出されても放さない（`close_session` も exchange を閉じない）。
+  - smctl は、コマンドが失敗すると返事に ACK せずに終わる（open-window は前に 2 つの読みをするので、最大 3 つ残る）。再送バッファが 3 つでは、窓のないときの revoke（WindowNotOpen）を 1 度しただけで、次の open-window が TimedRequest に返事をもらえず 30 秒でタイムアウトした（約 95 秒続く）。
+  - 16 でも、8 秒に失敗を 8 回続けると尽きた（32 回のうち 2 回が CASE のタイムアウト）。ACK を返すコントローラなら残らない。直すべきはコア（バッファがないときに古い再送を捨てる、セッションを閉じたらその exchange も閉じる）。
+- **実機**（2026-11-04）:
+  - Tab5 がコントローラ: PC の `onoff-light` の例をノード 2 としてコミッショニングし、`ocw 2` → status 0（PC の例は「enhanced commissioning window open (CM=2, discriminator 1668)」）。smctl（別の状態のディレクトリ、別の fabric）が表示の passcode と discriminator でコミッショニングして 3.0 秒、toggle も通り、PC の例の `CommissionedFabrics` は 2。`revoke 2` → status 0 で窓が閉じた。
+  - Tab5 がデバイス: smctl の fabric（ノード 1）から `admincommissioning open-window 1 300 1234`、別の smctl の fabric がノード 5 としてコミッショニング（3.8 秒）。両方の fabric から On/Off を操作し、`CommissionedFabrics` は 2。`matter` を動かし直しても fabrics=2 のまま。窓を開けると Tab5 は CM=2、discriminator 777 で広告した。開いている窓をもう 1 度開けると Failure（Busy）、閉じた窓の revoke も Failure（WindowNotOpen）。最後に 2 つ目の fabric を unpair し、1 つ目はそのまま使えた。
+- **コアの別の問題**（試験用のデバイスで見えた。記録だけ）: simple-matter のデバイスは、非暗号のセッションの送信カウンタを毎回 1 から始める（仕様は乱数）。コントローラは、同じ相手のアドレスへの古い非暗号のセッションを使い回し、その受信の窓も引き継ぐ。PC の例を起動し直してから、同じ `matter` で 2 度目のコミッショニングをすると、PBKDFParamResponse を重複として捨てて PASE が進まなかった（`matter` を動かし直すと通る）。CASE でも同じことが起きうる（MT3 の試験の途中で、CASE が 1 度 40 秒かけて失敗した）。
+
+## 9. 残り
 - MT4: BLE のコミッショニング（`ble` の M3/M4 の上）。
 - 購読（subscribe）、書き込み、任意のコマンド（引数つき）。
 - MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
 - UDP の受信の通知（今は 20 ms ごとに見に行く）。
+- simple-matter のコアの直し（§8: 再送バッファが尽きたときと、セッションを閉じたときの exchange の扱い、非暗号のカウンタと非暗号のセッションの使い回し）。
