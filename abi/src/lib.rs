@@ -5,6 +5,7 @@
 #![no_std]
 
 pub mod ctl;
+pub mod cfg;
 pub mod fs;
 pub mod log;
 pub mod mem;
@@ -392,7 +393,7 @@ pub mod wifi {
     pub const SVC: &str = "wifi";
     /// Request `[JOIN, ssid_len, ssid…, psk_len, psk…]`: leave the access
     /// point and join this one (the passphrase goes to the chip only; it is
-    /// neither logged nor kept beyond the process). `JOINED` once
+    /// never logged, and kept beyond the process only after `SAVE`). `JOINED` once
     /// associated, or `FAILED` (a disconnection's reason, or 0 for no
     /// answer in 20 s); the service goes on retrying every 5 s as for the
     /// built-in network.
@@ -404,6 +405,16 @@ pub mod wifi {
     pub const JOINED: u8 = 3;
     /// Event `[FAILED, reason: u16 LE]`.
     pub const FAILED: u8 = 4;
+    /// Request `[SAVE]` (doc/50 §5: Matter's CommissioningComplete): keep
+    /// the network of the last JOIN, if it is the one associated, in the
+    /// settings (`wifi.ssid`, the secret `wifi.psk`), and join it from the
+    /// next start. `[SAVED, ok]`.
+    pub const SAVE: u8 = 5;
+    /// Request `[REVERT]` (the fail-safe ended without
+    /// CommissioningComplete): join the network the service started with
+    /// again, if a JOIN left it. `JOINED` or `FAILED` as for a JOIN.
+    pub const REVERT: u8 = 6;
+    pub const SAVED: u8 = 7;
     pub const SSID_MAX: usize = 32;
     pub const PSK_MAX: usize = 64;
 }

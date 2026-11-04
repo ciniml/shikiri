@@ -9,7 +9,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, ble, bt, chan, display, event, font, fs, kbd, matter, net, netdev, proc, random, rights, sd, shm, spawn, svc, sys, timer, touch, wifi, wlan};
+pub use t5_abi::{Error, FOREVER, ble, bt, cfg, chan, display, event, font, fs, kbd, matter, net, netdev, proc, random, rights, sd, shm, spawn, svc, sys, timer, touch, wifi, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -547,6 +547,126 @@ impl Channel {
     /// The shared memory the other end granted (`Error::Busy` if none).
     pub fn take_shm(&self) -> Result<Shm, Error> {
         self.0.ctl(chan::TAKE_SHM, 0).map(|h| Shm(Handle(h as u32)))
+    }
+}
+
+/// A connection to the settings service (doc/50, `t5_abi::cfg`). Needs
+/// `--permit svc:cfg`, or `svc:cfgsec` to read secrets.
+pub struct Config(pub Channel);
+
+/// A failed request: the service's `cfg::err` code, or a channel error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CfgError {
+    Code(u8),
+    Ipc(Error),
+}
+
+/// A value: its flags (`cfg::SECRET`) and length (0 for a secret read over
+/// `svc:cfg`).
+#[derive(Clone, Copy, Debug)]
+pub struct CfgValue {
+    pub flags: u8,
+    pub len: usize,
+}
+
+impl Config {
+    pub fn connect(secret: bool) -> Result<Config, Error> {
+        Channel::connect(if secret { cfg::SVC_SECRET } else { cfg::SVC }).map(Config)
+    }
+
+    /// Like `connect`, trying again for up to `ms` (the service may not be
+    /// up yet at boot).
+    pub fn connect_within(secret: bool, ms: u64) -> Result<Config, Error> {
+        let end = time_ns() + ms * 1_000_000;
+        loop {
+            match Config::connect(secret) {
+                Ok(c) => return Ok(c),
+                Err(e) if time_ns() >= end => return Err(e),
+                Err(_) => sleep_ms(100),
+            }
+        }
+    }
+
+    fn call(&self, req: &[u8], answer: &mut [u8; cfg::MSG_MAX]) -> Result<usize, CfgError> {
+        self.0.send(req).map_err(CfgError::Ipc)?;
+        let n = self.0.recv(answer).map_err(CfgError::Ipc)?;
+        match answer[..n] {
+            [cfg::ERR, code] => Err(CfgError::Code(code)),
+            [] => Err(CfgError::Ipc(Error::Size)),
+            _ => Ok(n),
+        }
+    }
+
+    /// `[op, key_len, key…, tail…]`.
+    fn request<'a>(op: u8, key: &str, tail: &[u8], m: &'a mut [u8; cfg::MSG_MAX]) -> Result<&'a [u8], CfgError> {
+        let (k, n) = (key.len(), 2 + key.len() + tail.len());
+        if k > cfg::KEY_MAX || n > m.len() {
+            return Err(CfgError::Code(cfg::err::TOO_LONG));
+        }
+        m[0] = op;
+        m[1] = k as u8;
+        m[2..2 + k].copy_from_slice(key.as_bytes());
+        m[2 + k..n].copy_from_slice(tail);
+        Ok(&m[..n])
+    }
+
+    /// The value of `key` into `out` (cut to its length), if there is one.
+    pub fn get(&self, key: &str, out: &mut [u8]) -> Result<Option<CfgValue>, CfgError> {
+        let mut m = [0u8; cfg::MSG_MAX];
+        let mut a = [0u8; cfg::MSG_MAX];
+        let n = self.call(Self::request(cfg::GET, key, &[], &mut m)?, &mut a)?;
+        match a[0] {
+            cfg::VALUE if n >= 2 => {
+                let len = (n - 2).min(out.len());
+                out[..len].copy_from_slice(&a[2..2 + len]);
+                Ok(Some(CfgValue { flags: a[1], len }))
+            }
+            cfg::NONE => Ok(None),
+            _ => Err(CfgError::Ipc(Error::Invalid)),
+        }
+    }
+
+    /// Sets `key` (a secret if `secret`; a secret stays one).
+    pub fn set(&self, key: &str, value: &[u8], secret: bool) -> Result<(), CfgError> {
+        let mut a = [0u8; cfg::MSG_MAX];
+        let (k, v) = (key.len(), value.len());
+        if k > cfg::KEY_MAX || v > cfg::VALUE_MAX {
+            return Err(CfgError::Code(cfg::err::TOO_LONG));
+        }
+        // `[SET, flags, key_len, key…, value…]`.
+        let mut m = [0u8; cfg::MSG_MAX];
+        m[0] = cfg::SET;
+        m[1] = if secret { cfg::SECRET } else { 0 };
+        m[2] = k as u8;
+        m[3..3 + k].copy_from_slice(key.as_bytes());
+        m[3 + k..3 + k + v].copy_from_slice(value);
+        self.call(&m[..3 + k + v], &mut a).map(|_| ())
+    }
+
+    /// Deletes `key` (fine if there is none).
+    pub fn remove(&self, key: &str) -> Result<(), CfgError> {
+        let mut m = [0u8; cfg::MSG_MAX];
+        let mut a = [0u8; cfg::MSG_MAX];
+        self.call(Self::request(cfg::DEL, key, &[], &mut m)?, &mut a).map(|_| ())
+    }
+
+    /// Entry `index`: its key length (into `key`) and value (into
+    /// `value`), or `None` past the last.
+    pub fn entry(&self, index: u8, key: &mut [u8; cfg::KEY_MAX], value: &mut [u8]) -> Result<Option<(usize, CfgValue)>, CfgError> {
+        let mut a = [0u8; cfg::MSG_MAX];
+        let n = self.call(&[cfg::LIST, index], &mut a)?;
+        match a[0] {
+            cfg::ENTRY if n >= 3 && n >= 3 + a[2] as usize => {
+                let k = (a[2] as usize).min(cfg::KEY_MAX);
+                key[..k].copy_from_slice(&a[3..3 + k]);
+                let v = &a[3 + a[2] as usize..n];
+                let len = v.len().min(value.len());
+                value[..len].copy_from_slice(&v[..len]);
+                Ok(Some((k, CfgValue { flags: a[1], len })))
+            }
+            cfg::END => Ok(None),
+            _ => Err(CfgError::Ipc(Error::Invalid)),
+        }
     }
 }
 

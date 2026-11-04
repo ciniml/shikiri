@@ -525,6 +525,13 @@ fn run(test: bool) -> Result<(), u32> {
         ble.advertise(if test { None } else { dev.ble_adv() }, now_ms());
         // Wi-Fi: a commissioner's ConnectNetwork, `wifi`'s answers.
         if !test {
+            // A commissioner's network is kept once commissioning is
+            // complete, left if the fail-safe ends first (doc/50 §5).
+            match dev.take_commissioning() {
+                Some(true) => wifi.save(),
+                Some(false) => wifi.revert(),
+                None => {}
+            }
             busy |= wifi.pump(dev, now_ms());
             // After a join the old address goes at once (DHCP has started
             // over); the new one comes within `ADDRS_MS`.

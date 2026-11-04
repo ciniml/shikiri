@@ -2,8 +2,10 @@
 //! cluster's driver (`TabWifi`) keeps a commissioner's ConnectNetwork for
 //! the main loop, which asks `svc:wifi` (`WifiLink`) to join and feeds the
 //! answer back. At start the network the Tab5 is on is seeded into the
-//! cluster, so commissioners see it as set up. The passphrase is passed on,
-//! never logged.
+//! cluster, so commissioners see it as set up. Once commissioning is
+//! complete `wifi` keeps the network in the settings; if the fail-safe ends
+//! first it goes back (doc/50 §5). The passphrase is passed on, never
+//! logged.
 
 use heapless::Vec;
 use simple_matter::wifi::{WifiDriver, WifiStatus};
@@ -48,11 +50,31 @@ pub struct WifiLink {
     retry_at: u64,
     /// A join has just ended: the addresses are read again.
     joined: bool,
+    /// A join was asked for and is neither saved nor left yet.
+    unsaved: bool,
 }
 
 impl WifiLink {
     pub const fn new() -> WifiLink {
-        WifiLink { chan: None, retry_at: 0, joined: false }
+        WifiLink { chan: None, retry_at: 0, joined: false, unsaved: false }
+    }
+
+    /// Commissioning is complete: `wifi` keeps the network it joined.
+    pub fn save(&mut self) {
+        self.after_join(wifi::SAVE);
+    }
+
+    /// The fail-safe ended first: `wifi` goes back to its network.
+    pub fn revert(&mut self) {
+        self.after_join(wifi::REVERT);
+    }
+
+    fn after_join(&mut self, req: u8) {
+        if core::mem::take(&mut self.unsaved)
+            && let Some(c) = &self.chan
+        {
+            let _ = c.send(&[req]);
+        }
     }
 
     /// True once after a join: the caller reads the addresses again.
@@ -97,10 +119,9 @@ impl WifiLink {
             m[2 + ssid.len()] = psk.len() as u8;
             m[3 + ssid.len()..3 + ssid.len() + psk.len()].copy_from_slice(&psk);
             event!(Info, "matter.wifi_join", ssid = core::str::from_utf8(&ssid).unwrap_or("?"));
-            if let Some(c) = &self.chan
-                && c.send(&m[..3 + ssid.len() + psk.len()]).is_err()
-            {
-                dev.wifi().status = WifiStatus::Failed { reason: 0 };
+            match &self.chan {
+                Some(c) if c.send(&m[..3 + ssid.len() + psk.len()]).is_ok() => self.unsaved = true,
+                _ => dev.wifi().status = WifiStatus::Failed { reason: 0 },
             }
             any = true;
         }
@@ -129,6 +150,7 @@ impl WifiLink {
                     // (`wifi` has asked `net` for a new address.)
                     self.joined = true;
                 }
+                wifi::SAVED if n >= 2 => event!(Info, "matter.wifi_saved", ok = m[1] != 0),
                 wifi::FAILED if n >= 3 => {
                     let reason = u16::from_le_bytes([m[1], m[2]]) as i32;
                     event!(Warn, "matter.wifi_failed", reason = reason);

@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq cfg cfgctl
 # Permissions TLV per app (doc/14 §4): the objects it may open.
 PERMIT_timers := --permit timer
 PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --permit shm --permit listen:shmt --permit svc:shmt
@@ -17,7 +17,7 @@ PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
 PERMIT_net    := --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
 PERMIT_nettest := --permit svc:net --stack 32768
-PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net --stack 16384
+PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net --permit svc:cfgsec --stack 16384
 PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
 PERMIT_init   := --permit proc:spawn --permit svc:fs --stack 16384
 PERMIT_keylog := --permit kbd
@@ -28,10 +28,12 @@ PERMIT_blegatt := --permit svc:ble
 PERMIT_bleecho := --permit svc:ble
 PERMIT_mtbench := --permit random --permit svc:fs --stack 32768
 PERMIT_mtreq  := --permit svc:matter
+PERMIT_cfg    := --permit listen:cfg --permit listen:cfgsec --permit svc:fs --stack 16384
+PERMIT_cfgctl := --permit svc:cfg
 PERMIT_matter := --permit svc:net --permit svc:fs --permit random --permit listen:matter --permit svc:ble --permit svc:wifi --stack 131072
 PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --permit svc:font --stack 16384
-PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:kill --permit svc:matter --stack 32768
+PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:kill --permit svc:matter --permit svc:cfg --stack 32768
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin font
@@ -127,7 +129,7 @@ install-auto: apps-auto schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
 	    $(foreach a,$(AUTO_APPS),--cmd "install $(AUTO_DIR)/$(a).t5a") --until-done \
-	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS)) | tee $(BUILD)/install-auto.log
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS)) 2>&1 | tee $(BUILD)/install-auto.log
 	@# A refused install (`store full`) left the app's earlier copy: say which.
 	@python3 tools/install-failures.py $(BUILD)/install-auto.log | sed 's/^/install-auto: NOT INSTALLED: /'
 
@@ -142,7 +144,7 @@ install-apps: apps-auto schemas-p4
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
 	    $(foreach a,$(STORE_APPS),--cmd "install $(APPS_DIR)/$(a).t5a") \
 	    $(foreach a,$(AUTO_APPS),--cmd "install $(AUTO_DIR)/$(a).t5a") --until-done \
-	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS)) | tee $(BUILD)/install-apps.log
+	    --elf $(BUILD)/t5-kernel-esp32p4v1.elf $(addprefix --elf ,$(APP_ELFS)) 2>&1 | tee $(BUILD)/install-apps.log
 	@# A refused install (`store full`) left the app's earlier copy: say which.
 	@python3 tools/install-failures.py $(BUILD)/install-apps.log | sed 's/^/install-apps: NOT INSTALLED: /'
 
@@ -307,6 +309,12 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "run init 2" \
 	    --expect-event proc.spawned --expect-event hello.greet --expect-event proc.spawn_failed \
 	    --expect-event init.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# The settings (doc/50): cfg in memory (t5emu has no SD card) and
+	@# cfgctl's self-test (values, a secret not given back, limits, list).
+	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run cfg 1" --ctl "wait-ms 300" --ctl "run cfgctl 0" --ctl "wait-ms 2000" --ctl "run cfgctl 1" \
+	    --expect-event cfg.ready --expect-event cfgctl.ok --expect-event cfgctl.entry \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# The keyboard (doc/39): keys typed on the emulated keyboard on ExtPort1
 	@# reach keylog (5 keys: press and release each, "aB\n" has Shift).

@@ -340,4 +340,4 @@
 - 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。
 - t5emu の試験は、デバイスとコントローラが同じプロセスで同じコア。別の実装（chip-tool など）との相互接続は実機でしか見ていない（PC の smctl と例）。
 - `UDP_WAIT` は、まだ `matter` しか使っていない。
-- §20 の残すこと（`JOIN` した網の保存、IPv6 のアドレス、fail-safe の間の fabric）。
+- §20 の残すこと（IPv6 のアドレス、fail-safe の間の fabric）。`JOIN` した網の保存は doc/50（設定のサービス `cfg`。CommissioningComplete で保存、fail-safe が先に終われば戻る）。

@@ -86,6 +86,10 @@ pub struct Light {
     desc1: DescriptorCluster,
     groups: &'static RefCell<DefaultGroupStore>,
     removed_fabric: Option<NonZeroU8>,
+    /// CommissioningComplete, or the fail-safe ended without it (doc/50
+    /// §5: `wifi` then keeps or leaves a commissioner's network). An end
+    /// after a CommissioningComplete not yet taken does not undo it.
+    commissioning: Option<bool>,
 }
 
 impl DataModel for Light {
@@ -134,10 +138,11 @@ impl DataModel for Light {
     }
 
     fn on_tick(&mut self, now_ms: u64) -> Option<u64> {
-        if self.gc.on_tick(now_ms)
-            && let Some(idx) = self.opcreds.on_failsafe_expired()
-        {
-            self.removed_fabric = Some(idx);
+        if self.gc.on_tick(now_ms) {
+            self.commissioning.get_or_insert(false);
+            if let Some(idx) = self.opcreds.on_failsafe_expired() {
+                self.removed_fabric = Some(idx);
+            }
         }
         let _ = self.admin.on_tick(now_ms);
         let next = tick_clusters(self, now_ms);
@@ -153,11 +158,13 @@ impl DataModel for Light {
 
     fn on_failsafe_cleanup(&mut self) -> Option<NonZeroU8> {
         self.gc.disarm();
+        self.commissioning.get_or_insert(false);
         self.opcreds.on_failsafe_expired()
     }
 
     fn on_commissioning_complete(&mut self) {
         self.opcreds.on_commissioning_complete();
+        self.commissioning = Some(true);
     }
 
     fn take_removed_fabric(&mut self) -> Option<NonZeroU8> {
@@ -266,6 +273,7 @@ impl Device {
             desc1: DescriptorCluster::new(EndpointId(1), EP1_DT, EP1_SERVERS, &[], &[]),
             groups: &o.groups,
             removed_fabric: None,
+            commissioning: None,
         };
         // The development passcode's verifier (20202021), precomputed.
         let pase = simple_matter::dev_pase::dev_pase_config();
@@ -392,6 +400,12 @@ impl Device {
     /// The Wi-Fi driver (its join request and state).
     pub fn wifi(&mut self) -> &mut TabWifi {
         self.stack.device_mut().net.driver_mut()
+    }
+
+    /// Once: `Some(true)` after CommissioningComplete, `Some(false)` after
+    /// the fail-safe ended without it.
+    pub fn take_commissioning(&mut self) -> Option<bool> {
+        self.stack.device_mut().commissioning.take()
     }
 
     /// The network the Tab5 is on, as if it had been given by a

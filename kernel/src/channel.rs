@@ -11,6 +11,11 @@
 use t5_abi::{Error, chan, event, svc};
 
 const MAX_CHANNELS: usize = 32;
+/// Services (`listen:`): 8 were all in use on the Tab5 once `cfg` came
+/// (doc/50). QEMU runs fewer services, and has less RAM.
+#[cfg(not(feature = "platform-virt"))]
+const MAX_LISTENERS: usize = 16;
+#[cfg(feature = "platform-virt")]
 const MAX_LISTENERS: usize = 8;
 const MAX_NAME: usize = t5_abi::t5a::MAX_NAME;
 

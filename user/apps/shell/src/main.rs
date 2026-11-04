@@ -9,7 +9,7 @@
 //! proc:spawn --permit proc:list --permit proc:apps --permit proc:kill`.
 //! Exits 0 on `exit`, or 1 if there is no terminal.
 
-use t5_rt::{Channel, Error, Files, Handle, Net, chan, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
+use t5_rt::{CfgError, Channel, Config, Error, Files, Handle, Net, chan, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
 
 t5_rt::entry!(main);
 
@@ -333,6 +333,11 @@ impl Shell {
                  nc HOST PORT          a TCP connection, a line at a time\n\
                                        (Ctrl-C or Ctrl-D ends)\n\
                  mt REQUEST            ask the Matter service (mt help)\n\
+                 cfg [list]            the settings (secrets hidden)\n\
+                 cfg get KEY           one setting\n\
+                 cfg set KEY [VALUE]   change a setting (words joined by a space)\n\
+                 cfg secret KEY VALUE  a setting only wifi may read back\n\
+                 cfg rm KEY            delete a setting\n\
                  exit                  end the shell (term starts a new one)\n",
             ),
             "echo" => {
@@ -398,6 +403,7 @@ impl Shell {
                 None => o.str("usage: ping HOST\n"),
             },
             "mt" => mt(o, args),
+            "cfg" => cfg(o, args),
             "exit" => return true,
             _ => {
                 o.str(cmd);
@@ -405,6 +411,88 @@ impl Shell {
             }
         }
         false
+    }
+}
+
+/// `cfg ...`: the settings service (doc/50).
+fn cfg(o: &mut Out, args: &[&str]) {
+    let Ok(c) = Config::connect(false) else {
+        o.str("cfg: no settings service (run cfg)\n");
+        return;
+    };
+    // The value: the words after the key, joined by a space.
+    let mut value = [0u8; t5_rt::cfg::VALUE_MAX];
+    let mut n = 0;
+    for (i, w) in args.iter().skip(2).enumerate() {
+        let sep = (i > 0) as usize;
+        if n + sep + w.len() > value.len() {
+            o.str("cfg: the value is too long\n");
+            return;
+        }
+        value[n] = b' ';
+        value[n + sep..n + sep + w.len()].copy_from_slice(w.as_bytes());
+        n += sep + w.len();
+    }
+    let mut v = [0u8; t5_rt::cfg::VALUE_MAX];
+    let r = match (args.first().copied().unwrap_or("list"), args.get(1).copied()) {
+        ("list", _) => {
+            let mut key = [0u8; t5_rt::cfg::KEY_MAX];
+            let mut r = Ok(());
+            for i in 0..=u8::MAX {
+                match c.entry(i, &mut key, &mut v) {
+                    Ok(Some((k, g))) => {
+                        o.str(core::str::from_utf8(&key[..k]).unwrap_or("?"));
+                        show(o, g, &v);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        r = Err(e);
+                        break;
+                    }
+                }
+            }
+            r
+        }
+        ("get", Some(k)) => match c.get(k, &mut v) {
+            Ok(Some(g)) => {
+                o.str(k);
+                show(o, g, &v);
+                Ok(())
+            }
+            Ok(None) => {
+                o.str("cfg: no such setting\n");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
+        ("set", Some(k)) => c.set(k, &value[..n], false),
+        ("secret", Some(k)) if n > 0 => c.set(k, &value[..n], true),
+        ("rm", Some(k)) => c.remove(k),
+        _ => {
+            o.str("usage: cfg [list] | get KEY | set KEY [VALUE] | secret KEY VALUE | rm KEY\n");
+            Ok(())
+        }
+    };
+    if let Err(e) = r {
+        use t5_rt::cfg::err;
+        o.str(match e {
+            CfgError::Code(err::BAD) => "cfg: a key is a-z 0-9 . _ - only\n",
+            CfgError::Code(err::TOO_LONG) => "cfg: too long\n",
+            CfgError::Code(err::FULL) => "cfg: no room left\n",
+            CfgError::Code(err::NOT_SAVED) => "cfg: changed, but not saved to the SD card\n",
+            _ => "cfg: the service failed\n",
+        });
+    }
+}
+
+/// ` = VALUE`, or ` (secret)`.
+fn show(o: &mut Out, g: t5_rt::CfgValue, v: &[u8]) {
+    if g.flags & t5_rt::cfg::SECRET != 0 {
+        o.str(" (secret)\n");
+    } else {
+        o.str(" = ");
+        o.str(core::str::from_utf8(&v[..g.len]).unwrap_or("?"));
+        o.str("\n");
     }
 }
 
