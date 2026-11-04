@@ -78,12 +78,13 @@
   - smctl の出力と RTT のログに passphrase は 0 回。
 - 戻し: 試験の fabric（ノード 7）を unpair、`cfgctl 2`、`wifi 1` を起動し直して `from=built-in` で `iotap`。fabric 1 の toggle 0.45 秒。
 - 気づいたこと:
-  - 再起動の後、`netctl` は `T5OS/NET.RUL` の規則 4 つを入れる。今の守りの組（`netctl 2`）は 6 つ（Matter の UDP 5540 と 5353 が増えた）。再起動のたびに `netctl 2` が要る。`run netctl 7` で `NET.RUL` を書き直せば要らなくなる（まだしていない）。
+  - 再起動の後、`netctl` は `T5OS/NET.RUL` の規則 4 つを入れる。今の守りの組（`netctl 2`）は 6 つ（Matter の UDP 5540 と 5353 が増えた）。再起動のたびに `netctl 2` が要っていた。利用者の承認を得て `run netctl 7` で `NET.RUL` を書き直した（doc/51）。
   - `ble` を `wifi 1` が BT を起動する前に起動すると、`ble` は CPU を使い切り、広告しない（前からの問題。BT が起動してから `ble` を起動し直せば直る）。
   - `wifi` を起動し直すと `wifi.bt_failed step=init`（esp_err 259）。前の `wifi` が起動した BT がチップに残っているためで、BLE は動く。
   - `make install-apps` のログに t5log の stderr（要求の番号）が入らず、入らなかったアプリの名前が `?` になっていた。stderr も `tee` に通した。
 
 ## 7. 残り
+- 置き場所（P4 のフラッシュ）、暗号化、C6 に残る網は doc/51 で検討した。
 - `REVERT`（fail-safe が CommissioningComplete の前に終わったとき）は、実機でも t5emu でも、まだ通していない。
 - フラッシュ（`nvs` の区画）への保存。カーネルの新しいオブジェクトと、新しい区画への書き込みの判断が要る。
 - 秘密の値は SD の中で平文。暗号化するなら鍵の置き場所（eFuse、フラッシュの暗号化）から決める。
