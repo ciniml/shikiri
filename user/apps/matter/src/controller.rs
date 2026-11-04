@@ -5,8 +5,9 @@
 //! commission it on the network, then commands and attribute reads over
 //! CASE (resumed when it can). Or commission it over BLE (MT4, `blelink`
 //! finds it and carries the messages): PASE to AddNOC over BLE, then the
-//! node's operational address from mDNS and CASE over the network. One
-//! request at a time. The CA, the node list and each node's CASE
+//! node's operational address from mDNS and CASE over the network.
+//! Commands take arguments (context tags 0, 1, …), attributes can be
+//! written, and subscriptions report into the log. One request at a time. The CA, the node list and each node's CASE
 //! resumption are kept in the store.
 
 use core::cell::RefCell;
@@ -30,7 +31,7 @@ use simple_matter::kvs::Kvs;
 use simple_matter::sc::case::common::{CASE_RESUMPTION_ID_LEN, SHARED_SECRET_LEN};
 use simple_matter::sc::initiator::{ScEvent, ScInitiator};
 use simple_matter::stack::{MAX_PACKET_SIZE, SendDirective};
-use simple_matter::tlv::TlvValue;
+use simple_matter::tlv::{TlvTag, TlvValue, TlvWriter};
 use simple_matter::transport::net::{BtpConnId, PeerAddr};
 use simple_matter::transport::session::SessionId;
 use t5_rt::event;
@@ -56,10 +57,53 @@ const BLE: PeerAddr = PeerAddr::Ble(BtpConnId(0));
 const RESUMPTION_VERSION: u8 = 1;
 const RESUMPTION_LEN: usize = 1 + CASE_RESUMPTION_ID_LEN + SHARED_SECRET_LEN;
 
+/// A value for an argument or an attribute.
+#[derive(Clone, Copy, Debug)]
+pub enum Val {
+    U(u64),
+    I(i64),
+    B(bool),
+    Null,
+}
+
+impl Val {
+    /// `true`, `false`, `null`, `-N`, or a number (decimal or 0x hex).
+    pub fn parse(s: &str) -> Option<Val> {
+        Some(match s {
+            "true" => Val::B(true),
+            "false" => Val::B(false),
+            "null" => Val::Null,
+            _ => match s.strip_prefix('-') {
+                Some(n) => Val::I(-(n.parse::<i64>().ok()?)),
+                None => Val::U(match s.strip_prefix("0x") {
+                    Some(h) => u64::from_str_radix(h, 16).ok()?,
+                    None => s.parse().ok()?,
+                }),
+            },
+        })
+    }
+
+    fn write(self, w: &mut TlvWriter<'_>, t: &TlvTag) -> simple_matter::error::Result<()> {
+        match self {
+            Val::U(u) => w.write_u64(t, u),
+            Val::I(i) => w.write_i64(t, i),
+            Val::B(b) => w.write_bool(t, b),
+            Val::Null => w.write_null(t),
+        }
+    }
+}
+
+/// A command's arguments, at most.
+pub const ARGS: usize = 6;
+
 #[derive(Clone, Copy)]
 pub enum Op {
-    Invoke { ep: u16, cluster: u32, cmd: u32 },
+    Invoke { ep: u16, cluster: u32, cmd: u32, args: [Val; ARGS], n: usize },
     Read { ep: u16, cluster: u32, attr: u32 },
+    Write { ep: u16, cluster: u32, attr: u32, val: Val },
+    /// Reports go to the log (`matter.report`) until the subscription is
+    /// lost or the process ends.
+    Subscribe { ep: u16, cluster: u32, attr: u32, min_s: u16, max_s: u16 },
     /// AdministratorCommissioning: open an enhanced window (OCW), revoke it.
     OpenWindow(OpenWindowParams),
     Revoke,
@@ -72,6 +116,7 @@ pub enum Outcome {
     NotFound,
     Invoked { status: u8 },
     Read { value: u64, null: bool },
+    Subscribed { id: u32, max_s: u16 },
     Failed { why: &'static str, status: u8 },
 }
 
@@ -438,19 +483,37 @@ impl Controller {
 
     fn issue(&mut self, session: SessionId, op: Op, now: u64, scratch: &mut [u8]) -> simple_matter::error::Result<SendDirective> {
         match op {
-            Op::Invoke { ep, cluster, cmd } => {
+            Op::Invoke { ep, cluster, cmd, args, n } => {
                 let path = CommandPath::new(EndpointId(ep), ClusterId(cluster), CommandId(cmd));
                 self.stack.start_invoke(
                     session,
                     path,
                     |w, t| {
                         w.start_struct(t)?;
+                        for (i, a) in args[..n].iter().enumerate() {
+                            a.write(w, &TlvTag::ContextSpecific(i as u8))?;
+                        }
                         w.end_container()
                     },
                     now,
                     scratch,
                 )
             }
+            Op::Write { ep, cluster, attr, val } => self.stack.start_write(
+                session,
+                &AttributePath::concrete(EndpointId(ep), ClusterId(cluster), AttributeId(attr)),
+                |w, t| val.write(w, t),
+                now,
+                scratch,
+            ),
+            Op::Subscribe { ep, cluster, attr, min_s, max_s } => self.stack.start_subscribe(
+                session,
+                &[AttributePath::concrete(EndpointId(ep), ClusterId(cluster), AttributeId(attr))],
+                min_s,
+                max_s,
+                now,
+                scratch,
+            ),
             Op::Read { ep, cluster, attr } => self.stack.start_read(
                 session,
                 &[AttributePath::concrete(EndpointId(ep), ClusterId(cluster), AttributeId(attr))],
@@ -541,12 +604,45 @@ impl Controller {
     }
 
     /// Advances the current request as far as it goes now.
+    /// A subscription's report or loss (logged); other events stay.
+    fn subscription_event(&mut self, ev: ImEvent) -> bool {
+        match ev {
+            ImEvent::SubscriptionReport { session, subscription_id } => {
+                let node = self.nodes.iter().find(|n| n.session == Some(session)).map_or(0, |n| n.id);
+                for report in self.stack.sub_reports() {
+                    let Ok(AttributeReportRef::Data(d)) = report else { continue };
+                    let Some(c) = d.path.to_concrete() else { continue };
+                    let (value, null) = first_value(d.value()).unwrap_or((0, false));
+                    event!(
+                        Info,
+                        "matter.report",
+                        node = node,
+                        id = subscription_id,
+                        ep = c.endpoint.0 as u32,
+                        cluster = c.cluster.0,
+                        attr = c.attribute.0,
+                        value = value,
+                        null = null
+                    );
+                }
+                true
+            }
+            ImEvent::SubscriptionLost { subscription_id, .. } => {
+                event!(Warn, "matter.subscription_lost", id = subscription_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn pump(&mut self, now: u64) {
         match self.activity {
             Activity::Idle => {
-                // Nothing asked for: drop stray events.
+                // Nothing asked for: reports; drop stray events.
                 let _ = self.stack.sc_take_event();
-                let _ = self.stack.im_take_event();
+                if let Some(ev) = self.stack.im_take_event() {
+                    self.subscription_event(ev);
+                }
             }
             Activity::Discover { node, passcode, discriminator, until, next_query } => {
                 if now >= until {
@@ -607,8 +703,15 @@ impl Controller {
             },
             Activity::AwaitOp { node, op } => {
                 let Some(ev) = self.stack.im_take_event() else { return };
+                if self.subscription_event(ev) {
+                    return;
+                }
                 match (op, ev) {
                     (Op::Invoke { .. } | Op::OpenWindow(_) | Op::Revoke, ImEvent::InvokeDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
+                    (Op::Write { .. }, ImEvent::WriteDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
+                    (Op::Subscribe { .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
+                        self.finish(Outcome::Subscribed { id: subscription_id, max_s: max_interval_s })
+                    }
                     (Op::Read { ep, cluster, attr }, ImEvent::ReadDone) => {
                         let o = self.read_value(ep, cluster, attr).map_or(Outcome::Failed { why: "no value", status: 0 }, |(value, null)| Outcome::Read { value, null });
                         self.finish(o);
@@ -689,17 +792,20 @@ impl Controller {
             if c.endpoint.0 != ep || c.cluster.0 != cluster || c.attribute.0 != attr {
                 continue;
             }
-            let mut v = d.value();
-            if let Ok(Some(e)) = v.read_next() {
-                return Some(match e.value {
-                    TlvValue::Boolean(b) => (b as u64, false),
-                    TlvValue::UnsignedInteger(u) => (u, false),
-                    TlvValue::SignedInteger(i) => (i as u64, false),
-                    TlvValue::Null => (0, true),
-                    _ => (0, false),
-                });
-            }
+            return first_value(d.value());
         }
         None
     }
+}
+
+/// An attribute's value as a number (booleans 0 or 1), or null.
+fn first_value(mut v: simple_matter::tlv::TlvReader<'_>) -> Option<(u64, bool)> {
+    let e = v.read_next().ok()??;
+    Some(match e.value {
+        TlvValue::Boolean(b) => (b as u64, false),
+        TlvValue::UnsignedInteger(u) => (u, false),
+        TlvValue::SignedInteger(i) => (i as u64, false),
+        TlvValue::Null => (0, true),
+        _ => (0, false),
+    })
 }

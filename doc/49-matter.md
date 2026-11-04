@@ -225,8 +225,33 @@
   - 続けて（同じ `matter` で）Tab5 をデバイスとして smctl から ble-handoff: 13.3 秒、toggle も通った。上の BTP の役の問題はここで見つけて直した。
   - 試験の後、試験用のノード（2、7〜11、13）は `forget` で消した（nodes=0）。
 
-## 13. 残り
+## 13. 残り（§12 の時点）
 - 購読（subscribe）、書き込み、任意のコマンド（引数つき）。
 - MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
 - UDP の受信の通知（今は 20 ms ごとに見に行く）。
 - BLE: Wi-Fi の資格情報を BLE で渡すコミッショニング（`AddOrUpdateWiFiNetwork` と `ConnectNetwork`）。Tab5 はどちらの側も、相手がもうネットワークにいる前提。
+
+## 14. 引数つきのコマンド、書き込み、購読（コントローラ）
+利用者の指示（2026-11-04）:「すすめて」。
+
+- **要求**（`svc:matter`、シェルの `mt`）:
+  - `invoke NODE EP CLUSTER CMD [ARG...]`: 引数は順に context タグ 0, 1, … のフィールドになる（6 つまで）。値は数（10 進か 0x の 16 進）、`-N`、`true`、`false`、`null`。整数は最小幅で書く。`on`、`off`、`toggle` は引数のない `invoke`。
+  - `write NODE EP CLUSTER ATTR VALUE`: 値の書き方は同じ。答えは WriteResponse の状態（`status 0x..`）。
+  - `sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]]`（既定 0 と 60 秒）: 答えは「subscribed: id …」。届いたレポートは `matter.report`（ノード、購読 ID、パス、値）としてログに出す。クライアントが閉じた後も、購読が切れるか `matter` が終わるまで続く。切れたら（最大の間隔と 30 秒の猶予を過ぎたら）`matter.subscription_lost`。
+  - 使い方の表示は、要求ごとに 1 行にした（1 行 127 バイトに収まらなくなった）。
+- **作り**（`controller.rs`）: `Val`（値）と `Op::Write`、`Op::Subscribe`、`Op::Invoke` の引数。コアの `start_write`、`start_subscribe`、`start_invoke`（引数はクロージャで書く）。
+  - コアの IM のイベントは 1 つしか持たない。そのため購読のレポートと喪失は、どの状態でも先に取り出してログに出し、要求の答えと混ぜない。値の読み方は `read` と同じ（真偽は 0 か 1、整数、null）。
+- **`mtreq`**: OP 11 `write NODE 1 3 0 10`（Identify の IdentifyTime）、12 `invoke NODE 1 3 0 5`（Identify、5 秒）、13 `sub NODE 1 6 0 1 10`（OnOff、1〜10 秒）。
+- **実機**（2026-11-04、PC の `onoff-light` の例、1544fae）:
+  - Tab5 がノード 20 としてコミッショニングした（3.7 秒）。
+  - `write 20 1 3 0 10` → status 0。PC の側で「[identify] identifying」、10 秒後に「stopped」。
+  - `invoke 20 1 3 0 5`（Identify、引数 IdentifyTime 5）→ status 0。PC の側で identify が始まり、止まった。
+  - `sub 20 1 6 0 1 10` → 「subscribed: id 1, reports at least every 10 s」。その後の `toggle 20` で `matter.report node=20 id=1 ep=1 cluster=6 attr=0 value=1`。
+  - PC の例を止めると、約 50 秒後に `matter.subscription_lost id=1`。
+  - 試験の後、ノード 20 は `forget` で消した。
+
+## 15. 残り
+- MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
+- UDP の受信の通知（今は 20 ms ごとに見に行く）。
+- BLE: Wi-Fi の資格情報を BLE で渡すコミッショニング（`AddOrUpdateWiFiNetwork` と `ConnectNetwork`）。Tab5 はどちらの側も、相手がもうネットワークにいる前提。
+- 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。

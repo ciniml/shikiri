@@ -26,7 +26,7 @@ use core::mem::MaybeUninit;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use blelink::BleLink;
-use controller::{Controller, Op, Outcome};
+use controller::{ARGS, Controller, Op, Outcome, Val};
 use device::{Change, Device, Identity};
 use mtport::{FileKvs, KernelRng};
 use simple_matter::controller::{DEFAULT_WINDOW_ITERATIONS, OpenWindowParams};
@@ -211,13 +211,49 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
                     "off" => CMD_OFF,
                     _ => CMD_TOGGLE,
                 };
-                ctrl.start(node, Op::Invoke { ep: 1, cluster: ONOFF, cmd }, now)
+                ctrl.start(node, Op::Invoke { ep: 1, cluster: ONOFF, cmd, args: [Val::Null; ARGS], n: 0 }, now)
             }
             None => Err("on|off|toggle NODE"),
         },
         "read" => match (num(w.next()), num(w.next()), num(w.next()), num(w.next())) {
             (Some(node), Some(ep), Some(cl), Some(attr)) => ctrl.start(node, Op::Read { ep: ep as u16, cluster: cl as u32, attr: attr as u32 }, now),
             _ => Err("read NODE EP CLUSTER ATTR"),
+        },
+        "invoke" => match (num(w.next()), num(w.next()), num(w.next()), num(w.next())) {
+            (Some(node), Some(ep), Some(cl), Some(cmd)) => {
+                let mut args = [Val::Null; ARGS];
+                let mut n = 0;
+                let mut bad = false;
+                for a in w.by_ref() {
+                    match Val::parse(a) {
+                        Some(v) if n < ARGS => {
+                            args[n] = v;
+                            n += 1;
+                        }
+                        _ => bad = true,
+                    }
+                }
+                if bad {
+                    Err("arguments: numbers, -N, true, false, null; 6 at most")
+                } else {
+                    ctrl.start(node, Op::Invoke { ep: ep as u16, cluster: cl as u32, cmd: cmd as u32, args, n }, now)
+                }
+            }
+            _ => Err("invoke NODE EP CLUSTER CMD [ARG...]"),
+        },
+        "write" => match (num(w.next()), num(w.next()), num(w.next()), num(w.next()), w.next().and_then(Val::parse)) {
+            (Some(node), Some(ep), Some(cl), Some(attr), Some(val)) => {
+                ctrl.start(node, Op::Write { ep: ep as u16, cluster: cl as u32, attr: attr as u32, val }, now)
+            }
+            _ => Err("write NODE EP CLUSTER ATTR VALUE"),
+        },
+        "sub" => match (num(w.next()), num(w.next()), num(w.next()), num(w.next())) {
+            (Some(node), Some(ep), Some(cl), Some(attr)) => {
+                let min_s = num(w.next()).unwrap_or(0).min(3600) as u16;
+                let max_s = num(w.next()).unwrap_or(60).clamp(min_s.max(1) as u64, 3600) as u16;
+                ctrl.start(node, Op::Subscribe { ep: ep as u16, cluster: cl as u32, attr: attr as u32, min_s, max_s }, now)
+            }
+            _ => Err("sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]]"),
         },
         "ocw" => match num(w.next()) {
             Some(node) => {
@@ -243,12 +279,15 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairble NODE PASSCODE DISCRIMINATOR | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | ocw NODE [SECONDS] | revoke NODE"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairble NODE PASSCODE DISCRIMINATOR | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
     };
     match started {
         Ok(()) => true,
         Err(e) => {
-            reply(c, e);
+            // The usage: a line per request.
+            for l in e.split(" | ") {
+                reply(c, l);
+            }
             end(c, false);
             false
         }
@@ -294,6 +333,10 @@ fn outcome(c: &Channel, o: Outcome) {
             } else {
                 let _ = write!(t, "{value} (0x{value:x})");
             }
+            true
+        }
+        Outcome::Subscribed { id, max_s } => {
+            let _ = write!(t, "subscribed: id {id}, reports at least every {max_s} s (matter.report)");
             true
         }
         Outcome::Failed { why, status } => {
