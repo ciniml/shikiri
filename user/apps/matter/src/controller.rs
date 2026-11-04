@@ -3,8 +3,11 @@
 //! (its `CtrlShim`, `pump`, `start_operation`), cut down to what the shell
 //! asks for: find a commissionable device by discriminator over mDNS,
 //! commission it on the network, then commands and attribute reads over
-//! CASE (resumed when it can). One request at a time. The CA, the node
-//! list and each node's CASE resumption are kept in the store.
+//! CASE (resumed when it can). Or commission it over BLE (MT4, `blelink`
+//! finds it and carries the messages): PASE to AddNOC over BLE, then the
+//! node's operational address from mDNS and CASE over the network. One
+//! request at a time. The CA, the node list and each node's CASE
+//! resumption are kept in the store.
 
 use core::cell::RefCell;
 use core::mem::MaybeUninit;
@@ -28,7 +31,7 @@ use simple_matter::sc::case::common::{CASE_RESUMPTION_ID_LEN, SHARED_SECRET_LEN}
 use simple_matter::sc::initiator::{ScEvent, ScInitiator};
 use simple_matter::stack::{MAX_PACKET_SIZE, SendDirective};
 use simple_matter::tlv::TlvValue;
-use simple_matter::transport::net::PeerAddr;
+use simple_matter::transport::net::{BtpConnId, PeerAddr};
 use simple_matter::transport::session::SessionId;
 use t5_rt::event;
 
@@ -46,6 +49,9 @@ const CONTROLLER_NODE: u64 = 0x0000_0000_7AB5_0001;
 /// How long discovery looks, and how often it asks again.
 const DISCOVER_MS: u64 = 10_000;
 const DISCOVER_EVERY_MS: u64 = 1000;
+/// Over BLE: how long PASE to AddNOC may take.
+const BLE_PAIR_MS: u64 = 90_000;
+const BLE: PeerAddr = PeerAddr::Ble(BtpConnId(0));
 /// CASE resumption record: version, resumption ID, shared secret.
 const RESUMPTION_VERSION: u8 = 1;
 const RESUMPTION_LEN: usize = 1 + CASE_RESUMPTION_ID_LEN + SHARED_SECRET_LEN;
@@ -74,6 +80,11 @@ enum Activity {
     Idle,
     Discover { node: u64, passcode: u32, discriminator: u16, until: u64, next_query: u64 },
     Pairing { node: u64, addr: SocketAddr, since: u64 },
+    /// Over BLE: waiting for `blelink`'s link; PASE to AddNOC; then the
+    /// node's operational address (mDNS).
+    BleLink { node: u64, passcode: u32, since: u64 },
+    BlePairing { node: u64, since: u64 },
+    Resolve { node: u64, since: u64, until: u64, next_query: u64 },
     Connecting { node: u64, addr: SocketAddr, op: Op },
     AwaitOp { node: u64, op: Op },
 }
@@ -107,6 +118,9 @@ pub struct Controller {
     activity: Activity,
     nodes: heapless::Vec<Node, MAX_NODES>,
     txq: heapless::Deque<Tx, TX_QUEUE>,
+    /// Messages for the device over BLE; whether the link can go.
+    ble_txq: heapless::Deque<Tx, TX_QUEUE>,
+    ble_close: bool,
     kvs: &'static RefCell<FileKvs>,
     last_phase: Option<Phase>,
     outcome: Option<Outcome>,
@@ -171,6 +185,8 @@ impl Controller {
                 activity: Activity::Idle,
                 nodes: heapless::Vec::new(),
                 txq: heapless::Deque::new(),
+                ble_txq: heapless::Deque::new(),
+                ble_close: false,
                 kvs,
                 last_phase: None,
                 outcome: None,
@@ -293,10 +309,26 @@ impl Controller {
     }
 
     fn queue_directive(&mut self, buf: &[u8], d: SendDirective) {
-        #[allow(irrefutable_let_patterns)]
-        if let PeerAddr::Udp(to) = d.addr {
-            self.queue(&buf[..d.len], Some(to));
+        match d.addr {
+            PeerAddr::Udp(to) => self.queue(&buf[..d.len], Some(to)),
+            PeerAddr::Ble(_) => {
+                let mut t = Tx { buf: [0; MAX_PACKET_SIZE], len: d.len, to: None };
+                t.buf[..d.len].copy_from_slice(&buf[..d.len]);
+                if self.ble_txq.push_back(t).is_err() {
+                    event!(Warn, "matter.tx_dropped");
+                }
+            }
         }
+    }
+
+    /// The next message for the device over BLE.
+    pub fn take_ble_tx(&mut self) -> Option<Tx> {
+        self.ble_txq.pop_front()
+    }
+
+    /// True once, when the BLE link is no longer needed.
+    pub fn take_ble_close(&mut self) -> bool {
+        core::mem::take(&mut self.ble_close)
     }
 
     /// The next datagram to send: `to` is `None` for an mDNS query (to the
@@ -316,6 +348,68 @@ impl Controller {
         self.activity = Activity::Discover { node, passcode, discriminator, until: now + DISCOVER_MS, next_query: now };
         self.pump(now);
         Ok(())
+    }
+
+    /// Forgets node `node` (its address and CASE resumption), as after the
+    /// device left; does not tell the device.
+    pub fn forget(&mut self, node: u64) -> Result<(), &'static str> {
+        if self.busy() {
+            return Err("busy");
+        }
+        let i = self.node_index(node).ok_or("unknown node")?;
+        self.nodes.remove(i);
+        self.save_nodes();
+        if self.kvs.borrow_mut().remove(&resumption_key(node)).is_err() {
+            event!(Warn, "matter.save_failed", what = "resumption");
+        }
+        Ok(())
+    }
+
+    /// Commissions the device that `blelink` finds over BLE (its
+    /// `central_start`, by the caller) as node `node`.
+    pub fn pair_ble(&mut self, node: u64, passcode: u32, now: u64) -> Result<(), &'static str> {
+        if self.busy() {
+            return Err("busy");
+        }
+        self.activity = Activity::BleLink { node, passcode, since: now };
+        Ok(())
+    }
+
+    /// `blelink`: the BTP link is up.
+    pub fn ble_linked(&mut self, now: u64) {
+        let Activity::BleLink { node, passcode, since } = self.activity else { return };
+        let mut comm = Commissioner::new(&self.o.ca, &self.o.crypto, AttestationPolicy::VerifyNoPaa);
+        // CASE over the network after AddNOC: the link goes then.
+        comm.suspend_before_case();
+        if comm.commission(BLE, passcode, node, now).is_err() {
+            self.finish(Outcome::PairFailed { stage: 0, reason: "start" });
+            self.ble_close = true;
+            return;
+        }
+        self.comm = Some(comm);
+        self.last_phase = None;
+        self.activity = Activity::BlePairing { node, since };
+        self.pump(now);
+    }
+
+    /// `blelink`: no link, or it went.
+    pub fn ble_failed(&mut self, why: &'static str) {
+        if matches!(self.activity, Activity::BleLink { .. } | Activity::BlePairing { .. }) {
+            let stage = match self.last_phase {
+                Some(Phase::Failed { stage, .. }) => stage,
+                _ => 0,
+            };
+            self.comm = None;
+            self.finish(Outcome::PairFailed { stage, reason: why });
+        }
+    }
+
+    /// `blelink`: a message from the device over BLE.
+    pub fn ble_rx(&mut self, dg: &mut [u8], now: u64) {
+        let mut scratch = [0u8; MAX_PACKET_SIZE];
+        if let Some(d) = self.stack.handle_rx(dg, BLE, now, &mut scratch) {
+            self.queue_directive(&scratch, d);
+        }
     }
 
     /// `op` on node `node`: at once on a live session, else after CASE.
@@ -385,6 +479,19 @@ impl Controller {
 
     /// An mDNS packet (answers to discovery).
     pub fn mdns_rx(&mut self, pkt: &[u8], now: u64) {
+        if let Activity::Resolve { node, since, .. } = self.activity {
+            let cfid = self.o.ca.compressed_fabric_id_bytes();
+            let Some(found) = MdnsClient::parse_operational(pkt, &cfid, node) else { return };
+            let Some(ip) = found.addrs.iter().find(|a| a.is_ipv4()).or_else(|| found.addrs.iter().next()).copied() else { return };
+            let addr = SocketAddr::new(ip, if found.port == 0 { MATTER_PORT } else { found.port });
+            event!(Info, "matter.resolved", node = node, v4 = ip.is_ipv4(), port = addr.port() as u32);
+            let Some(comm) = self.comm.as_mut() else { return };
+            comm.set_peer(PeerAddr::Udp(addr));
+            comm.resume();
+            self.activity = Activity::Pairing { node, addr, since };
+            self.pump(now);
+            return;
+        }
         let Activity::Discover { node, passcode, discriminator, .. } = self.activity else { return };
         let Some(found) = MdnsClient::parse_commissionable(pkt) else { return };
         if found.discriminator != Some(discriminator) {
@@ -428,7 +535,7 @@ impl Controller {
         }
         match self.activity {
             Activity::Idle => self.stack.next_deadline(now),
-            Activity::Discover { next_query, until, .. } => Some(next_query.min(until)),
+            Activity::Discover { next_query, until, .. } | Activity::Resolve { next_query, until, .. } => Some(next_query.min(until)),
             _ => Some(self.stack.next_deadline(now).unwrap_or(now + 20)),
         }
     }
@@ -457,7 +564,30 @@ impl Controller {
                     self.activity = Activity::Discover { node, passcode, discriminator, until, next_query: now + DISCOVER_EVERY_MS };
                 }
             }
-            Activity::Pairing { node, addr, since } => self.drive_pairing(node, addr, since, now),
+            Activity::Pairing { node, addr, since } => self.drive_pairing(node, Some(addr), since, now),
+            Activity::BleLink { .. } => {}
+            Activity::BlePairing { node, since } => {
+                if now >= since + BLE_PAIR_MS {
+                    self.comm = None;
+                    self.ble_close = true;
+                    self.finish(Outcome::PairFailed { stage: 0, reason: "timed out over BLE" });
+                } else {
+                    self.drive_pairing(node, None, since, now);
+                }
+            }
+            Activity::Resolve { node, since, until, next_query } => {
+                if now >= until {
+                    self.comm = None;
+                    self.finish(Outcome::PairFailed { stage: 0, reason: "no operational address" });
+                } else if now >= next_query {
+                    let mut q = [0u8; 160];
+                    let cfid = self.o.ca.compressed_fabric_id_bytes();
+                    if let Ok(n) = MdnsClient::build_resolve_operational(&mut q, &cfid, node, true) {
+                        self.queue(&q[..n], None);
+                    }
+                    self.activity = Activity::Resolve { node, since, until, next_query: now + DISCOVER_EVERY_MS };
+                }
+            }
             Activity::Connecting { node, addr, op } => match self.stack.sc_take_event() {
                 Some(ScEvent::CaseEstablished { session, resumed }) => {
                     self.set_node(node, addr, Some(session));
@@ -499,7 +629,8 @@ impl Controller {
         }
     }
 
-    fn drive_pairing(&mut self, node: u64, addr: SocketAddr, since: u64, now: u64) {
+    /// `addr` is `None` while over BLE.
+    fn drive_pairing(&mut self, node: u64, addr: Option<SocketAddr>, since: u64, now: u64) {
         loop {
             let mut scratch = [0u8; MAX_PACKET_SIZE];
             let Some(comm) = self.comm.as_mut() else {
@@ -516,7 +647,17 @@ impl Controller {
                 event!(Debug, "matter.pair_phase", phase = phase_name(out.phase));
             }
             match out.phase {
+                // Over BLE, AddNOC done: CASE waits for the operational
+                // address; the link can go.
+                Phase::Case if addr.is_none() && out.send.is_none() => {
+                    event!(Info, "matter.ble_handoff", node = node, ms = now - since);
+                    self.ble_close = true;
+                    self.activity = Activity::Resolve { node, since, until: now + DISCOVER_MS, next_query: now };
+                    self.pump(now);
+                    return;
+                }
                 Phase::Done { session } => {
+                    let Some(addr) = addr else { return };
                     self.set_node(node, addr, Some(session));
                     self.comm = None;
                     self.save_ca();
@@ -527,6 +668,9 @@ impl Controller {
                 }
                 Phase::Failed { stage, .. } => {
                     self.comm = None;
+                    if addr.is_none() {
+                        self.ble_close = true;
+                    }
                     self.finish(Outcome::PairFailed { stage, reason: "commissioning" });
                     return;
                 }

@@ -11,7 +11,7 @@
   - fabric、CA、ノードの記録、SD への保存を 1 か所にまとめる。
   - コアは同期型なので、`wait` のループにそのまま載る。async は要らない（async は `ble` の中だけ、doc/48 §1）。
 - **順序**: on-network（Wi-Fi の UDP と mDNS）を先に、BLE のコミッショニング（BTP）は `ble` の M3（セントラル）と M4（ペリフェラル）の上に後で。
-- **依存の取り方**: git の依存で版を固定する（`rev = "a163275"`、GitHub の `ciniml/simple_matter`）。tab5-os だけでビルドできる。simple-matter を変えたら、rev を上げる。
+- **依存の取り方**: git の依存で版を固定する（`rev = "1544fae"`、GitHub の `ciniml/simple_matter`。MT0〜MT4 のデバイスの側までは a163275）。tab5-os だけでビルドできる。simple-matter を変えたら、rev を上げる。
 - **段取り**:
 
   | 段 | 内容 | 状態 |
@@ -21,7 +21,7 @@
   | MT1b | `net` にマルチキャストの参加、受けた宛先、送り元の固定。mDNS のレスポンダ。PC の chip-tool か smctl から on-network でコミッショニング | まだ |
   | MT2 | コントローラの役と、シェルの `mt` コマンド | 済み（§6。運用中の機器ではなく PC の試験用のデバイスで） |
   | MT3 | Tab5 のデバイスの窓を開ける（OCW）、複数の fabric | 済み（§8） |
-  | MT4 | BLE のコミッショニング（`ble` の M3/M4 の上） | デバイスの側は済み（§10）、コントローラの側はまだ |
+  | MT4 | BLE のコミッショニング（`ble` の M3/M4 の上） | 済み（デバイスの側は §10、コントローラの側は §12） |
   | MT5 | アプリがエンドポイントを持ち込む仕組みと、GUI | まだ |
 
 ## 2. MT0
@@ -190,12 +190,43 @@
   - smctl の表示: 「status Failure (cluster status 4 = WindowNotOpen)」。
   - smctl の BLE の MTU（8c3990d。BlueZ から読む）: att_mtu 242、フラグメント 239 で、ble-handoff は 19.6 秒と 19.9 秒だった（スキャンと接続の約 4.5 秒を含む）。C1 への書き込みは 17、indication は 20。Attestation から CSRRequest まではまだ約 8.6 秒かかる（原因は見ていない）。
   - その 8.6 秒は、コアの `Commissioner::drive` の問題だった（応答を受けた呼び出しで次の要求を出さず、smctl の BLE のループが BTP の ACK のタイマー、約 2.3 秒まで止まっていた）。simple-matter の 1544fae で直った。その smctl で ble-handoff は 12.2 秒と 11.4 秒、Attestation は約 2 秒（Tab5 はコミット済みの版のまま）。Tab5 のコントローラも同じ `Commissioner` を使う。
-  - 依存をこれらに上げれば、デバイスの exchange と再送バッファを 16 にした手当て（§8）は要らなくなる見込み。上げるかどうかは利用者が決める。
+  - 利用者が simple-matter の側を push した（2026-11-04、「simple-matter側の変更はpushしました。」）。tab5-os の依存を 1544fae に上げ、デバイスはコアの `MultiAdminStack`（exchange 6、再送バッファ 3）に戻した（§8 の 16 の手当てをやめた）。
+    - 実機: 前の fabric を読み戻して toggle が通った。古い smctl の試験（revoke 8 回 → open-window を 4 回）は 4/4 成功した。ble-handoff は 13.2 秒で、その fabric からの toggle と unpair も通った。Tab5 のコントローラは PC の例（1544fae）を 3.7 秒でコミッショニングし、toggle が通った。
 - `ble` のログ: HCI のイベントの頭を 24 バイトから 32 バイトにした（接続の間隔まで見えるように）。
 
-## 11. 残り
+## 11. 残り（§10 の時点）
 - MT4 のコントローラの側: Tab5 が BLE で PC の `ble-onoff-light`（simple-matter-ble、BlueZ）をコミッショニングする（`ble` の M3、BTP の central）。
 - 購読（subscribe）、書き込み、任意のコマンド（引数つき）。
 - MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
 - UDP の受信の通知（今は 20 ms ごとに見に行く）。
-- simple-matter のコアの直し（§8）: simple-matter の側で直り（96c0171、未 push）、実機でも確かめた（§10）。依存を上げるかどうかは利用者が決める。
+- simple-matter のコアの直し（§8）: 済み（1544fae に上げた。§10）。
+
+## 12. MT4: BLE のコミッショニング（コントローラの側）
+利用者の指示（2026-11-04）:「すすめて」。
+
+- **要求**: `pairble NODE PASSCODE DISCRIMINATOR`（シェルの `mt pairble …`、`mtreq` の OP 9 は `pairble NODE 20202021 3840`）。PASE から AddNOC までを BLE で行い、CASE と CommissioningComplete はネットワーク（UDP）で行う。smctl の `ble-handoff` と同じ流れ。
+- **`blelink` のセントラルの側**（`svc:ble` の M3 の要求。デバイスの側と同じチャネルを使い、同時にはどちらか 1 つ）:
+  - 受け身のスキャン（10 秒、間隔 100 ms、窓 30 ms）で、広告の 0xFFF6 の service data の discriminator が合う相手を探す。見つけたら `STOP`、`DONE` を待って `CONNECT`。
+  - `SERVICES` で 0xFFF6、`CHARS` で C1 と C2 を探す。
+  - BTP の handshake は chip と同じ順で、C1 に要求を書き（応答あり）、それから C2 を indication で購読する。応答の indication で確立する。
+  - その後は、BTP のフラグメントを C1 への書き込み（応答あり、1 つずつ）で送り、C2 の indication を受ける。
+  - リンクができるまで 30 秒、BTP の無通信や ACK のタイムアウトで失敗にする。見つからなければ「not found over BLE」。
+  - デバイスの側を使った後は BTP を peripheral の役で作り直す。最初の版は、セントラルを使った後に BTP が central の役のまま残り、次にデバイスとしてつながれたとき handshake を受け付けなかった（`InvalidState`）。
+- **コントローラ**（`controller.rs`）:
+  - `Commissioner::suspend_before_case` で、AddNOC の後の CASE を止めておく。宛先は `PeerAddr::Ble`。BLE 宛ての送信は別の待ち行列から `blelink` へ渡す。
+  - `Phase::Case` で止まったら BLE を閉じる。運用の mDNS（`build_resolve_operational`、QU、1 秒ごと、10 秒まで）でノードのアドレスを引き、`set_peer` と `resume` をして、あとは on-network のコミッショニングと同じ。
+  - BLE の部分は 90 秒まで。
+- **`forget NODE`**（`mtreq` の OP 10）: コントローラのノードの表から外し、CASE の resumption も消す（デバイスには何も送らない）。ノードの表は 8 つまでで、試験用のデバイス（毎回 fabric を持たずに起動し直す）で埋まっていた。
+- **PC の側**: simple-matter-ble の `ble-onoff-light`（BlueZ の peripheral、`SM_BLE_ADAPTER=hci1`、discriminator 3840、UDP と mDNS も動かす）を 1544fae でビルドした。
+- **実機**（2026-11-04）:
+  - Tab5 が PC の `ble-onoff-light` をノード 10 としてコミッショニングし、14.4 秒かかった。内訳は、スキャン 3.3 秒、接続 3.1 秒、BTP の確立 1.7 秒（ATT MTU 247、フラグメント 244）、PASE から AddNOC まで 5.4 秒、mDNS 0.1 秒、CASE と CommissioningComplete 0.8 秒。toggle（status 0）と OnOff の読みが通り、PC の側も「light is now ON」。
+  - PC の側を起動し直して、もう 1 度（ノード 11）: 17.8 秒（スキャンが長かった）。
+  - 相手がいないとき: 10 秒のスキャンの後「commissioning failed: not found over BLE」で、`ble` を放した。
+  - 続けて（同じ `matter` で）Tab5 をデバイスとして smctl から ble-handoff: 13.3 秒、toggle も通った。上の BTP の役の問題はここで見つけて直した。
+  - 試験の後、試験用のノード（2、7〜11、13）は `forget` で消した（nodes=0）。
+
+## 13. 残り
+- 購読（subscribe）、書き込み、任意のコマンド（引数つき）。
+- MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
+- UDP の受信の通知（今は 20 ms ごとに見に行く）。
+- BLE: Wi-Fi の資格情報を BLE で渡すコミッショニング（`AddOrUpdateWiFiNetwork` と `ConnectNetwork`）。Tab5 はどちらの側も、相手がもうネットワークにいる前提。

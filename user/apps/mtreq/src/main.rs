@@ -6,7 +6,7 @@
 //! `run mtreq OP NODE`. OP: 0 `status`, 1 `nodes`, 2 `pair NODE 20202021
 //! 3841` (the development passcode; discriminator 3841), 3 `on`, 4 `off`,
 //! 5 `toggle`, 6 `read NODE 1 6 0` (On/Off's OnOff), 7 `ocw NODE` (a
-//! commissioning window on the node, MT3), 8 `revoke NODE`. The answer's lines
+//! commissioning window on the node, MT3), 8 `revoke NODE`, 9 `pairble NODE 20202021 3840` (over BLE, MT4), 10 `forget NODE`. The answer's lines
 //! are logged. Built with `--permit svc:matter`. Exit 0 if the answer
 //! ended well.
 
@@ -29,6 +29,8 @@ fn main(op: usize, node: usize) -> usize {
         6 => write!(req, "read {node} 1 6 0"),
         7 => write!(req, "ocw {node}"),
         8 => write!(req, "revoke {node}"),
+        9 => write!(req, "pairble {node} 20202021 3840"),
+        10 => write!(req, "forget {node}"),
         _ => return 1,
     };
     let Ok(c) = Channel::connect(matter::SVC) else {

@@ -10,7 +10,8 @@
 //! (ff02::fb and 224.0.0.251 joined) through `svc:net`; one store on the
 //! SD card (`mtport::FileKvs`) for both; the kernel's `random`. While
 //! the device is commissionable it also advertises over BLE through
-//! `svc:ble` (`blelink`, MT4), if the `ble` service runs.
+//! `svc:ble` (`blelink`, MT4), if the `ble` service runs; the controller
+//! also commissions over BLE (`pairble`).
 //!
 //! Built with `--permit svc:net --permit svc:fs --permit random --permit
 //! listen:matter --permit svc:ble`.
@@ -159,7 +160,7 @@ fn num(s: Option<&str>) -> Option<u64> {
 }
 
 /// One request; true if the answer comes later (from the controller).
-fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, now: u64) -> bool {
+fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &mut BleLink, now: u64) -> bool {
     let mut w = line.split_ascii_whitespace();
     let cmd = w.next().unwrap_or("");
     let mut text = FmtBuf::<120>::new();
@@ -183,6 +184,26 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, now: u6
             (Some(node), Some(passcode), Some(d)) => ctrl.pair(node, passcode as u32, d as u16, now),
             _ => Err("pair NODE PASSCODE DISCRIMINATOR"),
         },
+        "pairble" => match (num(w.next()), num(w.next()), num(w.next())) {
+            (Some(node), Some(passcode), Some(d)) if !ctrl.busy() => {
+                ble.central_start(d as u16, now).and_then(|_| ctrl.pair_ble(node, passcode as u32, now))
+            }
+            (Some(_), Some(_), Some(_)) => Err("busy"),
+            _ => Err("pairble NODE PASSCODE DISCRIMINATOR"),
+        },
+        "forget" => {
+            match num(w.next()).ok_or("forget NODE").and_then(|node| ctrl.forget(node)) {
+                Ok(()) => {
+                    reply(c, "forgotten");
+                    end(c, true);
+                }
+                Err(e) => {
+                    reply(c, e);
+                    end(c, false);
+                }
+            }
+            return false;
+        }
         "on" | "off" | "toggle" => match num(w.next()) {
             Some(node) => {
                 let cmd = match cmd {
@@ -222,7 +243,7 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, now: u6
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | on|off|toggle NODE | read NODE EP CLUSTER ATTR | ocw NODE [SECONDS] | revoke NODE"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairble NODE PASSCODE DISCRIMINATOR | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | ocw NODE [SECONDS] | revoke NODE"),
     };
     match started {
         Ok(()) => true,
@@ -358,7 +379,7 @@ fn run() -> Result<(), u32> {
                 Ok(n) if !cl.waiting => {
                     busy = true;
                     let line = core::str::from_utf8(&m[..n]).unwrap_or("");
-                    cl.waiting = request(line, &cl.chan, dev, ctrl, now_ms());
+                    cl.waiting = request(line, &cl.chan, dev, ctrl, &mut ble, now_ms());
                     if !cl.waiting {
                         client = None;
                     }
@@ -393,7 +414,7 @@ fn run() -> Result<(), u32> {
             }
         }
         // BLE: a commissioner's messages over BTP.
-        busy |= ble.rx(dev, now_ms(), &mut tx);
+        busy |= ble.rx(dev, ctrl, now_ms(), &mut tx);
         let now = now_ms();
         dev.housekeep(now, log_change);
         // Retransmissions, acknowledgements, reports; announcements.
@@ -404,9 +425,6 @@ fn run() -> Result<(), u32> {
             }
         }
         ble.advertise(dev.ble_adv(), now_ms());
-        while ble.pump(now_ms()) {
-            busy = true;
-        }
         while let Some(k) = dev.mdns_poll(now_ms(), &mut tx) {
             send(&mut net, mdns, &tx[..k], mdns_group(has_v4));
         }
@@ -418,6 +436,16 @@ fn run() -> Result<(), u32> {
                 None => send(&mut net, mdns, &t.buf[..t.len], mdns_group(has_v4)),
             }
             ctrl.poll(now_ms());
+        }
+        // BLE: the controller's messages for the device; the link's end.
+        while let Some(t) = ctrl.take_ble_tx() {
+            ble.queue(&t.buf[..t.len]);
+        }
+        if ctrl.take_ble_close() {
+            ble.central_stop(now_ms());
+        }
+        while ble.pump(ctrl, now_ms()) {
+            busy = true;
         }
         if let Some(o) = ctrl.take_outcome() {
             match client.as_mut() {

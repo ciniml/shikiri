@@ -2,16 +2,21 @@
 //! `svc:ble` (doc/48 M4). While the node is commissionable it advertises
 //! the Matter service (0xFFF6, the discriminator in its service data) with
 //! C1 (the commissioner writes) and C2 (indicated back); the core's BTP
-//! carries Matter's messages over them. `ble` serves one client at a time,
-//! so the channel is held only while the node is commissionable or a
-//! commissioner is connected.
+//! carries Matter's messages over them. And the controller's side: scan
+//! for a commissionable device's service data, connect, find C1 and C2,
+//! the BTP handshake, then the commissioning's messages as C1 writes (one
+//! at a time) and C2 indications, until the controller lets the link go
+//! (after AddNOC; CASE is over the network). `ble` serves one client at a
+//! time, so the channel is held only while it is used.
 
 use heapless::{Deque, Vec};
+use simple_matter::btp::AdvData;
 use simple_matter::btp::gatt::{ADV_TOTAL_LEN, C1_UUID128, C2_UUID128, MATTER_SERVICE_UUID16};
 use simple_matter::btp::{Btp, BtpRole};
 use simple_matter::transport::net::{BtpConnId, PeerAddr};
 use t5_rt::{Channel, Error, ble, chan, event, sleep_ms, wait};
 
+use crate::controller::Controller;
 use crate::device::Device;
 
 const PROP_READ: u8 = 0x02;
@@ -29,6 +34,10 @@ const ALIVE_MS: u64 = 2000;
 /// Matter messages waiting for BTP, which takes one at a time.
 const QUEUE: usize = 3;
 const SDU: usize = 1280;
+/// The controller's side: scanning (passive; window 30 ms of 100 ms), and
+/// how long until the BTP link is up.
+const SCAN_S: u8 = 10;
+const LINK_MS: u64 = 30_000;
 /// The one BLE connection, as the core sees it.
 pub const CONN: PeerAddr = PeerAddr::Ble(BtpConnId(0));
 
@@ -42,6 +51,28 @@ enum State {
     /// `STOP` sent, `DISCONNECTED` not yet back.
     Stopping,
     Connected,
+    // The controller's side.
+    /// `SCAN` until the device's advertisement; `STOP`, waiting for `DONE`.
+    Scan,
+    ScanStop,
+    /// `CONNECT`, waiting for `CONNECTED`.
+    Connect,
+    /// `SERVICES`, `CHARS`: until `END`.
+    Services,
+    Chars,
+    /// The handshake request written to C1, waiting for `WRITTEN`; C2
+    /// subscribed, waiting for the handshake response.
+    Handshake,
+    Subscribe,
+    Linked,
+    /// `DISCONNECT` sent.
+    Leaving,
+}
+
+impl State {
+    fn central(self) -> bool {
+        !matches!(self, State::Idle | State::Asked | State::Advertising | State::Stopping | State::Connected)
+    }
 }
 
 pub struct BleLink {
@@ -68,6 +99,14 @@ pub struct BleLink {
     /// When `ADVERTISE` was sent; when `ble` was last looked at.
     asked_at: u64,
     alive_at: u64,
+    /// The controller's side: the discriminator looked for, the device's
+    /// address type and address, the Matter service's index, a C1 write is
+    /// out, since when.
+    want: u16,
+    peer: [u8; 7],
+    service: Option<u8>,
+    writing: bool,
+    started: u64,
 }
 
 impl BleLink {
@@ -90,6 +129,11 @@ impl BleLink {
             since: 0,
             asked_at: 0,
             alive_at: 0,
+            want: 0,
+            peer: [0; 7],
+            service: None,
+            writing: false,
+            started: 0,
         }
     }
 
@@ -114,12 +158,189 @@ impl BleLink {
         self.mtu = None;
         self.subscribed = false;
         self.sending = false;
+        self.writing = false;
         self.queue.clear();
+    }
+
+    /// The controller's side: finds the commissionable device with
+    /// `discriminator`, connects and sets up BTP; `Controller::ble_linked`
+    /// once it is up, `ble_failed` if not.
+    pub fn central_start(&mut self, discriminator: u16, now: u64) -> Result<(), &'static str> {
+        if self.state != State::Idle {
+            return Err("BLE busy");
+        }
+        if self.chan.is_none() {
+            self.chan = Some(Channel::connect(ble::SVC).map_err(|_| "no BLE service")?);
+        }
+        self.drop_link();
+        self.btp = Btp::new(BtpRole::Central);
+        (self.want, self.service, self.c1, self.c2, self.started) = (discriminator, None, 0, 0, now);
+        let mut req = [ble::SCAN, SCAN_S, 0, 0, 0, 0, 0];
+        req[3..5].copy_from_slice(&100u16.to_le_bytes());
+        req[5..7].copy_from_slice(&30u16.to_le_bytes());
+        self.send(&req, now);
+        self.state = State::Scan;
+        Ok(())
+    }
+
+    /// The controller is done with the link (or gave up).
+    pub fn central_stop(&mut self, now: u64) {
+        match self.state {
+            State::Scan => {
+                self.send(&[ble::STOP], now);
+                self.state = State::ScanStop;
+                self.want = u16::MAX;
+            }
+            s if s.central() && s != State::Leaving && s != State::ScanStop => {
+                self.send(&[ble::DISCONNECT], now);
+                self.state = State::Leaving;
+            }
+            _ => {}
+        }
+    }
+
+    fn central_failed(&mut self, ctrl: &mut Controller, why: &'static str, now: u64) {
+        event!(Warn, "matter.ble_central_failed", why = why, state = self.state as u32);
+        ctrl.ble_failed(why);
+        let s = self.state;
+        self.drop_link();
+        match s {
+            State::Scan | State::ScanStop => {
+                if s == State::Scan {
+                    self.send(&[ble::STOP], now);
+                }
+                self.state = State::ScanStop;
+                self.want = u16::MAX;
+            }
+            State::Leaving => self.state = State::Idle,
+            _ => {
+                self.send(&[ble::DISCONNECT], now);
+                self.state = State::Leaving;
+            }
+        }
+    }
+
+    /// One of `ble`'s events while the controller's side runs.
+    fn central_event(&mut self, m: &[u8], ctrl: &mut Controller, now: u64) {
+        let n = m.len();
+        let at = |i: usize| u16::from_le_bytes([m[i], m[i + 1]]);
+        match (m[0], self.state) {
+            (ble::ADV, State::Scan) if n >= 11 => {
+                let data = &m[11..n.min(11 + m[10] as usize)];
+                if service_data(data).is_some_and(|a| a.discriminator == self.want) {
+                    self.peer.copy_from_slice(&m[1..8]);
+                    event!(Info, "matter.ble_found", addr = &m[2..8], rssi = m[9] as i8 as i32);
+                    self.send(&[ble::STOP], now);
+                    self.state = State::ScanStop;
+                }
+            }
+            (ble::DONE, State::ScanStop) if self.want != u16::MAX => {
+                let mut req = [0u8; 9];
+                req[0] = ble::CONNECT;
+                req[1..8].copy_from_slice(&self.peer);
+                req[8] = 10;
+                self.send(&req, now);
+                self.state = State::Connect;
+            }
+            (ble::DONE, State::ScanStop) => self.state = State::Idle,
+            (ble::DONE, State::Scan) => {
+                event!(Info, "matter.ble_not_found", discriminator = self.want as u32);
+                ctrl.ble_failed("not found over BLE");
+                self.state = State::Idle;
+            }
+            (ble::CONNECTED, State::Connect) if n >= 3 => {
+                self.mtu = Some(at(1));
+                self.send(&[ble::SERVICES], now);
+                self.state = State::Services;
+            }
+            (ble::SERVICE, State::Services) if n >= 6 => {
+                let uuid = &m[6..];
+                if uuid == MATTER_SERVICE_UUID16.to_le_bytes() || uuid == le(simple_matter::btp::gatt::MATTER_SERVICE_UUID128) {
+                    self.service = Some(m[1]);
+                }
+            }
+            (ble::END, State::Services) => match self.service {
+                Some(i) => {
+                    self.send(&[ble::CHARS, i], now);
+                    self.state = State::Chars;
+                }
+                None => self.central_failed(ctrl, "no Matter service", now),
+            },
+            (ble::CHAR, State::Chars) if n >= 22 => {
+                let uuid = &m[6..22];
+                if uuid == le(C1_UUID128) {
+                    self.c1 = at(1);
+                } else if uuid == le(C2_UUID128) {
+                    self.c2 = at(1);
+                }
+            }
+            (ble::END, State::Chars) => {
+                if self.c1 == 0 || self.c2 == 0 {
+                    self.central_failed(ctrl, "no C1 or C2", now);
+                    return;
+                }
+                // The handshake request to C1, then C2 subscribed (chip's
+                // order: the response comes once C2 is subscribed).
+                let mut req = [0u8; ble::MSG_MAX];
+                req[0] = ble::WRITE;
+                req[1..3].copy_from_slice(&self.c1.to_le_bytes());
+                req[3] = 1;
+                match self.btp.start_handshake(&mut req[4..], self.mtu, now) {
+                    Ok(k) => {
+                        self.send(&req[..4 + k], now);
+                        self.state = State::Handshake;
+                    }
+                    Err(_) => self.central_failed(ctrl, "BTP", now),
+                }
+            }
+            (ble::WRITTEN, State::Handshake) => {
+                let mut req = [ble::SUBSCRIBE, 0, 0, 1];
+                req[1..3].copy_from_slice(&self.c2.to_le_bytes());
+                self.send(&req, now);
+                self.state = State::Subscribe;
+            }
+            (ble::SUBSCRIBED, State::Subscribe) => {}
+            (ble::NOTIFY, State::Subscribe | State::Linked) if n >= 4 && at(1) == self.c2 => {
+                if let Err(e) = self.btp.process_incoming(&m[4..], self.mtu, now) {
+                    event!(Warn, "matter.btp_rx", error = e as u32);
+                    return;
+                }
+                if self.state == State::Subscribe && self.btp.is_established() {
+                    self.state = State::Linked;
+                    event!(Info, "matter.btp_up", fragment = self.btp.fragment_size() as u32, window = self.btp.window() as u32, ms = (now - self.started) as u32);
+                    ctrl.ble_linked(now);
+                }
+                let mut sdu = [0u8; SDU];
+                loop {
+                    let k = match self.btp.recv() {
+                        Some(s) if s.len() <= SDU => {
+                            sdu[..s.len()].copy_from_slice(s);
+                            s.len()
+                        }
+                        Some(_) => continue,
+                        None => break,
+                    };
+                    ctrl.ble_rx(&mut sdu[..k], now);
+                }
+            }
+            (ble::WRITTEN, State::Linked) => self.writing = false,
+            (ble::DISCONNECTED, State::Leaving) => self.state = State::Idle,
+            (ble::DISCONNECTED, _) => self.central_failed(ctrl, "BLE link lost", now),
+            (ble::FAILED, State::Leaving) => self.state = State::Idle,
+            (ble::FAILED, _) if n >= 3 => {
+                event!(Warn, "matter.ble_failed", request = m[1], code = m[2]);
+                self.central_failed(ctrl, "BLE request failed", now);
+            }
+            _ => {}
+        }
     }
 
     /// Advertises `want` (the device's advertisement, `None` when it is not
     /// commissionable); a connected commissioner stays until it leaves.
     pub fn advertise(&mut self, want: Option<[u8; ADV_TOTAL_LEN]>, now: u64) {
+        if self.state.central() {
+            return;
+        }
         if let Some(c) = &self.chan
             && now >= self.alive_at
         {
@@ -174,12 +395,15 @@ impl BleLink {
                 // Let other clients have `ble`.
                 self.chan = None;
             }
+            // The controller's side (returned above).
+            _ => {}
         }
     }
 
     /// `ble`'s events: the C1 writes go through BTP to the device, whose
-    /// replies wait for BTP. True if anything came.
-    pub fn rx(&mut self, dev: &mut Device, now: u64, tx: &mut [u8]) -> bool {
+    /// replies wait for BTP; on the controller's side, the indications go
+    /// to the controller. True if anything came.
+    pub fn rx(&mut self, dev: &mut Device, ctrl: &mut Controller, now: u64, tx: &mut [u8]) -> bool {
         let mut any = false;
         let mut m = [0u8; ble::MSG_MAX];
         loop {
@@ -194,6 +418,10 @@ impl BleLink {
                 }
             };
             any = true;
+            if self.state.central() {
+                self.central_event(&m[..n], ctrl, now);
+                continue;
+            }
             let at = |i: usize| u16::from_le_bytes([m[i], m[i + 1]]);
             match m[0] {
                 ble::ADVERTISING if n >= 10 => {
@@ -209,6 +437,8 @@ impl BleLink {
                 ble::PEER if n >= 8 => {
                     self.state = State::Connected;
                     self.drop_link();
+                    // (The controller's side leaves a central's BTP.)
+                    self.btp = Btp::new(BtpRole::Peripheral);
                     (self.writes, self.sent, self.since) = (0, 0, now);
                     event!(Info, "matter.ble_peer", addr = &m[2..8]);
                 }
@@ -274,9 +504,10 @@ impl BleLink {
         }
     }
 
-    /// A Matter message for the commissioner.
+    /// A Matter message for the commissioner (or, on the controller's
+    /// side, for the device).
     pub fn queue(&mut self, sdu: &[u8]) {
-        if self.state != State::Connected {
+        if self.state != State::Connected && self.state != State::Linked {
             return;
         }
         let v = Vec::from_slice(sdu).unwrap_or_default();
@@ -287,7 +518,10 @@ impl BleLink {
 
     /// Messages into BTP, BTP's fragments out as indications (one at a
     /// time), and BTP's timeouts. True if something was sent.
-    pub fn pump(&mut self, now: u64) -> bool {
+    pub fn pump(&mut self, ctrl: &mut Controller, now: u64) -> bool {
+        if self.state.central() {
+            return self.central_pump(ctrl, now);
+        }
         if self.state != State::Connected {
             return false;
         }
@@ -326,6 +560,43 @@ impl BleLink {
         true
     }
 
+    /// The controller's side: the link's deadline, messages into BTP and
+    /// BTP's fragments out as C1 writes (one at a time).
+    fn central_pump(&mut self, ctrl: &mut Controller, now: u64) -> bool {
+        if self.state != State::Linked {
+            if self.state != State::Leaving && self.state != State::ScanStop && now >= self.started + LINK_MS {
+                self.central_failed(ctrl, "BLE link timed out", now);
+                return true;
+            }
+            return false;
+        }
+        if self.btp.is_timed_out(now) {
+            self.central_failed(ctrl, "BTP timed out", now);
+            return true;
+        }
+        if self.btp.can_send()
+            && let Some(sdu) = self.queue.pop_front()
+            && let Err(e) = self.btp.send(&sdu, now)
+        {
+            event!(Warn, "matter.btp_tx", error = e as u32, len = sdu.len() as u32);
+        }
+        if self.writing {
+            return false;
+        }
+        let mut m = [0u8; ble::MSG_MAX];
+        let n = match self.btp.process_outgoing(&mut m[4..4 + ble::VALUE_MAX], self.mtu, now) {
+            Ok(n) if n > 0 => n,
+            _ => return false,
+        };
+        m[0] = ble::WRITE;
+        m[1..3].copy_from_slice(&self.c1.to_le_bytes());
+        m[3] = 1;
+        self.writing = true;
+        self.sent += 1;
+        self.send(&m[..4 + n], now);
+        true
+    }
+
     /// Sleeps up to `ms`, waking early when `ble` has something.
     pub fn idle(&mut self, ms: u64, now: u64) {
         let Some(c) = &self.chan else {
@@ -339,8 +610,25 @@ impl BleLink {
     }
 
     pub fn next_deadline(&self) -> Option<u64> {
-        if self.state == State::Connected { self.btp.next_deadline() } else { None }
+        match self.state {
+            State::Connected | State::Linked => self.btp.next_deadline(),
+            s if s.central() => Some(self.started + LINK_MS),
+            _ => None,
+        }
     }
+}
+
+/// The Matter service data in an advertisement, if any.
+fn service_data(mut data: &[u8]) -> Option<AdvData> {
+    while data.len() >= 2 {
+        let len = data[0] as usize;
+        let ad = data.get(1..1 + len)?;
+        if len == 11 && ad[0] == 0x16 && ad[1..3] == MATTER_SERVICE_UUID16.to_le_bytes() {
+            return AdvData::parse_service_data(ad[3..11].try_into().ok()?).ok();
+        }
+        data = &data[1 + len..];
+    }
+    None
 }
 
 /// A UUID as `svc:ble` takes it (the core's are in the string's order).
