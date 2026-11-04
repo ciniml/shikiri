@@ -8,7 +8,10 @@
 //! the central, one connection and its GATT client (services,
 //! characteristics, read, write, one subscription); or, as the peripheral,
 //! a GATT service of the client's, advertised (`periph`). Needs the controller
-//! started (`wifi 1`).
+//! started (`wifi 1`, which raises `ready:bt`; the image says `--needs
+//! ready:bt`, doc/51 §3). Without a controller that answers a Reset it
+//! ends (`ble.no_controller`): TrouBLE would wait for one in a busy loop
+//! (its TxRunner polls an `OnceLock` that wakes itself every time).
 //!
 //! Built with `--permit bt:hci --permit listen:ble`.
 
@@ -24,7 +27,7 @@ use bt_hci::controller::ExternalController;
 use bt_hci::param::LeAdvReportsIter;
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
-use t5_rt::{Channel, Error, Handle, Listener, ble, bt, event, rights};
+use t5_rt::{Channel, Error, Handle, Listener, ble, bt, event, rights, time_ns, wait_raw};
 use trouble_host::prelude::*;
 
 use exec::want;
@@ -46,6 +49,10 @@ fn main(_: usize, _: usize) -> usize {
         event!(Error, "ble.no_hci");
         return 1;
     };
+    if !controller_answers(&h) {
+        event!(Error, "ble.no_controller");
+        return 4;
+    }
     let Ok(l) = Listener::open(ble::SVC) else {
         event!(Error, "ble.no_listen");
         return 2;
@@ -60,6 +67,31 @@ fn main(_: usize, _: usize) -> usize {
         event!(Error, "ble.host_failed", error = ble_error(&e));
     }
     3
+}
+
+/// Whether the controller answers HCI_Reset within 3 s (3 tries); its
+/// answers are read and dropped, TrouBLE starts with its own Reset.
+fn controller_answers(h: &Handle) -> bool {
+    const RESET: [u8; 4] = [bt::CMD, 0x03, 0x0C, 0];
+    let mut buf = [0u8; bt::PKT_MAX];
+    for _ in 0..3 {
+        if h.write(&RESET).is_err() {
+            continue;
+        }
+        let end = time_ns() + 1_000_000_000;
+        while let Some(left) = end.checked_sub(time_ns()) {
+            match h.read(&mut buf) {
+                // Command Complete for HCI_Reset.
+                Ok(n) if n >= 6 && buf[0] == bt::EVT && buf[1] == 0x0E && buf[4..6] == [0x03, 0x0C] => return true,
+                Ok(_) => {}
+                Err(Error::Busy) => {
+                    let _ = wait_raw(&[h.raw()], left.max(1));
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+    false
 }
 
 fn ble_error<E>(e: &BleHostError<E>) -> &'static str {

@@ -79,6 +79,10 @@ pub mod cmd {
     /// `u32 on`: the RNG's entropy source (the SAR ADC) on or off, to compare
     /// the generator without it (doc/47 §7).
     pub const ENTROPY: u8 = 30;
+    /// Erases the ESP-IDF `nvs` partition (0x9000, 16 KiB): data of a
+    /// firmware the Tab5 ran before (doc/51 §2.2). Nothing of tab5-os
+    /// uses it.
+    pub const NVS_ERASE: u8 = 31;
 }
 
 /// `Command::Prof` operations.
@@ -126,6 +130,7 @@ pub enum Command<'a> {
     PpaBench,
     RngDump { raw: bool, us: u32 },
     Entropy { on: bool },
+    NvsErase,
 }
 
 impl Command<'_> {
@@ -161,6 +166,7 @@ impl Command<'_> {
             Command::PpaBench => "ppabench",
             Command::RngDump { .. } => "rngdump",
             Command::Entropy { .. } => "entropy",
+            Command::NvsErase => "nvserase",
         }
     }
 }
@@ -183,6 +189,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         }
         cmd::INSTALL_END if args.is_empty() => Command::InstallEnd,
         cmd::FLASH_TEST if args.is_empty() => Command::FlashTest,
+        cmd::NVS_ERASE if args.is_empty() => Command::NvsErase,
         cmd::PSRAM if args.is_empty() => Command::Psram,
         cmd::KUPDATE_BEGIN if args.len() == 4 => Command::KupdateBegin { length: u32_at(args, 0)? },
         cmd::REBOOT if args.is_empty() => Command::Reboot,
@@ -263,6 +270,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::PpaBench => put(&[cmd::PPA_BENCH])?,
         Command::RngDump { .. } => put(&[cmd::RNG_DUMP])?,
         Command::Entropy { .. } => put(&[cmd::ENTROPY])?,
+        Command::NvsErase => put(&[cmd::NVS_ERASE])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -340,6 +348,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("remove") => Command::Remove { name: w.next().ok_or("remove NAME")? },
         Some("rollback") => Command::Rollback { name: w.next().ok_or("rollback NAME")? },
         Some("flashtest") => Command::FlashTest,
+        Some("nvserase") => Command::NvsErase,
         Some("psram") => Command::Psram,
         Some("reboot") => Command::Reboot,
         Some("kinfo") => Command::Kinfo,
@@ -414,7 +423,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "nvserase", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

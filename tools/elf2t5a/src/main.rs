@@ -10,7 +10,7 @@
 //! Usage:
 //!   elf2t5a keygen --secret FILE --public FILE [--seed HEX]
 //!   elf2t5a build IN.elf OUT.t5a --key SECRET [--name NAME] [--version X.Y.Z]
-//!                 [--stack BYTES] [--permit NAME]... [--autostart]
+//!                 [--stack BYTES] [--permit NAME]... [--needs NAME]... [--autostart]
 //!                 [--secure-version N] [--abi MAJOR.MINOR]
 //!   elf2t5a verify IMAGE.t5a --public FILE
 //!   elf2t5a kernel IN.bin OUT.t5k --key SECRET
@@ -44,7 +44,7 @@ const DEFAULT_STACK: u32 = 4096;
 const USAGE: &str = "usage:
   elf2t5a keygen --secret FILE --public FILE [--seed HEX]
   elf2t5a build IN.elf OUT.t5a --key SECRET [--name NAME] [--version X.Y.Z] [--stack BYTES]
-                [--permit NAME]... [--autostart] [--secure-version N] [--abi MAJOR.MINOR]
+                [--permit NAME]... [--needs NAME]... [--autostart] [--secure-version N] [--abi MAJOR.MINOR]
   elf2t5a verify IMAGE.t5a --public FILE
   elf2t5a kernel IN.bin OUT.t5k --key SECRET
   elf2t5a verify-kernel PACKAGE.t5k --public FILE
@@ -141,6 +141,7 @@ struct BuildOpts {
     version: [u32; 3],
     stack: u32,
     permits: Vec<String>,
+    needs: Vec<String>,
     autostart: bool,
     secure_version: u32,
     abi: (u16, u16),
@@ -153,6 +154,7 @@ fn build(args: &[String]) -> Result<(), String> {
         version: [0, 1, 0],
         stack: DEFAULT_STACK,
         permits: Vec::new(),
+        needs: Vec::new(),
         autostart: false,
         secure_version: 0,
         abi: (t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR),
@@ -170,6 +172,13 @@ fn build(args: &[String]) -> Result<(), String> {
             }
             "--stack" => o.stack = parse_u32(&val()?)?,
             "--permit" => o.permits.push(val()?),
+            "--needs" => {
+                let n = val()?;
+                if !n.starts_with("svc:") && !n.starts_with("ready:") {
+                    return Err(format!("--needs takes svc:NAME or ready:NAME, not {n}"));
+                }
+                o.needs.push(n);
+            }
             "--autostart" => o.autostart = true,
             "--secure-version" => o.secure_version = parse_u32(&val()?)?,
             "--abi" => {
@@ -230,6 +239,9 @@ fn assemble(app: &App, name: &str, o: &BuildOpts, elf_sha256: &[u8], kp: &KeyPai
     push(tlv::BUILD_ID, &elf_sha256[..t5a::BUILD_ID_SIZE])?;
     if !o.permits.is_empty() {
         push(tlv::PERMISSIONS, o.permits.join("\0").as_bytes())?;
+    }
+    if !o.needs.is_empty() {
+        push(tlv::NEEDS, o.needs.join("\0").as_bytes())?;
     }
     if o.autostart {
         push(tlv::FLAGS, &tlv::FLAG_AUTOSTART.to_le_bytes())?;
@@ -565,6 +577,7 @@ mod tests {
             version: [1, 2, 3],
             stack: 0x100,
             permits: vec!["timer".into(), "i2c0".into()],
+            needs: vec!["svc:net".into(), "ready:bt".into()],
             autostart: true,
             secure_version: 5,
             abi: (t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR),
@@ -595,6 +608,7 @@ mod tests {
         assert_eq!(img.info.flags, tlv::FLAG_AUTOSTART);
         assert_eq!(img.info.secure_version, 5);
         assert!(img.info.permits(b"timer") && img.info.permits(b"i2c0") && !img.info.permits(b"i2c"));
+        assert_eq!(img.info.needs, b"svc:net\0ready:bt");
         assert_eq!(img.image.len(), 300);
         assert_eq!(img.relocs.len(), t5a::RELOC_SIZE);
     }

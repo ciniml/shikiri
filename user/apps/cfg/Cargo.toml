@@ -6,3 +6,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 t5-rt = { path = "../../rt" }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes"] }

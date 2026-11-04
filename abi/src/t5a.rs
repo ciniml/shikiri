@@ -66,6 +66,10 @@ pub mod tlv {
     pub const SECURE_VERSION: u16 = 0x07;
     /// Filler that puts the image on a 128-byte boundary (XIP images).
     pub const PAD: u16 = 0x08;
+    /// NUL-separated names the app needs before it starts (doc/51 §3):
+    /// `svc:NAME` (a service is listening) or `ready:NAME` (a process has
+    /// raised that mark). The kernel holds the start until all are there.
+    pub const NEEDS: u16 = 0x09;
     /// u32: link address of the data of an XIP image (must be `XIP_DELTA`).
     pub const XIP_DATA: u16 = 0x40;
     pub const SIGNATURE: u16 = 0x80;
@@ -274,6 +278,8 @@ pub struct Info<'a> {
     pub build_id: [u8; BUILD_ID_SIZE],
     /// NUL-separated names `open` may use.
     pub permissions: &'a [u8],
+    /// NUL-separated names (the Needs TLV).
+    pub needs: &'a [u8],
     pub flags: u32,
     pub secure_version: u32,
     /// `Some(XIP_DELTA)` for an XIP image.
@@ -329,6 +335,7 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
     let mut abi = None;
     let mut build_id = None;
     let mut permissions: &[u8] = &[];
+    let mut needs: &[u8] = &[];
     let mut flags = 0;
     let mut secure_version = 0;
     let mut xip_data = None;
@@ -353,6 +360,7 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
                 build_id = Some(id);
             }
             tlv::PERMISSIONS => permissions = v,
+            tlv::NEEDS => needs = v,
             tlv::FLAGS if v.len() == 4 => flags = u32_at(v, 0),
             tlv::SECURE_VERSION if v.len() == 4 => secure_version = u32_at(v, 0),
             tlv::XIP_DATA if v.len() == 4 && u32_at(v, 0) == XIP_DELTA => xip_data = Some(XIP_DELTA),
@@ -378,7 +386,7 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
     }
     Ok(Image {
         header: h,
-        info: Info { name, version, abi, build_id, permissions, flags, secure_version, xip_data },
+        info: Info { name, version, abi, build_id, permissions, needs, flags, secure_version, xip_data },
         image: &signed[image_off..relocs_off],
         relocs: &signed[relocs_off..],
     })

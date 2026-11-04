@@ -17,7 +17,7 @@ PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
 PERMIT_net    := --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
 PERMIT_nettest := --permit svc:net --stack 32768
-PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net --permit svc:cfgsec --stack 16384
+PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net --permit svc:cfgsec --permit ready:bt --stack 16384
 PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
 PERMIT_init   := --permit proc:spawn --permit svc:fs --stack 16384
 PERMIT_keylog := --permit kbd
@@ -28,12 +28,18 @@ PERMIT_blegatt := --permit svc:ble
 PERMIT_bleecho := --permit svc:ble
 PERMIT_mtbench := --permit random --permit svc:fs --stack 32768
 PERMIT_mtreq  := --permit svc:matter
-PERMIT_cfg    := --permit listen:cfg --permit listen:cfgsec --permit svc:fs --stack 16384
+PERMIT_cfg    := --permit listen:cfg --permit listen:cfgsec --permit flash:cfg --permit random --permit svc:fs --stack 16384
 PERMIT_cfgctl := --permit svc:cfg
 PERMIT_matter := --permit svc:net --permit svc:fs --permit random --permit listen:matter --permit svc:ble --permit svc:wifi --stack 131072
 PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:kill --permit svc:matter --permit svc:cfg --stack 32768
+# What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a
+# service listens) or `ready:NAME` (a process raised the mark). The kernel
+# holds the start up to 10 s.
+NEEDS_ble     := --needs ready:bt
+NEEDS_matter  := --needs svc:net
+NEEDS_cfgctl  := --needs svc:cfg
 # Apps linked for XIP (doc/15): text runs from flash, data in PSRAM. Built
 # with t5app-xip.ld into their own target directory; hello is built both ways.
 XIP_APPS   := hello xipcheck spin font
@@ -96,7 +102,7 @@ apps: tools $(UNTRUSTED_KEY)
 	cd user && cargo build --release
 	cd user && RUSTFLAGS="$(XIP_RUSTFLAGS)" cargo build --release --target-dir target/xip $(addprefix -p ,$(XIP_APPS))
 	mkdir -p $(APPS_DIR)
-	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) &&) true
+	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) $(NEEDS_$(a)) &&) true
 	@# Images the kernel must reject (self-test, doc/14 §1.4).
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-untrusted.t5a --key $(UNTRUSTED_KEY) \
 	    --name hello-untrusted
@@ -123,7 +129,7 @@ AUTO_APPS := fs init
 AUTO_DIR  := $(APPS_DIR)/auto
 apps-auto: apps
 	mkdir -p $(AUTO_DIR)
-	$(foreach a,$(AUTO_APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(AUTO_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) --autostart &&) true
+	$(foreach a,$(AUTO_APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(AUTO_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) $(NEEDS_$(a)) --autostart &&) true
 
 install-auto: apps-auto schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
@@ -310,11 +316,15 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --expect-event proc.spawned --expect-event hello.greet --expect-event proc.spawn_failed \
 	    --expect-event init.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
-	@# The settings (doc/50): cfg in memory (t5emu has no SD card) and
-	@# cfgctl's self-test (values, a secret not given back, limits, list).
-	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
-	    --ctl "run cfg 1" --ctl "wait-ms 300" --ctl "run cfgctl 0" --ctl "wait-ms 2000" --ctl "run cfgctl 1" \
-	    --expect-event cfg.ready --expect-event cfgctl.ok --expect-event cfgctl.entry \
+	@# The settings (doc/50, doc/51): cfgctl asked for before cfg waits for
+	@# svc:cfg (Needs); cfg makes its key and keeps the table in the
+	@# emulated flash; cfgctl's self-test (values, a sealed secret not given
+	@# back, limits, list); after cfg starts again the values are there.
+	$(T5EMU) --quiet --max-ms 40000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run cfgctl 0" --ctl "wait-ms 500" --ctl "run cfg" --ctl "wait-ms 6000" \
+	    --ctl "kill 101" --ctl "run cfg" --ctl "wait-ms 4000" --ctl "run cfgctl 1" \
+	    --expect-event proc.waiting --expect-event cfg.key_created --expect-event cfgctl.ok \
+	    --expect-event cfg.loaded --expect-event cfgctl.entry \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# The keyboard (doc/39): keys typed on the emulated keyboard on ExtPort1
 	@# reach keylog (5 keys: press and release each, "aB\n" has Shift).

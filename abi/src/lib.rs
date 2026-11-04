@@ -419,6 +419,31 @@ pub mod wifi {
     pub const PSK_MAX: usize = 64;
 }
 
+/// Readiness marks (doc/51 §3): `open("ready:NAME")` (with `--permit
+/// ready:NAME`) raises the mark until the handle is closed or the process
+/// ends. Apps that need it (`--needs ready:NAME`) start only once it is up.
+pub mod ready {
+    pub const PREFIX: &str = "ready:";
+}
+
+/// The settings' flash (doc/51 §2.2): the first 64 KiB of the `userdata`
+/// partition, for `cfg` only. `read` and `write` go at the position (`SEEK`)
+/// and move it; a write must land on erased flash, at a 4-byte boundary.
+pub mod cfgflash {
+    pub const NAME: &str = "flash:cfg";
+    /// Its flash offset and size.
+    pub const OFFSET: u32 = 0xC2_0000;
+    pub const SIZE: u32 = 0x1_0000;
+    pub const SECTOR: u32 = 4096;
+    /// ctl: a2 = position (bytes from the start).
+    pub const SEEK: usize = 1;
+    /// ctl: a2 = a sector's position: erases it (about 20 ms with
+    /// interrupts off, doc/14 §5.2).
+    pub const ERASE: usize = 2;
+    /// The longest `read` or `write`.
+    pub const MAX_IO: usize = 4096;
+}
+
 /// The Matter service (doc/49 MT2): a client connects to `svc:matter` and
 /// sends one request as text (`status`, `nodes`, `pair NODE PASSCODE
 /// DISCRIMINATOR`, `on NODE`, `off NODE`, `toggle NODE`, `read NODE EP

@@ -13,10 +13,12 @@
 //! A key is 1 to `KEY_MAX` bytes of `a-z 0-9 . _ -`; a value 0 to
 //! `VALUE_MAX` bytes. A secret stays secret until it is deleted.
 //!
-//! The file (`Table::image`): `MAGIC | generation: u32 | length: u16 | 0:
-//! u16 | crc32 of the records: u32`, then the records `[flags, key_len,
-//! value_len, key…, value…]`. Two copies, A and B: a save goes to the copy
-//! not holding the newest good table, so one cut short leaves the last.
+//! The stored table (`Table::image`): `MAGIC | generation: u32 | length:
+//! u16 | 0: u16 | crc32 of the records: u32`, then the records `[flags,
+//! key_len, value_len, key…, value…]`. Two copies, A and B: a save goes to
+//! the copy not holding the newest good table, so one cut short leaves the
+//! last. `cfg` keeps them in flash (`t5_abi::cfgflash`, doc/51 §2.2), a
+//! secret's value sealed (`SEALED`: nonce, ciphertext, tag).
 
 use crate::store::crc32;
 
@@ -24,7 +26,12 @@ pub const SVC: &str = "cfg";
 /// The same requests; `GET` and `LIST` also give secrets.
 pub const SVC_SECRET: &str = "cfgsec";
 pub const KEY_MAX: usize = 32;
+/// The longest value a client gives or gets.
 pub const VALUE_MAX: usize = 128;
+/// What sealing adds to a value: the nonce and the tag (AES-256-GCM).
+pub const SEAL_EXTRA: usize = 12 + 16;
+/// The longest value the table holds.
+pub const STORED_MAX: usize = VALUE_MAX + SEAL_EXTRA;
 /// The records' room.
 pub const DATA_MAX: usize = 4096 - HEADER;
 pub const HEADER: usize = 16;
@@ -48,6 +55,8 @@ pub const ERR: u8 = 0x86;
 
 /// Flags of a value.
 pub const SECRET: u8 = 1;
+/// In the table only (clients never see it): the value is sealed.
+pub const SEALED: u8 = 2;
 
 /// `ERR` codes.
 pub mod err {
@@ -108,7 +117,7 @@ impl Table {
 
     /// Sets `key`; a secret stays one. Err: an `err` code.
     pub fn set(&mut self, key: &[u8], flags: u8, value: &[u8]) -> Result<(), u8> {
-        if key.len() > KEY_MAX || value.len() > VALUE_MAX {
+        if key.len() > KEY_MAX || value.len() > STORED_MAX {
             return Err(err::TOO_LONG);
         }
         if !valid_key(key) {
@@ -120,6 +129,7 @@ impl Table {
             return Err(err::FULL);
         }
         let flags = flags | old.map_or(0, |(f, _)| f & SECRET);
+        let flags = if flags & SECRET == 0 { flags & !SEALED } else { flags };
         self.remove(key);
         let n = self.len;
         self.data[n] = flags;
@@ -138,6 +148,13 @@ impl Table {
         self.data.copy_within(end..self.len, start);
         self.len -= end - start;
         true
+    }
+
+    /// The length of the stored table that begins with `head` (at least
+    /// `HEADER` bytes), if it is one.
+    pub fn image_len(head: &[u8]) -> Option<usize> {
+        let len = u16::from_le_bytes([*head.get(8)?, *head.get(9)?]) as usize;
+        (head.get(..4)? == MAGIC && len <= DATA_MAX).then_some(HEADER + len)
     }
 
     /// The file's bytes (`FILE_MAX` at most) with `generation`.
@@ -169,7 +186,7 @@ impl Table {
         t.len = len;
         let mut used = 0;
         for (start, _, k, v) in t.records() {
-            if !valid_key(k) || v.len() > VALUE_MAX {
+            if !valid_key(k) || v.len() > STORED_MAX {
                 return None;
             }
             used = start + 3 + k.len() + v.len();
@@ -210,7 +227,7 @@ mod tests {
         assert_eq!(t.set(b"Wifi", 0, b""), Err(err::BAD));
         assert_eq!(t.set(b"", 0, b""), Err(err::BAD));
         assert_eq!(t.set(&[b'a'; KEY_MAX + 1], 0, b""), Err(err::TOO_LONG));
-        assert_eq!(t.set(b"a", 0, &[0; VALUE_MAX + 1]), Err(err::TOO_LONG));
+        assert_eq!(t.set(b"a", 0, &[0; STORED_MAX + 1]), Err(err::TOO_LONG));
         let mut i = 0u32;
         let r = loop {
             let mut k = *b"k.0000";
@@ -235,6 +252,7 @@ mod tests {
         t.set(b"b.c", SECRET, b"xyz").unwrap();
         let mut f = [0u8; FILE_MAX];
         let n = t.image(41, &mut f);
+        assert_eq!(Table::image_len(&f[..HEADER]), Some(n));
         let (u, generation) = Table::load(&f[..n]).unwrap();
         assert_eq!(generation, 41);
         assert_eq!(u.get(b"b.c"), Some((SECRET, &b"xyz"[..])));

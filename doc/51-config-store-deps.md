@@ -1,4 +1,4 @@
-# 51. 設定の置き場所と暗号化、C6 の記憶、アプリの依存関係、権限（検討）
+# 51. 設定の置き場所と暗号化、C6 の記憶、アプリの依存関係、権限
 
 利用者の指示（2026-11-05）:「ファイアウォールの更新してよいです。SDの平文はcfgを暗号化対応することを考えましょう。cfgの設定を保持する領域としてNVSの対応も検討。C6がどうなっているかはesp-atファームウェアを確認してください。wifiとbleの依存関係については、アプリの依存関係設定などの仕組みを検討してください。そういえばアプリの権限管理はありますか？」
 
@@ -93,3 +93,78 @@
 - 次に足すなら（案）:
   - クライアントの身元をサーバに渡す（`accept` が相手の像の名前か pid を返す）。それで `fs` はアプリごとのディレクトリに、`cfg` はキーごとの読み書きに絞れる。
   - `proc:kill` を、自分が起動したプロセスだけに絞れる形にする。
+
+## 5. 実装（2026-11-05）
+利用者の判断:「1. よいです。2. よいです。3. はい。4. はい。5. 消してよいです。バックアップ不要。」（§2.2 の `userdata` への書き込み、鍵はまずフラッシュ、C6 の網を消して以後書かせない、`Needs` の案、ESP-IDF の `nvs` 区画を消す）
+
+### 5.1 カーネル
+- **`flash:cfg`**（`t5_abi::cfgflash`）: `userdata` の先頭 64 KiB。
+  - 位置（`SEEK`）からの `read`/`write`（1 回 4 KiB まで）と、セクタの `ERASE`。
+  - `flash.rs` の `writable` にこの範囲を足した。一度に 1 つのハンドル。
+  - 読みはフラッシュの窓から（`flash::set_window`）。消すと書くは、ストアと同じ `smp::quiesce` の道を、システムコールの中で通る（カーネルのロックを持っている）。
+- **`nvserase`**（コンソールの命令）: ESP-IDF の `nvs` 区画（0x9000〜0xD000）を消し、読み戻しで全部 0xFF かを確かめる（`flash.nvs_erased`）。消してあるセクタは飛ばす。この区画も `writable` に入れた（使うのはこの命令だけ）。
+- **`Needs`**（T5A の TLV 0x09。must-understand ではないので、古いカーネルは読み飛ばす）: `elf2t5a --needs svc:NAME|ready:NAME`、Makefile の `NEEDS_<app>`。
+  - コンソールの `run` も `proc:spawn` も `request_start` を通る。
+    - 足りないものがあれば `needs.rs` の待ち行列（8 件）に入れ、`proc.waiting name=… needs=…` を出す。`run` の `ctl.done` は value=0。
+    - サービスの周回ごとに見直して、そろえば起動（`proc.spawned`）する。10 秒でそろわなければ `proc.needs_timeout` で取りやめる。
+  - `Needs` は署名の確認の前に読む。起動の順を決めるだけで、何も許さないから（起動のときにローダが署名を確かめる）。
+  - `svc:NAME` は listener があること（`channel::is_listening`）。
+- **`ready:NAME`**: `open("ready:NAME")`（`--permit ready:NAME`）で印を立てる。ハンドルを閉じるかプロセスが終われば下がる（`ready.raised`、`ready.lowered`）。16 個まで。
+- 今の宣言:
+  - `ble`: `--needs ready:bt`
+  - `matter`: `--needs svc:net`
+  - `cfgctl`: `--needs svc:cfg`
+  - `wifi` は `--permit ready:bt`
+  - `wifi` には `svc:cfg` を求めさせない。`cfg` がなくても組み込みの網でつながるように、中で 3 秒待つまま（判断）。
+
+### 5.2 `cfg`
+- 表はフラッシュのセクタ 0 と 1（A/B、形は doc/50 と同じ）、鍵はセクタ 2 と 3（`"T5CK"`、版、32 バイト、CRC。同じものを 2 つ）。
+- 鍵は初めての起動で `random` から作る（`cfg.key_created`）。
+- **秘密の値は AES-256-GCM で包む**（`seal.rs`、`aes-gcm` 0.10.3）。
+  - 形は nonce（12 バイト、毎回 `random`）、暗号文、タグ（16 バイト）。キーの名前を関連データにする。
+  - 表の印 `SEALED` はクライアントには見せない。表に置ける値の長さは `STORED_MAX`（128 + 28）。
+  - `svc:cfgsec` の `GET` と `LIST` で開く。開けなければ `cfg.unseal_failed` を出し、値なしで返す。
+- **SD からの引き継ぎ**: フラッシュに表がなければ、SD の `T5OS/CONFIG.A/B` を読む。秘密を包み、フラッシュに書き、SD のファイルを消す（`cfg.took_over_sd`）。SD に何もなくても空の表を書くので、引き継ぎは 1 回だけ。
+- listener を先に開いてから読み込む。`svc:cfg` を求めるアプリは、そのあいだに起動できる（要求は読み込みが終わってから答える）。
+- 許可: `listen:cfg`、`listen:cfgsec`、`flash:cfg`、`random`、`svc:fs`（引き継ぎのため）。
+- `run cfg 1`（メモリだけ）は残した。QEMU の virt はフラッシュに書けないので、`NOT_SAVED` になる。
+
+### 5.3 `wifi`
+- **C6 の NVS**: 起動のときに設定の `wifi.c6_cleared` を読む。
+  - `1` でなければ、`nvs_enable` = 1 のまま `WIFI_INIT`、`Req_WifiRestore`（291）、それから `nvs_enable` = 0 で `WIFI_INIT` し直す（スレーブは値が変わると Wi-Fi を止めて初期化し直す）。うまくいけば `wifi.c6_cleared` = `1` を書く（`wifi.chip_nvs_cleared ok noted`）。
+  - 以後は毎回 `nvs_enable` = 0 だけ。C6 には網が書かれない。
+- **`ready:bt`**: BT を起動したら立て、プロセスが終わるまで持つ。
+  - 前の `wifi` が起動した BT が残っていると、BT init は `ESP_ERR_INVALID_STATE`（259）、enable は `ESP_FAIL`（-1。スレーブは失敗をどれも `ESP_FAIL` で返す、`slave_control.c:548`）になる。
+  - そこで、init が 259 なら「動いている」として enable を送らない。前は `wifi` を起動し直すと BT を失敗と記録し、`ble` も印を待てなかった。
+
+### 5.4 `ble` が回り続けた原因
+- BT が起動していないときに `ble` を起動すると、CPU を使い切っていた（前の版で cpu_pm 516）。プロファイラ（doc/34）で見ると、`read` と `accept` のシステムコールが 12 秒に 189 万回ずつで、`wait` は 0 回だった。
+- 実行器に、起こされた周回の数を数える試しのログを入れた。結果は 262,144 回中 262,144 回が「起こされた」だった。起こした者の戻り番地は、embassy-sync 0.8.0 の `OnceLock::get`（`once_lock.rs:72`。値がまだなければ `wake_by_ref()` して `Pending`）。trouble-host 0.8.0 の `TxRunner::run` が、ホストの初期化を待つのに使っている（`host.rs:2066`）。初期化はコントローラが Reset に答えないと終わらないので、ずっと回る。
+- 直し:
+  1. `Needs: ready:bt` で、BT の前には起動しない。
+  2. `ble` は TrouBLE を作る前に自分で HCI_Reset を送り、3 秒（3 回）で Command Complete が来なければ `ble.no_controller` で終わる（終了コード 4）。
+  3. 実行器は、起こされた周回が 64 回続いたら 10 ms 待つ（来たイベントで `wait` はすぐ終わるので、入出力は遅れない）。2 を外した試しの版で、BT なしの CPU が 45.8 % → 1.3 %（最初の 1000 回、1 ms では 45.8 % のままだった）。
+
+## 6. 実機の結果（2026-11-05）
+- カーネルを入れ替え（`good.t5k`）、全アプリを入れ直した（入らなかったものなし）。
+- `nvserase`: 1 セクタを消し、16 KiB 全部が 0xFF（17 ms）。
+- `cfg` を起動し直すと、鍵を作り、SD の 2 ファイル（中身は空の表）を引き継いで、SD から消した。
+- **依存関係**: `wifi` を止めてから `run ble` → `proc.waiting needs=ready:bt` → `run wifi 1` → BT の起動の 0.15 秒後に `ble` が起動。`wifi` を起動し直しても、`ready:bt` が下がってまた上がる。
+- **C6**: `wifi.chip_nvs_cleared ok=true noted=true`。以後の起動は `nvs_enable` = 0。BLE のスキャン（5 秒で 76）、BLE のコミッショニングもそのまま動く。
+  - C6 のフラッシュは読めないので、消えたことは RPC が成功したことでしか確かめていない。
+- **暗号化の確かめ**:
+  - smctl の ble-wifi で `matter-test` を渡した。BlueZ の `le-connection-abort-by-local` で 3 回つながらず（doc/48 の PC からの接続の問題）、2 度目の実行で 13.65 秒。CommissioningComplete の後に保存された。
+  - `flash:cfg` の 16 KiB を読んで数えた: passphrase 0 回、SSID（秘密でない）1 回。読んだファイルは消した。
+  - `wifi` を起動し直すと `from=settings` で `matter-test` へ（`svc:cfgsec` で開いた passphrase で）。toggle も通った。
+  - 戻し（unpair、`cfgctl 2`、`wifi 1`）。passphrase は、smctl の出力にも RTT のログにも 0 回。
+- **再起動**: `cfg` はフラッシュから世代 6 を読み（起動から 4.0 秒）、`netctl` は `NET.RUL` から rules=6。
+  - `iotap` には 2 回とも、202 → 205 → 3 度目で接続（設定から 14.7 秒）。doc/22 §7.2 の、WPA3 の `iotap` で前からある未解決の問題と同じ。
+- t5emu の試験を差し替えた（`make test-p4emu`）:
+  - `cfgctl` を `cfg` より先に頼むと待つ（`proc.waiting`）。
+  - `cfg` がエミュレータのフラッシュに鍵と表を作る。自己試験の後、`cfg` を起動し直しても `test.kept` が残る。
+
+## 7. 残り
+- 鍵はまだフラッシュにある。本体からフラッシュを読まれれば開ける（§2.3 の 2）。eFuse の HMAC への切り替えは、eFuse を書く判断と一緒に。
+- `NET.RUL` と `START.CFG` は SD のまま（秘密ではない）。`cfg` に移すかは未定。
+- `START.CFG` の `wifi` は引数なし（BT なし）。起動時に `ble` と `matter` も動かすなら、`wifi 1`、`ble`、`matter` を足す（`ble` は `Needs` で BT を待つ）。
+- `REVERT` はまだ通していない（doc/50 §7）。

@@ -14,10 +14,14 @@
 //! (`LINK_RENEW`), or the old address stays.
 //!
 //! The passphrase is only sent to the chip and the settings; it is never
-//! logged.
+//! logged. The chip is told not to keep it in its own flash (`nvs_enable` =
+//! 0); the first time, what it kept before is cleared (`Req_WifiRestore`,
+//! doc/51 §1), and `wifi.c6_cleared` remembers that.
+//!
+//! With Bluetooth started, it raises `ready:bt` (doc/51 §3): `ble` needs it.
 //!
 //! Built with `--permit wlan:ctl --permit listen:wifi --permit svc:net
-//! --permit svc:cfgsec`.
+//! --permit svc:cfgsec --permit ready:bt`.
 
 use t5_rt::net::link;
 use t5_rt::{Channel, Config, Error, Handle, Listener, Net, chan, event, rights, sleep_ms, time_ns, wait_raw, wifi, wlan};
@@ -38,6 +42,12 @@ const REQ_WIFI_CONNECT: u32 = 282;
 const REQ_WIFI_DISCONNECT: u32 = 283;
 const REQ_WIFI_SET_CONFIG: u32 = 284;
 const REQ_WIFI_SET_PS: u32 = 270;
+/// Rpc_Req_WifiRestore (esp_hosted_rpc.proto:143): `esp_wifi_restore`, the
+/// chip's kept Wi-Fi settings back to their defaults.
+const REQ_WIFI_RESTORE: u32 = 291;
+/// esp_err_t ESP_ERR_INVALID_STATE: Bluetooth started already (by an
+/// earlier `wifi`; the chip outlives the service).
+const ESP_ERR_INVALID_STATE: i32 = 0x103;
 /// Rpc_Req_FeatureControl (esp_hosted 2.12.7, esp_hosted_rpc.proto:55-84,
 /// 262, 1674-1685): feature 1 = Bluetooth; command 1 = BT init, 3 = BT
 /// enable. The response's field 1 is an esp_err_t.
@@ -69,6 +79,8 @@ const INIT_MAGIC: u64 = 0x1F2F_3F4F;
 const RESPONSE_NS: u64 = 5_000_000_000;
 /// How long a client's JOIN may take to associate.
 const JOIN_NS: u64 = 20_000_000_000;
+/// The mark `ble` needs (doc/51 §3).
+const BT_READY: &str = "ready:bt";
 /// How long to wait for the settings service at start.
 const CFG_MS: u64 = 3000;
 /// wifi_err_reason_t WIFI_REASON_ASSOC_LEAVE: the station left (our own
@@ -228,6 +240,8 @@ struct Rpc {
     /// The network last associated with (`net` renews when it changes).
     last: [u8; wifi::SSID_MAX],
     last_len: usize,
+    /// The last failed request's esp_err_t.
+    last_err: i32,
 }
 
 /// A message from the chip: its type, id and payload (the oneof field
@@ -320,6 +334,7 @@ impl Rpc {
             }
             let resp = int(self.payload(&m), resp_field);
             if resp != 0 {
+                self.last_err = resp;
                 event!(Error, "wifi.request_failed", id = id, esp_err = resp);
                 return Err(id);
             }
@@ -368,9 +383,10 @@ impl Rpc {
 
 fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     let ctl = Handle::open(wlan::CTL, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).map_err(|_| 1u32)?;
-    let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX], ssid: [0; wifi::SSID_MAX], ssid_len: 0, connected: false, reason: 0, last: [0; wifi::SSID_MAX], last_len: usize::MAX };
+    let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX], ssid: [0; wifi::SSID_MAX], ssid_len: 0, connected: false, reason: 0, last: [0; wifi::SSID_MAX], last_len: usize::MAX, last_err: 0 };
     // The settings' network, else the built-in one.
-    let (home, source) = match Network::stored() {
+    let cfg = Config::connect_within(true, CFG_MS).ok();
+    let (home, source) = match cfg.as_ref().and_then(Network::stored) {
         Some(n) => (n, "settings"),
         None => (Network::new(&SSID[..SSID.len().min(wifi::SSID_MAX)], &PSK[..PSK.len().min(wifi::PSK_MAX)]).unwrap(), "built-in"),
     };
@@ -382,45 +398,23 @@ fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     {
         rpc.on_event(&m);
     }
-    if bluetooth {
-        start_bluetooth(&mut rpc);
-    }
+    // Held for the process's life: the mark goes down when it ends.
+    let _bt_ready = if bluetooth && start_bluetooth(&mut rpc) { Handle::open(BT_READY, rights::CTL).ok() } else { None };
 
-    // wifi_init_config: the values TCC's host sends (its sdkconfig,
-    // CONFIG_WIFI_RMT_*); the chip uses them as given
-    // (slave_wifi_std.c:150-198, 423-470).
-    rpc.call(REQ_WIFI_INIT, 1, |p| {
-        p.msg(1, |c| {
-            for (field, v) in [
-                (1, 10),  // static_rx_buf_num
-                (2, 32),  // dynamic_rx_buf_num
-                (3, 1),   // tx_buf_type: dynamic
-                (4, 0),   // static_tx_buf_num
-                (5, 32),  // dynamic_tx_buf_num
-                (6, 0),   // cache_tx_buf_num
-                (7, 0),   // csi_enable
-                (8, 1),   // ampdu_rx_enable
-                (9, 1),   // ampdu_tx_enable
-                (10, 0),  // amsdu_tx_enable
-                (11, 1),  // nvs_enable
-                (12, 0),  // nano_enable
-                (13, 6),  // rx_ba_win
-                (14, 0),  // wifi_task_core_id
-                (15, 752), // beacon_max_len
-                (16, 32), // mgmt_sbuf_num
-                (17, 1),  // feature_caps: WPA3-SAE (the chip keeps its own if different)
-                (18, 1),  // sta_disconnected_pm
-                (19, 7),  // espnow_max_encrypt_num
-                (20, INIT_MAGIC),
-                (21, 0),  // rx_mgmt_buf_type: static
-                (22, 5),  // rx_mgmt_buf_num
-                (23, 3),  // tx_hetb_queue_num
-                (24, 0),  // dump_hesigb_enable
-            ] {
-                c.uint(field, v);
-            }
-        })
-    })?;
+    // The chip keeps the network it is given in its NVS unless told not to
+    // (doc/51 §1). The first time, clear what it kept (with the NVS on, so
+    // the defaults are written there), then initialise it without.
+    let cleared = cfg.as_ref().is_some_and(|c| {
+        let mut v = [0u8; 1];
+        matches!(c.get("wifi.c6_cleared", &mut v), Ok(Some(g)) if g.len == 1 && v[0] == b'1')
+    });
+    if !cleared {
+        wifi_init(&mut rpc, 1)?;
+        let restored = rpc.call(REQ_WIFI_RESTORE, 1, |_| {}).is_ok();
+        let noted = restored && cfg.as_ref().is_some_and(|c| c.set("wifi.c6_cleared", b"1", false).is_ok());
+        event!(Info, "wifi.chip_nvs_cleared", ok = restored, noted = noted);
+    }
+    wifi_init(&mut rpc, 0)?;
     rpc.call(REQ_SET_MODE, 1, |p| p.uint(1, MODE_STA))?;
     // The MAC address is known once Wi-Fi is initialised
     // (ESP_ERR_WIFI_NOT_INIT before, seen on the Tab5).
@@ -478,6 +472,46 @@ fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     idle(&mut rpc, home)
 }
 
+/// `wifi_init_config`: the values TCC's host sends (its sdkconfig,
+/// CONFIG_WIFI_RMT_*), but `nvs`; the chip uses them as given
+/// (slave_wifi_std.c:150-198, 423-470), and starts its Wi-Fi over when they
+/// change (`__wrap_esp_wifi_init`, slave_wifi_std.c:352-387).
+fn wifi_init(rpc: &mut Rpc, nvs: u64) -> Result<(), u32> {
+    rpc.call(REQ_WIFI_INIT, 1, |p| {
+        p.msg(1, |c| {
+            for (field, v) in [
+                (1, 10),  // static_rx_buf_num
+                (2, 32),  // dynamic_rx_buf_num
+                (3, 1),   // tx_buf_type: dynamic
+                (4, 0),   // static_tx_buf_num
+                (5, 32),  // dynamic_tx_buf_num
+                (6, 0),   // cache_tx_buf_num
+                (7, 0),   // csi_enable
+                (8, 1),   // ampdu_rx_enable
+                (9, 1),   // ampdu_tx_enable
+                (10, 0),  // amsdu_tx_enable
+                (11, nvs), // nvs_enable: whether the chip keeps settings in its flash
+                (12, 0),  // nano_enable
+                (13, 6),  // rx_ba_win
+                (14, 0),  // wifi_task_core_id
+                (15, 752), // beacon_max_len
+                (16, 32), // mgmt_sbuf_num
+                (17, 1),  // feature_caps: WPA3-SAE (the chip keeps its own if different)
+                (18, 1),  // sta_disconnected_pm
+                (19, 7),  // espnow_max_encrypt_num
+                (20, INIT_MAGIC),
+                (21, 0),  // rx_mgmt_buf_type: static
+                (22, 5),  // rx_mgmt_buf_num
+                (23, 3),  // tx_hetb_queue_num
+                (24, 0),  // dump_hesigb_enable
+            ] {
+                c.uint(field, v);
+            }
+        })
+    })
+    .map(|_| ())
+}
+
 /// The station's access point (sent to the chip only).
 fn set_config(rpc: &mut Rpc, ssid: &[u8], psk: &[u8]) -> Result<(), u32> {
     rpc.call(REQ_WIFI_SET_CONFIG, 1, |p| {
@@ -500,18 +534,25 @@ fn set_config(rpc: &mut Rpc, ssid: &[u8], psk: &[u8]) -> Result<(), u32> {
 /// Starts the chip's Bluetooth controller: since esp_hosted 2.5.2 the host
 /// asks for it (CHANGELOG, slave_control.c:520-562); then `bt:hci` carries
 /// its packets. A failure is logged and Wi-Fi goes on.
-fn start_bluetooth(rpc: &mut Rpc) {
+fn start_bluetooth(rpc: &mut Rpc) -> bool {
     for (name, command) in [("init", FEATURE_BT_INIT), ("enable", FEATURE_BT_ENABLE)] {
         let r = rpc.call(REQ_FEATURE_CONTROL, 1, |p| {
             p.uint(1, FEATURE_BLUETOOTH);
             p.uint(2, command);
         });
         if r.is_err() {
+            // Initialised already: an earlier `wifi` started the controller,
+            // and it still runs (an enable now fails with ESP_FAIL,
+            // slave_control.c:548).
+            if command == FEATURE_BT_INIT && rpc.last_err == ESP_ERR_INVALID_STATE {
+                break;
+            }
             event!(Warn, "wifi.bt_failed", step = name);
-            return;
+            return false;
         }
     }
     event!(Info, "wifi.bt_started");
+    true
 }
 
 /// Logs events; after a disconnection, connects again (every 5 s). Serves
@@ -711,8 +752,7 @@ impl Network {
     }
 
     /// The settings' network, if there is one (doc/50).
-    fn stored() -> Option<Network> {
-        let c = Config::connect_within(true, CFG_MS).ok()?;
+    fn stored(c: &Config) -> Option<Network> {
         let mut ssid = [0u8; wifi::SSID_MAX];
         let mut psk = [0u8; wifi::PSK_MAX];
         let s = c.get("wifi.ssid", &mut ssid).ok()??;

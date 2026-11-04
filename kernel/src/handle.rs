@@ -31,6 +31,10 @@ pub enum Object {
     List(crate::procinfo::ListHandle),
     Kill(crate::procinfo::KillHandle),
     Random,
+    CfgFlash(crate::flash::CfgFlash),
+    /// Held for its `Drop`: the mark goes down with the handle.
+    #[allow(dead_code)]
+    Ready(crate::needs::ReadyMark),
 }
 
 /// The SD card's sectors (doc/18 §3): one handle at a time.
@@ -114,11 +118,18 @@ impl Object {
             n if n == proc::APPS.as_bytes() => Ok((Object::List(crate::procinfo::ListHandle::open(true)), rights::READ)),
             n if n == proc::KILL.as_bytes() => Ok((Object::Kill(crate::procinfo::KillHandle { pid }), rights::WRITE)),
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
+            n if n == t5_abi::cfgflash::NAME.as_bytes() => {
+                Ok((Object::CfgFlash(crate::flash::CfgFlash::open()?), rights::READ | rights::WRITE | rights::CTL))
+            }
             n if n == shm::NAME.as_bytes() => {
                 if !crate::shm::available() {
                     return Err(Error::NoDevice);
                 }
                 Ok((Object::Shm(ShmHandle { window: None }), rights::CTL))
+            }
+            n if n.starts_with(t5_abi::ready::PREFIX.as_bytes()) => {
+                let m = crate::needs::raise(&n[t5_abi::ready::PREFIX.len()..], pid)?;
+                Ok((Object::Ready(m), rights::CTL))
             }
             n if n.starts_with(svc::LISTEN_PREFIX.as_bytes()) => {
                 let l = channel::listen(&n[svc::LISTEN_PREFIX.len()..], pid)?;
@@ -258,7 +269,8 @@ impl Table {
             },
             Object::WlanCtl(c) => c.ctl(op, arg),
             Object::WlanDev(d) => d.ctl(op, arg),
-            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Spawn(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Random | Object::BtHci(_) => {
+            Object::CfgFlash(f) => f.ctl(op, arg),
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Spawn(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
                 Err(Error::NoSupport)
             }
         }
@@ -344,6 +356,7 @@ impl Table {
         match &mut self.get(h, rights::WRITE)?.object {
             Object::Channel(e) => e.write(buf),
             Object::Sd(s) => s.write(buf),
+            Object::CfgFlash(f) => f.write(buf),
             Object::NetDev(d) => d.write(buf),
             Object::WlanCtl(c) => c.write(buf),
             Object::WlanDev(d) => d.write(buf),
@@ -361,6 +374,7 @@ impl Table {
             Object::Channel(e) => e.read(buf),
             Object::Touch(t) => t.read(buf),
             Object::Sd(s) => s.read(buf),
+            Object::CfgFlash(f) => f.read(buf),
             Object::NetDev(d) => d.read(buf),
             Object::WlanCtl(c) => c.read(buf),
             Object::WlanDev(d) => d.read(buf),
@@ -431,7 +445,7 @@ impl Table {
             Object::WlanDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::BtHci(b) => b.poll().map(|(ev, v)| (i, ev, v)),
             Object::Kbd(k) => k.poll().map(|(ev, v)| (i, ev, v)),
-            Object::Shm(_) | Object::Sd(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Random => None,
+            Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Random => None,
         })
     }
 

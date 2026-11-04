@@ -13,6 +13,11 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use t5_rt::{chan, time_ns, wait_raw};
 
 const WANT_MAX: usize = 8;
+/// Rounds woken back to back before a pause, and the pause (it ends at
+/// once when a handle has an event, so I/O is not delayed). 64 rounds take
+/// about 0.8 ms on the Tab5.
+const SPIN_ROUNDS: u32 = 64;
+const SPIN_PAUSE_NS: u64 = 10_000_000;
 
 /// One thread: none of this is shared.
 struct Round {
@@ -70,6 +75,7 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
     let mut f = pin!(f);
     let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) };
     let mut cx = Context::from_waker(&waker);
+    let mut spins = 0u32;
     loop {
         let r = round();
         r.woken = false;
@@ -79,14 +85,24 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
             return v;
         }
         let r = round();
-        if r.woken {
-            continue;
-        }
-        let now = time_ns() / 1000;
-        if r.deadline <= now {
-            continue;
-        }
-        let timeout = r.deadline.saturating_sub(now).saturating_mul(1000);
+        // A future that wakes itself on every poll (embassy-sync's
+        // `OnceLock::get`) would keep this core busy: after a long run of
+        // such rounds, wait a little anyway.
+        let timeout = if r.woken {
+            spins += 1;
+            if spins < SPIN_ROUNDS {
+                continue;
+            }
+            spins = 0;
+            SPIN_PAUSE_NS
+        } else {
+            spins = 0;
+            let now = time_ns() / 1000;
+            if r.deadline <= now {
+                continue;
+            }
+            r.deadline.saturating_sub(now).saturating_mul(1000)
+        };
         // Errors (the timeout) only mean: poll again.
         if let Ok(ev) = wait_raw(&r.want[..r.wants], timeout)
             && ev.kind == chan::PEER_CLOSED

@@ -232,6 +232,11 @@ pub struct Listener {
     index: usize,
 }
 
+/// Whether a service listens on `svc:NAME` (doc/51 §3).
+pub fn is_listening(name: &[u8]) -> bool {
+    listeners().iter().flatten().any(|l| &l.name[..l.name_len] == name)
+}
+
 /// `open("listen:NAME")`: one listener per name.
 pub fn listen(name: &[u8], pid: u32) -> Result<Listener, Error> {
     if name.is_empty() || name.len() > MAX_NAME {

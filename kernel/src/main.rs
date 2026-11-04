@@ -21,6 +21,7 @@ mod kbd;
 mod wlan;
 mod kupdate;
 mod loader;
+mod needs;
 mod log;
 mod platform;
 mod process;
@@ -146,6 +147,9 @@ pub extern "C" fn kmain() -> ! {
     smp::start();
 
     let window = Current::map_flash();
+    if let Some(w) = window {
+        flash::set_window(w);
+    }
     let store = window.map(|window| {
         // A check that the window shows the flash: the CRC of the first
         // 4 KiB of ota_0 (0x10000), which is the start of the kernel's own
@@ -283,10 +287,34 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
 /// Starts the apps processes asked for through `proc:spawn` (doc/38).
 fn spawn_requested(s: &mut sched::Scheduler, store: &store::Store) {
     while let Some(r) = spawn::take() {
-        match start(s, store, r.name(), r.arg0, r.arg1) {
-            Ok(pid) => event!(Info, "proc.spawned", by = r.by, name = r.name(), pid = pid),
+        match request_start(s, store, Some(r.by), r.name(), r.arg0, r.arg1) {
+            Ok(Some(pid)) => event!(Info, "proc.spawned", by = r.by, name = r.name(), pid = pid),
+            Ok(None) => {}
             Err(why) => event!(Warn, "proc.spawn_failed", by = r.by, name = r.name(), error = why),
         }
+    }
+    // Starts that waited for their needs (doc/51 §3).
+    let now = Current::now();
+    while let Some((w, miss)) = needs::next_due(now, |name| store.image(name).map(needs::of_image)) {
+        let by = w.by.unwrap_or(0);
+        if let Some(need) = miss {
+            event!(Warn, "proc.needs_timeout", by = by, name = w.name(), needs = core::str::from_utf8(need).unwrap_or("?"));
+            continue;
+        }
+        match start(s, store, w.name(), w.arg0, w.arg1) {
+            Ok(pid) => event!(Info, "proc.spawned", by = by, name = w.name(), pid = pid),
+            Err(why) => event!(Warn, "proc.spawn_failed", by = by, name = w.name(), error = why),
+        }
+    }
+}
+
+/// Starts `name` now, or holds it until what its image needs is there
+/// (`Ok(None)`, doc/51 §3). `by`: the pid that asked, `None` for the host.
+fn request_start(s: &mut sched::Scheduler, store: &store::Store, by: Option<u32>, name: &str, arg0: u32, arg1: u32) -> Result<Option<u32>, &'static str> {
+    let image = store.image(name).ok_or("no such app")?;
+    match needs::missing(needs::of_image(image)) {
+        Some(need) => needs::defer(by, name, arg0, arg1, need, Current::now()).map(|_| None),
+        None => start(s, store, name, arg0, arg1).map(Some),
     }
 }
 
@@ -466,7 +494,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             event!(Info, "kernel.stack", size = size, used = used);
             Ok(n)
         }
-        Command::Run { name, arg0, arg1 } => start(s, store, name, arg0, arg1),
+        Command::Run { name, arg0, arg1 } => request_start(s, store, None, name, arg0, arg1).map(|pid| pid.unwrap_or(0)),
         Command::Kill { pid } => {
             if s.kill(pid) {
                 Ok(pid)
@@ -547,6 +575,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::Remove { name } => store.remove(name),
         Command::Rollback { name } => store.rollback(name, None, "command"),
         Command::FlashTest => store.flash_test(),
+        Command::NvsErase => flash::erase_nvs().map(|n| n as u32),
         // The full test overwrites the whole PSRAM, processes included.
         Command::Psram if s.slots.iter().any(Option::is_some) => Err("processes running"),
         Command::Psram => Current::psram_test(),
