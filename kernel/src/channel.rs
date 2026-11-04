@@ -10,7 +10,12 @@
 
 use t5_abi::{Error, chan, event, svc};
 
+/// QEMU runs few services and has less RAM (each channel holds 2 KiB of
+/// queues).
+#[cfg(not(feature = "platform-virt"))]
 const MAX_CHANNELS: usize = 32;
+#[cfg(feature = "platform-virt")]
+const MAX_CHANNELS: usize = 16;
 /// Services (`listen:`): 8 were all in use on the Tab5 once `cfg` came
 /// (doc/50). QEMU runs fewer services, and has less RAM.
 #[cfg(not(feature = "platform-virt"))]
@@ -115,6 +120,13 @@ pub fn open(name: &[u8], pid: u32) -> Result<End, Error> {
 impl End {
     fn channel(&self) -> &'static mut Channel {
         &mut channels()[self.ch]
+    }
+
+    /// On a service connection: the other end's pid (if it is there) and
+    /// the service's name (doc/52 §3.2). `None` on a named channel.
+    pub fn peer(&self) -> Option<(Option<u32>, &'static [u8])> {
+        let c = self.channel();
+        c.service.then(|| (c.holder[1 - self.end], &c.name[..c.name_len]))
     }
 
     /// Queues `msg` for the other end.

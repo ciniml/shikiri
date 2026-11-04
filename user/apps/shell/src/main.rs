@@ -416,7 +416,7 @@ impl Shell {
 
 /// `cfg ...`: the settings service (doc/50).
 fn cfg(o: &mut Out, args: &[&str]) {
-    let Ok(c) = Config::connect(false) else {
+    let Ok(c) = Config::connect() else {
         o.str("cfg: no settings service (run cfg)\n");
         return;
     };
@@ -479,7 +479,8 @@ fn cfg(o: &mut Out, args: &[&str]) {
             CfgError::Code(err::BAD) => "cfg: a key is a-z 0-9 . _ - only\n",
             CfgError::Code(err::TOO_LONG) => "cfg: too long\n",
             CfgError::Code(err::FULL) => "cfg: no room left\n",
-            CfgError::Code(err::NOT_SAVED) => "cfg: changed, but not saved to the SD card\n",
+            CfgError::Code(err::NOT_SAVED) => "cfg: changed, but not saved\n",
+            CfgError::Code(err::DENIED) => "cfg: this app may not use that key\n",
             _ => "cfg: the service failed\n",
         });
     }
@@ -774,6 +775,8 @@ fn kill(o: &mut Out, pid: u32) {
             o.str(": asked\n");
         }
         Err(Error::Busy) => o.str("kill: busy, try again\n"),
+        // `proc:kill/own` (doc/52): only what this shell started.
+        Err(Error::Denied) => o.str("kill: not started from this shell\n"),
         Err(_) => o.str("kill: failed\n"),
     }
 }

@@ -113,10 +113,18 @@ impl Object {
             n if n == bt::HCI.as_bytes() => Ok((Object::BtHci(crate::wlan::BtHci::open()?), rights::READ | rights::WRITE | rights::WAIT)),
             n if n == sd::NAME.as_bytes() => Ok((Object::Sd(SdHandle::open()?), rights::READ | rights::WRITE | rights::CTL)),
             n if n == kbd::NAME.as_bytes() => Ok((Object::Kbd(crate::kbd::KbdHandle::open()?), rights::READ | rights::WAIT)),
-            n if n == spawn::NAME.as_bytes() => Ok((Object::Spawn(crate::spawn::SpawnHandle { pid }), rights::WRITE)),
+            n if n == spawn::NAME.as_bytes() => {
+                let any = crate::ident::get(pid).is_some_and(|e| t5_abi::t5a::permits_all(e.permissions(), n));
+                Ok((Object::Spawn(crate::spawn::SpawnHandle { pid, any }), rights::WRITE))
+            }
             n if n == proc::LIST.as_bytes() => Ok((Object::List(crate::procinfo::ListHandle::open(false)), rights::READ)),
             n if n == proc::APPS.as_bytes() => Ok((Object::List(crate::procinfo::ListHandle::open(true)), rights::READ)),
-            n if n == proc::KILL.as_bytes() => Ok((Object::Kill(crate::procinfo::KillHandle { pid }), rights::WRITE)),
+            n if n == proc::KILL.as_bytes() => {
+                let any = crate::ident::get(pid).is_some_and(|e| {
+                    t5_abi::t5a::permits_all(e.permissions(), n) || t5_abi::t5a::grants(e.permissions(), n).any(|g| g == b"any")
+                });
+                Ok((Object::Kill(crate::procinfo::KillHandle { pid, any }), rights::WRITE))
+            }
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == t5_abi::cfgflash::NAME.as_bytes() => {
                 Ok((Object::CfgFlash(crate::flash::CfgFlash::open()?), rights::READ | rights::WRITE | rights::CTL))
@@ -312,6 +320,14 @@ impl Table {
         let w = end.take().ok_or(Error::Busy)?;
         self.slots[free] = Some(Handle { object: Object::Shm(ShmHandle { window: Some(w) }), rights: rights::CTL });
         Ok(free + 1)
+    }
+
+    /// A service connection's other end and service (doc/52 §3.2).
+    pub fn peer(&mut self, h: usize) -> Option<(Option<u32>, &'static [u8])> {
+        match &self.get(h, rights::READ).ok()?.object {
+            Object::Channel(e) => e.peer(),
+            _ => None,
+        }
     }
 
     /// Whether `h` is a channel / a shared-memory handle.

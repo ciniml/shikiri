@@ -13,6 +13,10 @@
 //! ends (`ble.no_controller`): TrouBLE would wait for one in a busy loop
 //! (its TxRunner polls an `OnceLock` that wakes itself every time).
 //!
+//! A client's grants (doc/52 §3.3) say what it may do: `svc:ble/scan`,
+//! `svc:ble/central` (connect and use a GATT client), `svc:ble/peripheral`
+//! (advertise a GATT service); other requests fail with code 6.
+//!
 //! Built with `--permit bt:hci --permit listen:ble`.
 
 mod exec;
@@ -139,6 +143,8 @@ const NOT_NOW: u8 = 2;
 const STACK_FAILED: u8 = 3;
 const TIMED_OUT: u8 = 4;
 const NOT_FOUND: u8 = 5;
+/// The client's grants do not allow the request (doc/52 §3.3).
+const DENIED: u8 = 6;
 
 impl EventHandler for Reports {
     fn on_adv_reports(&self, reports: LeAdvReportsIter) {
@@ -205,11 +211,24 @@ async fn serve(stack: &Host<'_>, l: &Listener, reports: &Reports) -> ! {
     loop {
         let c = accept(l).await;
         let raw = c.0.raw();
+        // What it may do (doc/52 §3.3): `scan`, `central`, `peripheral`.
+        let grants = c.peer_grants();
         *reports.client.borrow_mut() = Some(c);
         event!(Debug, "ble.client");
         let mut buf = [0u8; ble::MSG_MAX];
         while let Some(n) = request(reports, &mut buf).await {
             let req = &buf[..n];
+            let need: &[u8] = match req.first().copied() {
+                Some(ble::SCAN) => b"scan",
+                Some(ble::CONNECT) => b"central",
+                Some(ble::ADVERTISE) => b"peripheral",
+                _ => b"",
+            };
+            if !need.is_empty() && !grants.has(need) {
+                event!(Warn, "ble.denied", request = req[0]);
+                reports.fail(req[0], DENIED).await;
+                continue;
+            }
             let gone = match req.first().copied() {
                 Some(ble::SCAN) if n >= 7 => scan(&mut central, reports, req).await,
                 Some(ble::CONNECT) if n >= 9 => connected(stack, &mut central, reports, req).await,

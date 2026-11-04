@@ -4,7 +4,10 @@
 //! The file service (M7c, doc/18 §5): the SD card's first FAT16/32
 //! partition through `embedded-sdmmc`, for clients on `svc:fs`. Each client
 //! gets a 64 KiB slice of shared memory for file data and listings; requests
-//! and replies are channel messages (`t5_abi::fs`).
+//! and replies are channel messages (`t5_abi::fs`). Each client may use
+//! its own folder and the paths its grants name (doc/52, `t5_abi::fs`);
+//! the rest is refused (`fs.denied`). Open files belong to the client that
+//! opened them.
 //!
 //! Built with `--permit sd --permit shm --permit listen:fs`.
 
@@ -12,7 +15,7 @@ use core::cell::RefCell;
 use core::ops::ControlFlow;
 
 use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx, Mode, RawDirectory, RawFile, RawVolume, TimeSource, Timestamp, VolumeIdx, VolumeManager};
-use t5_rt::{Channel, Error, FOREVER, Handle, Listener, Shm, chan, event, rights, sd, wait_raw};
+use t5_rt::{Channel, Error, FOREVER, Grants, Handle, Listener, Shm, chan, event, rights, sd, t5a, wait_raw};
 use t5_rt::fs::{self as proto, flag, op, status};
 
 t5_rt::entry!(main);
@@ -107,6 +110,120 @@ struct Client {
     chan: Channel,
     /// Offset of the client's slice in the pool.
     offset: usize,
+    /// What it may use (doc/52): its grants, and its own folder.
+    grants: Grants,
+    own: [u8; OWN_MAX],
+    own_len: usize,
+    name: [u8; t5a::MAX_NAME],
+    name_len: usize,
+}
+
+/// `T5OS/APPS/` and up to 8 characters.
+const APPS_DIR: &str = "T5OS/APPS";
+const OWN_MAX: usize = APPS_DIR.len() + 1 + 8;
+/// The longest path a request carries.
+const PATH_MAX: usize = chan::MSG_MAX - proto::REQUEST_HEADER;
+
+impl Client {
+    fn new(chan: Channel, offset: usize) -> Client {
+        let mut name = [0u8; t5a::MAX_NAME];
+        let name_len = chan.peer_name(&mut name);
+        let mut own = [0u8; OWN_MAX];
+        own[..APPS_DIR.len()].copy_from_slice(APPS_DIR.as_bytes());
+        own[APPS_DIR.len()] = b'/';
+        let n = name_len.min(8);
+        for (d, s) in own[APPS_DIR.len() + 1..].iter_mut().zip(&name[..n]) {
+            *d = s.to_ascii_uppercase();
+        }
+        Client { grants: chan.peer_grants(), chan, offset, own, own_len: APPS_DIR.len() + 1 + n, name, name_len }
+    }
+
+    fn own(&self) -> &[u8] {
+        &self.own[..self.own_len]
+    }
+
+    /// Whether the client may read (or write) `path` (normalised): its own
+    /// folder, or a `rw:` (or, to read, `r:`) grant over it.
+    fn may(&self, path: &[u8], write: bool) -> bool {
+        under(path, self.own())
+            || self.grants.iter().any(|g| {
+                let p = match (g.strip_prefix(b"rw:"), g.strip_prefix(b"r:")) {
+                    (Some(p), _) => p,
+                    (None, Some(p)) if !write => p,
+                    _ => return false,
+                };
+                let mut buf = [0u8; PATH_MAX];
+                under(path, upper(p, &mut buf))
+            })
+    }
+
+    /// Whether `path` is a directory above a place it may write (making it
+    /// is harmless).
+    fn above_allowed(&self, path: &[u8]) -> bool {
+        let above = |p: &[u8]| p.len() > path.len() && p.starts_with(path) && p[path.len()] == b'/';
+        above(self.own())
+            || self.grants.iter().filter_map(|g| g.strip_prefix(b"rw:")).any(|p| {
+                let mut buf = [0u8; PATH_MAX];
+                above(upper(p, &mut buf))
+            })
+    }
+
+    fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("?")
+    }
+}
+
+/// Whether `path` is `p` or under it (an empty `p`: everything).
+fn under(path: &[u8], p: &[u8]) -> bool {
+    p.is_empty() || path == p || (path.len() > p.len() && path.starts_with(p) && path[p.len()] == b'/')
+}
+
+/// A grant's path as the card compares it.
+fn upper<'b>(p: &[u8], buf: &'b mut [u8; PATH_MAX]) -> &'b [u8] {
+    let p = p.strip_prefix(b"/").unwrap_or(p);
+    let p = p.strip_suffix(b"/").unwrap_or(p);
+    let n = p.len().min(PATH_MAX);
+    for (d, s) in buf.iter_mut().zip(&p[..n]) {
+        *d = s.to_ascii_uppercase();
+    }
+    &buf[..n]
+}
+
+/// `path` as the card compares it: upper case, no leading or trailing `/`,
+/// `~` for the client's own folder; `None` for `.`, `..` or empty parts.
+fn normalise<'b>(path: &str, own: &[u8], out: &'b mut [u8; PATH_MAX]) -> Option<&'b str> {
+    let path = path.trim_matches('/');
+    let rest = if path == "~" { Some("") } else { path.strip_prefix("~/") };
+    let mut n = 0;
+    let mut put = |b: &[u8]| -> Option<()> {
+        out.get_mut(n..n + b.len())?.copy_from_slice(b);
+        n += b.len();
+        Some(())
+    };
+    let tail = match rest {
+        Some(r) => {
+            put(own)?;
+            if !r.is_empty() {
+                put(b"/")?;
+            }
+            r
+        }
+        None => path,
+    };
+    if !tail.is_empty() {
+        for (i, part) in tail.split('/').enumerate() {
+            if part.is_empty() || part == "." || part == ".." {
+                return None;
+            }
+            if i > 0 {
+                put(b"/")?;
+            }
+            for b in part.bytes() {
+                put(&[b.to_ascii_uppercase()])?;
+            }
+        }
+    }
+    core::str::from_utf8(&out[..n]).ok()
 }
 
 struct Open {
@@ -157,25 +274,49 @@ impl Service<'_> {
         }
     }
 
-    fn handle(&mut self, client: usize, slice: usize, msg: &[u8]) -> [u8; proto::REPLY_SIZE] {
-        let r = self.handle_inner(client, slice, msg);
+    fn handle(&mut self, client: usize, c: &Client, msg: &[u8]) -> [u8; proto::REPLY_SIZE] {
+        let r = self.handle_inner(client, c, msg);
         match r {
             Ok((v0, v1)) => proto::reply(status::OK, v0, v1),
             Err(s) => proto::reply(s, 0, 0),
         }
     }
 
-    fn handle_inner(&mut self, client: usize, slice: usize, msg: &[u8]) -> Result<(u32, u32), u32> {
+    /// Makes `path`'s directories (and it), what exists already is fine.
+    fn make_dirs(&self, path: &str) {
+        for (i, _) in path.match_indices('/').map(|(i, s)| (i, s)).chain(core::iter::once((path.len(), ""))) {
+            if let Ok((dir, name)) = self.parent(&path[..i]) {
+                let _ = self.vm.make_dir_in_dir(dir, name);
+                let _ = self.vm.close_dir(dir);
+            }
+        }
+    }
+
+    fn handle_inner(&mut self, client: usize, c: &Client, msg: &[u8]) -> Result<(u32, u32), u32> {
         if msg.len() < proto::REQUEST_HEADER {
             return Err(status::BAD_REQUEST);
         }
         let (code, flags, a, b) = (msg[0], msg[1], proto::u32_at(msg, 4), proto::u32_at(msg, 8));
-        let path = core::str::from_utf8(&msg[proto::REQUEST_HEADER..]).map_err(|_| status::BAD_NAME)?;
+        let raw = core::str::from_utf8(&msg[proto::REQUEST_HEADER..]).map_err(|_| status::BAD_NAME)?;
+        let mut buf = [0u8; PATH_MAX];
+        let path = normalise(raw, c.own(), &mut buf).ok_or(status::BAD_NAME)?;
+        // The own folder is made the first time it is named.
+        if raw.trim_start_matches('/').starts_with('~') {
+            self.make_dirs(core::str::from_utf8(c.own()).unwrap_or(""));
+        }
+        let denied = |op: &str| {
+            event!(Warn, "fs.denied", app = c.name(), op = op, path = path);
+            status::DENIED
+        };
+        let slice = c.offset;
         // The client's slice; the pool outlives the service and no other
         // reference to this part exists while a request is handled.
         let mem = unsafe { core::slice::from_raw_parts_mut(self.pool.as_mut_ptr().add(slice), proto::SLICE) };
         match code {
             op::OPEN => {
+                if !c.may(path.as_bytes(), flags & flag::WRITE != 0) {
+                    return Err(denied("open"));
+                }
                 let mode = match flags {
                     f if f & flag::WRITE == 0 => Mode::ReadOnly,
                     f if f & flag::CREATE != 0 && f & flag::APPEND != 0 => Mode::ReadWriteCreateOrAppend,
@@ -224,6 +365,9 @@ impl Service<'_> {
                 Ok((0, 0))
             }
             op::LIST => {
+                if !c.may(path.as_bytes(), false) {
+                    return Err(denied("list"));
+                }
                 let d = self.dir(path)?;
                 let (mut written, mut total) = (0usize, 0u32);
                 let r = self.vm.iterate_dir(d, |e| {
@@ -245,6 +389,9 @@ impl Service<'_> {
                 Ok((written as u32, total))
             }
             op::DELETE => {
+                if !c.may(path.as_bytes(), true) {
+                    return Err(denied("delete"));
+                }
                 let (dir, name) = self.parent(path)?;
                 let r = self.vm.delete_entry_in_dir(dir, name);
                 let _ = self.vm.close_dir(dir);
@@ -252,6 +399,9 @@ impl Service<'_> {
                 Ok((0, 0))
             }
             op::MKDIR => {
+                if !c.may(path.as_bytes(), true) && !c.above_allowed(path.as_bytes()) {
+                    return Err(denied("mkdir"));
+                }
                 let (dir, name) = self.parent(path)?;
                 let r = self.vm.make_dir_in_dir(dir, name);
                 let _ = self.vm.close_dir(dir);
@@ -338,8 +488,9 @@ fn run() -> Result<(), u32> {
             if pool_shm.grant(&c, offset, proto::SLICE).is_err() {
                 continue;
             }
-            clients[i] = Some(Client { chan: c, offset });
-            event!(Info, "fs.client", index = i as u32);
+            let client = Client::new(c, offset);
+            event!(Info, "fs.client", index = i as u32, app = client.name());
+            clients[i] = Some(client);
             continue;
         }
         let i = who[ev.index];
@@ -350,7 +501,7 @@ fn run() -> Result<(), u32> {
         }
         let c = clients[i].as_ref().unwrap();
         while let Ok(len) = c.chan.0.read(&mut msg) {
-            let reply = svc.handle(i, c.offset, &msg[..len]);
+            let reply = svc.handle(i, c, &msg[..len]);
             let _ = c.chan.send(&reply);
         }
     }

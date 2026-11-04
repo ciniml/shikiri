@@ -20,8 +20,6 @@ pub struct Process {
     pub region: Region,
     pub state: State,
     pub handles: handle::Table,
-    /// The image's Permissions TLV: the names `open` accepts.
-    permissions: &'static [u8],
     /// App store extents (first, count) an XIP process runs from; they must
     /// not be overwritten while it lives (doc/15 §4).
     pub xip_extents: Option<(u16, u16)>,
@@ -38,6 +36,12 @@ pub struct Process {
     /// included, and the total at the last `ps` (doc/31).
     pub cpu: u64,
     pub cpu_mark: u64,
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        crate::ident::remove(self.pid);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +88,11 @@ impl Process {
             data = Addr(loaded.region.data.start as u32),
             build_id = &loaded.build_id[..]
         );
+        // Who it is, for `open` and for servers (doc/52 §3.2). The loader
+        // refused permissions too long to copy.
+        if let Err(why) = crate::ident::add(pid, name.as_bytes(), loaded.permissions) {
+            event!(Error, "proc.ident_failed", pid = pid, error = why);
+        }
         Process {
             pid,
             name,
@@ -91,7 +100,6 @@ impl Process {
             region: loaded.region.clone(),
             state: State::Ready,
             handles: handle::Table::new(),
-            permissions: loaded.permissions,
             xip_extents: None,
             pending: None,
             shm_mapped: [None; 2],
@@ -186,6 +194,9 @@ impl Process {
             sys::CTL if a1 == t5_abi::shm::GRANT && self.handles.is_shm(a0) => {
                 self.handles.grant(a0, ((a3 as u64) << 32) | a2 as u64).map(|v| [v, 0, 0])
             }
+            sys::CTL if matches!(a1, t5_abi::chan::PEER_PID | t5_abi::chan::PEER_NAME | t5_abi::chan::PEER_GRANTS) && self.handles.is_channel(a0) => {
+                self.peer(a0, a1, a2, a3).map(|v| [v, 0, 0])
+            }
             sys::CTL if a1 == t5_abi::chan::TAKE_SHM && self.handles.is_channel(a0) => {
                 self.handles.take_shm(a0).map(|h| [h, 0, 0])
             }
@@ -264,12 +275,33 @@ impl Process {
         let mut name = [0u8; t5_abi::t5a::MAX_NAME];
         unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, name.as_mut_ptr(), len) };
         let name = &name[..len];
-        let permitted = t5_abi::t5a::permits(self.permissions, name);
+        // The copy kept in `ident` (doc/52 §3.2); none means nothing.
+        let permitted = crate::ident::get(self.pid).is_some_and(|e| t5_abi::t5a::permits(e.permissions(), name));
         let r = self.handles.open(name, rights, permitted, self.pid);
         if r == Err(Error::Denied) {
             event!(Warn, "proc.denied", pid = self.pid, name = core::str::from_utf8(name).unwrap_or("?"));
         }
         r
+    }
+
+    /// `ctl(channel, PEER_*)` (doc/52 §3.2): who is at the other end of a
+    /// service connection, and its grants on the service, into `[ptr, ptr +
+    /// len)`.
+    fn peer(&mut self, h: usize, op: usize, ptr: usize, len: usize) -> Result<usize, Error> {
+        let (peer, service) = self.handles.peer(h).ok_or(Error::NoSupport)?;
+        let pid = peer.unwrap_or(0);
+        if op == t5_abi::chan::PEER_PID {
+            return Ok(pid as usize);
+        }
+        self.check_user_range(ptr, len, true)?;
+        let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) };
+        if op == t5_abi::chan::PEER_NAME {
+            let name = crate::ident::get(pid).map_or(&[][..], |e| e.name());
+            let n = name.len();
+            out.get_mut(..n).ok_or(Error::Size)?.copy_from_slice(name);
+            return Ok(n);
+        }
+        crate::ident::service_grants(pid, service, out).ok_or(Error::Size)
     }
 
     /// `ctl(shm, MAP)`: two mapped windows per process (doc/19 §2; one

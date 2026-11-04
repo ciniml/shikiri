@@ -24,7 +24,7 @@
 //! --permit svc:cfgsec --permit ready:bt`.
 
 use t5_rt::net::link;
-use t5_rt::{Channel, Config, Error, Handle, Listener, Net, chan, event, rights, sleep_ms, time_ns, wait_raw, wifi, wlan};
+use t5_rt::{Channel, Config, Error, Grants, Handle, Listener, Net, chan, event, rights, sleep_ms, time_ns, wait_raw, wifi, wlan};
 
 include!(concat!(env!("OUT_DIR"), "/credentials.rs"));
 
@@ -385,7 +385,7 @@ fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     let ctl = Handle::open(wlan::CTL, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).map_err(|_| 1u32)?;
     let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX], ssid: [0; wifi::SSID_MAX], ssid_len: 0, connected: false, reason: 0, last: [0; wifi::SSID_MAX], last_len: usize::MAX, last_err: 0 };
     // The settings' network, else the built-in one.
-    let cfg = Config::connect_within(true, CFG_MS).ok();
+    let cfg = Config::connect_within(CFG_MS).ok();
     let (home, source) = match cfg.as_ref().and_then(Network::stored) {
         Some(n) => (n, "settings"),
         None => (Network::new(&SSID[..SSID.len().min(wifi::SSID_MAX)], &PSK[..PSK.len().min(wifi::PSK_MAX)]).unwrap(), "built-in"),
@@ -561,6 +561,8 @@ fn start_bluetooth(rpc: &mut Rpc) -> bool {
 fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
     let listener = Listener::open(wifi::SVC).ok();
     let mut client: Option<Channel> = None;
+    // Its grants (doc/52 §3.3).
+    let mut grants = Grants::NONE;
     let mut retry_at: Option<u64> = None;
     // A client's JOIN, until it associates or fails.
     let mut joining: Option<u64> = None;
@@ -637,10 +639,17 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
         if client.is_none()
             && let Some(c) = listener.as_ref().and_then(|l| l.accept().ok())
         {
+            grants = c.peer_grants();
             client = Some(c);
         }
         let mut req = [0u8; 4 + wifi::SSID_MAX + wifi::PSK_MAX];
         while let Some(Ok(k)) = client.as_ref().map(|c| c.0.read(&mut req)) {
+            let allowed = grants.has(b"join") || (req[0] == wifi::STATUS && grants.has(b"status"));
+            if !allowed {
+                event!(Warn, "wifi.denied", request = req[0]);
+                answer(&client, &[wifi::DENIED, req[0]]);
+                continue;
+            }
             match req[0] {
                 wifi::STATUS => {
                     let mut m = [0u8; 3 + wifi::SSID_MAX];
@@ -762,7 +771,7 @@ impl Network {
 
     /// Keeps it in the settings.
     fn save(&self) -> bool {
-        let Ok(c) = Config::connect_within(true, 1000) else { return false };
+        let Ok(c) = Config::connect_within(1000) else { return false };
         c.set("wifi.ssid", self.ssid(), false).is_ok() && c.set("wifi.psk", self.psk(), true).is_ok()
     }
 }

@@ -3,7 +3,7 @@
 //! queued here and the service loop, which has the scheduler and the
 //! store, starts them in order.
 
-use t5_abi::{Error, spawn};
+use t5_abi::{Error, event, spawn};
 
 pub struct Request {
     /// The pid that asked.
@@ -48,9 +48,11 @@ pub fn take() -> Option<Request> {
     r
 }
 
-/// A handle on `proc:spawn`.
+/// A handle on `proc:spawn`: any app, or only those of its
+/// `proc:spawn/NAME` entries (doc/52 §3.3).
 pub struct SpawnHandle {
     pub pid: u32,
+    pub any: bool,
 }
 
 impl SpawnHandle {
@@ -61,6 +63,10 @@ impl SpawnHandle {
         }
         if core::str::from_utf8(name).is_err() {
             return Err(Error::Invalid);
+        }
+        if !self.any && !crate::ident::get(self.pid).is_some_and(|e| t5_abi::t5a::grants(e.permissions(), spawn::NAME.as_bytes()).any(|g| g == name)) {
+            event!(Warn, "proc.spawn_denied", by = self.pid, name = core::str::from_utf8(name).unwrap_or("?"));
+            return Err(Error::Denied);
         }
         let q = q();
         if q.count == QUEUE {

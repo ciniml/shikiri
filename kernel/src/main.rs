@@ -17,6 +17,7 @@ mod channel;
 mod flash;
 mod handle;
 mod hostlink;
+mod ident;
 mod kbd;
 mod wlan;
 mod kupdate;
@@ -52,6 +53,9 @@ struct Apps {
     hello_untrusted: &'static [u8],
     /// Correctly signed, but for ABI 9.0.
     hello_badabi: &'static [u8],
+    /// Signed with an app key, asking for `sd` (doc/52 §4). Optional like
+    /// `timers`.
+    hello_strong: Option<&'static [u8]>,
     /// M3d (handles and timers). Optional: a store written before M3d does
     /// not have it, and installing it needs the kernel running.
     timers: Option<&'static [u8]>,
@@ -81,6 +85,7 @@ impl Apps {
             spin: get("spin")?,
             hello_untrusted: get("hello-untrusted")?,
             hello_badabi: get("hello-badabi")?,
+            hello_strong: s.image("hello-strong"),
             timers: s.image("timers"),
             hello_xip: s.image("hello-xip"),
             xipcheck: s.image("xipcheck"),
@@ -288,7 +293,10 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
 fn spawn_requested(s: &mut sched::Scheduler, store: &store::Store) {
     while let Some(r) = spawn::take() {
         match request_start(s, store, Some(r.by), r.name(), r.arg0, r.arg1) {
-            Ok(Some(pid)) => event!(Info, "proc.spawned", by = r.by, name = r.name(), pid = pid),
+            Ok(Some(pid)) => {
+                ident::set_parent(pid, r.by);
+                event!(Info, "proc.spawned", by = r.by, name = r.name(), pid = pid)
+            }
             Ok(None) => {}
             Err(why) => event!(Warn, "proc.spawn_failed", by = r.by, name = r.name(), error = why),
         }
@@ -302,7 +310,10 @@ fn spawn_requested(s: &mut sched::Scheduler, store: &store::Store) {
             continue;
         }
         match start(s, store, w.name(), w.arg0, w.arg1) {
-            Ok(pid) => event!(Info, "proc.spawned", by = by, name = w.name(), pid = pid),
+            Ok(pid) => {
+                ident::set_parent(pid, by);
+                event!(Info, "proc.spawned", by = by, name = w.name(), pid = pid)
+            }
             Err(why) => event!(Warn, "proc.spawn_failed", by = by, name = w.name(), error = why),
         }
     }
@@ -688,7 +699,9 @@ fn selftest_m1(apps: &Apps) -> u32 {
     let kernel_addr = &KERNEL_SECRET as *const u32 as usize;
     let kernel_ram = core::ptr::addr_of!(KERNEL_RAM_CANARY) as usize;
     unsafe { core::ptr::write_volatile(kernel_ram as *mut u32, 0xC0FFEE) };
-    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 11] = [
+    // Another process's memory (doc/52 §6): the next slot.
+    let other_slot = slot(1).0;
+    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 13] = [
         ("hello", apps.hello, 0, 0, Exit::Code(0)),
         ("fault/ok", apps.fault, MODE_OK, 0, Exit::Code(0)),
         ("fault/load-mmio", apps.fault, MODE_LOAD, Current::PROTECTED_MMIO, fault(cause::LOAD_ACCESS)),
@@ -696,6 +709,8 @@ fn selftest_m1(apps: &Apps) -> u32 {
         ("fault/store-kernel", apps.fault, MODE_STORE, kernel_addr, fault(cause::STORE_ACCESS)),
         ("fault/load-kernel-ram", apps.fault, MODE_LOAD, kernel_ram, fault(cause::LOAD_ACCESS)),
         ("fault/store-kernel-ram", apps.fault, MODE_STORE, kernel_ram, fault(cause::STORE_ACCESS)),
+        ("fault/load-other-slot", apps.fault, MODE_LOAD, other_slot, fault(cause::LOAD_ACCESS)),
+        ("fault/store-other-slot", apps.fault, MODE_STORE, other_slot, fault(cause::STORE_ACCESS)),
         ("fault/exec-data", apps.fault, MODE_EXEC_DATA, 0, fault(cause::INSN_ACCESS)),
         ("fault/store-text", apps.fault, MODE_STORE_TEXT, 0, fault(cause::STORE_ACCESS)),
         ("fault/bad-log", apps.fault, MODE_BAD_LOG, kernel_addr, Exit::Code(0)),
@@ -756,13 +771,18 @@ fn selftest_m3a(apps: &Apps) -> u32 {
         b[apps.hello.len() / 2] ^= 0x01;
         &*b
     };
-    let cases: [(&'static str, &[u8], fn(&LoadError) -> bool); 3] = [
-        ("verify/tampered", tampered, |e| matches!(e, LoadError::Image(Error::BadSignature))),
-        ("verify/untrusted-key", apps.hello_untrusted, |e| matches!(e, LoadError::Image(Error::UnknownKey))),
-        ("verify/abi-mismatch", apps.hello_badabi, |e| matches!(e, LoadError::Image(Error::AbiMismatch { .. }))),
+    let cases: [(&'static str, Option<&[u8]>, fn(&LoadError) -> bool); 4] = [
+        ("verify/tampered", Some(tampered), |e| matches!(e, LoadError::Image(Error::BadSignature))),
+        ("verify/untrusted-key", Some(apps.hello_untrusted), |e| matches!(e, LoadError::Image(Error::UnknownKey))),
+        ("verify/abi-mismatch", Some(apps.hello_badabi), |e| matches!(e, LoadError::Image(Error::AbiMismatch { .. }))),
+        ("verify/app-key-strong", apps.hello_strong, |e| matches!(e, LoadError::StrongPermit)),
     ];
     let mut failures = 0;
     for (name, image, expected) in cases {
+        let Some(image) = image else {
+            event!(Warn, "selftest.skipped", name = name);
+            continue;
+        };
         let result = unsafe { loader::load(image, &slot_of(0)) };
         let mut why = t5_abi::log::FmtBuf::<64>::new();
         let ok = match &result {
@@ -908,7 +928,7 @@ fn selftest_m5c(apps: &Apps) -> u32 {
     // An echo installed before N0a has no service modes: skip that run.
     let permits = |name: &[u8]| {
         loader::verify(echo)
-            .and_then(|signed| t5_abi::t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR))
+            .and_then(|(signed, _)| t5_abi::t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR))
             .is_ok_and(|img| img.info.permits(name))
     };
     let has_svc = permits(b"listen:echo");

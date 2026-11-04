@@ -1,12 +1,14 @@
 #![no_std]
 #![no_main]
 
-//! M7c test client (doc/18 §5): lists the root of the card, writes
-//! `T5OS/TEST.BIN` (`kib` KiB, default 100), reads it back and compares,
-//! creates and deletes `T5OS/DEL.TXT`, and lists `T5OS`.
+//! M7c test client (doc/18 §5), in its own folder (`~`, doc/52 §3.4):
+//! writes `~/TEST.BIN` (`kib` KiB, default 100), reads it back and
+//! compares, creates and deletes `~/DEL.TXT`, and lists `~`. Then checks
+//! that the rest of the card is refused: the root's listing, reading
+//! `T5OS/START.CFG`, making `T5OS/OTHER`, and `..` out of its folder.
 //!
-//! Built with `--permit svc:fs`. Exit 0 if everything held, otherwise the
-//! number of the failed check.
+//! Built with `--permit svc:fs` (no grants) and the app key. Exit 0 if
+//! everything held, otherwise the number of the failed check.
 
 use t5_rt::fs::{flag, status};
 use t5_rt::{Files, FsError, event, sleep_ms, time_ns};
@@ -40,18 +42,13 @@ fn run(kib: usize) -> Result<(), u32> {
             Err(_) => return Err(1),
         }
     };
-    let n = fs
-        .list("", |name, size, dir| event!(Info, "fstest.entry", dir = "/", name = name, size = size, is_dir = dir))
-        .map_err(|_| 2u32)?;
+    // Its own folder is made when first named.
+    let n = fs.list("~", |name, size, dir| event!(Info, "fstest.entry", dir = "~", name = name, size = size, is_dir = dir)).map_err(|_| 2u32)?;
     event!(Info, "fstest.listed", entries = n);
-    match fs.mkdir("T5OS") {
-        Ok(()) | Err(FsError::Status(status::EXISTS)) => {}
-        Err(_) => return Err(3),
-    }
 
     let len = kib * 1024;
     let mut chunk = [0u8; 4096];
-    let f = fs.open("T5OS/TEST.BIN", flag::WRITE | flag::CREATE).map_err(|_| 4u32)?;
+    let f = fs.open("~/TEST.BIN", flag::WRITE | flag::CREATE).map_err(|_| 4u32)?;
     let t = time_ns();
     let mut off = 0;
     while off < len {
@@ -65,7 +62,7 @@ fn run(kib: usize) -> Result<(), u32> {
     fs.close(f).map_err(|_| 6u32)?;
     let write_ms = (time_ns() - t) / 1_000_000;
 
-    let f = fs.open("T5OS/TEST.BIN", flag::READ).map_err(|_| 7u32)?;
+    let f = fs.open("~/TEST.BIN", flag::READ).map_err(|_| 7u32)?;
     if f.size as usize != len {
         event!(Error, "fstest.size", expected = len as u32, got = f.size);
         return Err(8);
@@ -88,15 +85,29 @@ fn run(kib: usize) -> Result<(), u32> {
         return Err(12);
     }
 
-    let f = fs.open("T5OS/DEL.TXT", flag::WRITE | flag::CREATE).map_err(|_| 13u32)?;
+    let f = fs.open("~/DEL.TXT", flag::WRITE | flag::CREATE).map_err(|_| 13u32)?;
     fs.write(f, b"delete me").map_err(|_| 14u32)?;
     fs.close(f).map_err(|_| 15u32)?;
-    fs.delete("T5OS/DEL.TXT").map_err(|_| 16u32)?;
-    if fs.open("T5OS/DEL.TXT", flag::READ).err() != Some(FsError::Status(status::NOT_FOUND)) {
+    fs.delete("~/DEL.TXT").map_err(|_| 16u32)?;
+    if fs.open("~/DEL.TXT", flag::READ).err() != Some(FsError::Status(status::NOT_FOUND)) {
         return Err(17);
     }
-    fs.list("T5OS", |name, size, dir| event!(Info, "fstest.entry", dir = "T5OS", name = name, size = size, is_dir = dir))
-        .map_err(|_| 18u32)?;
+    fs.list("~", |name, size, dir| event!(Info, "fstest.entry", dir = "~", name = name, size = size, is_dir = dir)).map_err(|_| 18u32)?;
+    // The rest of the card (doc/52).
+    let denied = |r: Result<(), FsError>| r == Err(FsError::Status(status::DENIED));
+    if !denied(fs.list("", |_, _, _| {}).map(|_| ())) {
+        return Err(19);
+    }
+    if !denied(fs.open("T5OS/START.CFG", flag::READ).map(|_| ())) {
+        return Err(20);
+    }
+    if !denied(fs.mkdir("T5OS/OTHER")) {
+        return Err(21);
+    }
+    if !(fs.open("~/../START.CFG", flag::READ).err() == Some(FsError::Status(status::BAD_NAME))) {
+        return Err(22);
+    }
+    event!(Info, "fstest.denied_ok");
     event!(Info, "fstest.done", bytes = len as u32, write_ms = write_ms as u32, read_ms = read_ms as u32);
     Ok(())
 }

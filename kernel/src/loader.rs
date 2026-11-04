@@ -27,6 +27,11 @@ pub enum LoadError {
     BadReloc { offset: u32 },
     /// An XIP image not read from the flash window, or no XIP here.
     NoXip,
+    /// Signed with an app key, but asks for a permission only system keys
+    /// may give (doc/52 §4).
+    StrongPermit,
+    /// A Permissions TLV longer than the kernel keeps (`chan::GRANTS_MAX`).
+    PermissionsTooLong,
 }
 
 impl From<t5a::Error> for LoadError {
@@ -55,16 +60,17 @@ fn align_up(v: usize, a: usize) -> usize {
 
 /// Checks the signature of `bytes` against the trusted keys and returns the
 /// signed part.
-pub fn verify(bytes: &[u8]) -> Result<&[u8], t5a::Error> {
+/// Also whether the key is a system key (doc/52 §4).
+pub fn verify(bytes: &[u8]) -> Result<(&[u8], bool), t5a::Error> {
     let s = t5a::split_signed(bytes)?;
-    check_signature(&s)?;
-    Ok(s.message)
+    let system = check_signature(&s)?;
+    Ok((s.message, system))
 }
 
 /// Checks a signature against the trusted keys (apps and kernel packages
-/// alike, doc/16 §2).
-pub fn check_signature(s: &t5a::Signed) -> Result<(), t5a::Error> {
-    let key = TRUSTED_KEYS.iter().find(|k| t5a::key_id(k) == s.key_id).ok_or(t5a::Error::UnknownKey)?;
+/// alike, doc/16 §2); true for a system key.
+pub fn check_signature(s: &t5a::Signed) -> Result<bool, t5a::Error> {
+    let (key, system) = TRUSTED_KEYS.iter().find(|(k, _)| t5a::key_id(k) == s.key_id).ok_or(t5a::Error::UnknownKey)?;
     let mut st = ed25519_compact::PublicKey::new(*key)
         .verify_incremental(&ed25519_compact::Signature::new(s.signature))
         .map_err(|_| t5a::Error::BadSignature)?;
@@ -74,7 +80,8 @@ pub fn check_signature(s: &t5a::Signed) -> Result<(), t5a::Error> {
         st.absorb(chunk);
         Current::feed_watchdog();
     }
-    st.verify().map_err(|_| t5a::Error::BadSignature)
+    st.verify().map_err(|_| t5a::Error::BadSignature)?;
+    Ok(*system)
 }
 
 /// Where a process goes: its slot's memory (an XIP image's text is mapped
@@ -91,10 +98,17 @@ pub struct Slot {
 /// `bytes`.
 pub unsafe fn load(bytes: &'static [u8], slot: &Slot) -> Result<Loaded, LoadError> {
     let started = Current::now();
-    let signed = verify(bytes)?;
+    let (signed, system) = verify(bytes)?;
     let verify_us = time::ticks_to_ns(Current::now() - started) / 1000;
     let img = t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR)?;
     let info = &img.info;
+    if info.permissions.len() > t5_abi::chan::GRANTS_MAX {
+        return Err(LoadError::PermissionsTooLong);
+    }
+    if !system && let Some(p) = info.permissions.split(|&b| b == 0).find(|p| t5a::strong(p)) {
+        event!(Warn, "loader.strong_permit", name = info.name, permit = core::str::from_utf8(p).unwrap_or("?"));
+        return Err(LoadError::StrongPermit);
+    }
     event!(
         Info,
         "loader.verified",

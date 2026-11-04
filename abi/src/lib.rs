@@ -125,6 +125,19 @@ pub mod chan {
     pub const SHM: usize = 3;
     /// ctl: returns a new `shm` handle for the granted memory.
     pub const TAKE_SHM: usize = 1;
+    /// ctl on a service connection (doc/52 §3.2): the other end's pid (0
+    /// if it has gone).
+    pub const PEER_PID: usize = 2;
+    /// ctl: a2 = buffer, a3 = its length: the other end's app name (the
+    /// signed image's); returns its length.
+    pub const PEER_NAME: usize = 3;
+    /// ctl: a2 = buffer, a3 = its length: the other end's grants on this
+    /// service, NUL-separated (GRANT of each `svc:NAME/GRANT` in its signed
+    /// Permissions TLV); returns their length (`Size` if the buffer is too
+    /// short). The server decides what each grant allows.
+    pub const PEER_GRANTS: usize = 4;
+    /// The most grant bytes a process has (its whole Permissions TLV).
+    pub const GRANTS_MAX: usize = 512;
 }
 
 /// Shared memory (doc/19 §2): regions of PSRAM in 64 KiB units. One
@@ -415,6 +428,10 @@ pub mod wifi {
     /// again, if a JOIN left it. `JOINED` or `FAILED` as for a JOIN.
     pub const REVERT: u8 = 6;
     pub const SAVED: u8 = 7;
+    /// `[DENIED, request]`: the client's grants (doc/52 §3.3) do not allow
+    /// the request: `svc:wifi/status` allows `STATUS`, `svc:wifi/join`
+    /// (system key only) everything.
+    pub const DENIED: u8 = 8;
     pub const SSID_MAX: usize = 32;
     pub const PSK_MAX: usize = 64;
 }
@@ -449,6 +466,11 @@ pub mod cfgflash {
 /// DISCRIMINATOR`, `on NODE`, `off NODE`, `toggle NODE`, `read NODE EP
 /// CLUSTER ATTR`; numbers decimal or 0x hex); the answer is `LINE`
 /// messages, then `END`. One request at a time.
+///
+/// A client's grants (doc/52 §3.3): `svc:matter/read` (status, nodes,
+/// read, sub), `control` (on, off, toggle, invoke, write), `admin` (the
+/// rest: pairing, windows, credentials). Others answer `denied` and `END`
+/// not ok.
 pub mod matter {
     pub const SVC: &str = "matter";
     /// `[LINE, text…]`: a line of the answer.
@@ -462,7 +484,9 @@ pub mod matter {
 /// returns once the request is queued (`Busy`: the queue is full); the
 /// kernel starts the app on its next service round and logs
 /// `proc.spawned` or `proc.spawn_failed`. The app gets its own image's
-/// permissions, nothing of the caller's.
+/// permissions, nothing of the caller's. `proc:spawn/NAME` (doc/52 §3.3)
+/// allows only app NAME (one entry each); `proc:spawn` any (system key
+/// only). Another name is `Denied`.
 pub mod spawn {
     pub const NAME: &str = "proc:spawn";
     /// The arguments before the name.
@@ -485,6 +509,8 @@ pub mod spawn {
 pub mod proc {
     pub const LIST: &str = "proc:list";
     pub const APPS: &str = "proc:apps";
+    /// `proc:kill/own` (doc/52 §3.3): only processes this one started (and
+    /// theirs); `proc:kill` or `proc:kill/any`: any (system key only).
     pub const KILL: &str = "proc:kill";
 
     /// A `proc:list` record: `u32 pid | u8 state | u8 handles | u16 0 |

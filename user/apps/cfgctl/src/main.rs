@@ -11,7 +11,9 @@
 //! - 2: deletes `wifi.ssid`, `wifi.psk` and `test.kept` (`wifi` joins its
 //!   built-in network from its next start).
 //!
-//! Built with `--permit svc:cfg`. Exit 0, or the step that failed.
+//! Built with `--permit svc:cfg/r: --permit svc:cfg/w:test. --permit
+//! svc:cfg/w:wifi.` (doc/52): it may read every key but no secret's value,
+//! and change only `test.*` and `wifi.*`. Exit 0, or the step that failed.
 
 use t5_rt::cfg::{self, err};
 use t5_rt::{CfgError, Config, event};
@@ -19,7 +21,7 @@ use t5_rt::{CfgError, Config, event};
 t5_rt::entry!(main);
 
 fn main(mode: usize, _: usize) -> usize {
-    let r = Config::connect_within(false, 3000).map_err(|_| 1u32).and_then(|c| match mode {
+    let r = Config::connect_within(3000).map_err(|_| 1u32).and_then(|c| match mode {
         0 => self_test(&c),
         1 => list(&c),
         2 => forget(&c),
@@ -57,8 +59,11 @@ fn self_test(c: &Config) -> Result<(), u32> {
     check(done(c.set("test.secret", b"again", false)), 23)?;
     let got = c.get("test.secret", &mut v).map_err(|_| 24u32)?;
     check(got.is_some_and(|g| g.flags & cfg::SECRET != 0 && g.len == 0), 25)?;
+    // Keys outside its grants (doc/52).
+    check(c.set("other.key", b"x", false) == Err(CfgError::Code(err::DENIED)), 26)?;
+    check(c.remove("other.key") == Err(CfgError::Code(err::DENIED)), 27)?;
     // Limits.
-    check(c.set("Bad", b"", false) == Err(CfgError::Code(err::BAD)), 30)?;
+    check(c.set("test.Bad", b"", false) == Err(CfgError::Code(err::BAD)), 30)?;
     check(c.set("test.long", &[b'x'; cfg::VALUE_MAX + 1], false) == Err(CfgError::Code(err::TOO_LONG)), 31)?;
     check(done(c.set("test.max", &[b'x'; cfg::VALUE_MAX], false)), 32)?;
     // Listing sees them all.

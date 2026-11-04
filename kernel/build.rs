@@ -18,7 +18,8 @@ fn main() {
     println!("cargo:rerun-if-changed={script}");
 
     // Trusted app-signing keys (doc/14 §1.3): keys/*.pub, 64 hex digits each.
-    let mut keys = String::from("/// Public keys whose signatures the loader accepts.\npub static TRUSTED_KEYS: &[[u8; 32]] = &[\n");
+    // `app-*.pub` are app keys, the rest system keys (doc/52 §4).
+    let mut keys = String::from("/// Public keys whose signatures the loader accepts, and whether each is a system key.\npub static TRUSTED_KEYS: &[([u8; 32], bool)] = &[\n");
     let mut found = 0;
     for entry in fs::read_dir("../keys").expect("../keys") {
         let path = entry.unwrap().path();
@@ -28,7 +29,8 @@ fn main() {
             let hex = hex.trim();
             assert_eq!(hex.len(), 64, "{}: expected 64 hex digits", path.display());
             let bytes: Vec<String> = (0..32).map(|i| format!("0x{}", &hex[i * 2..i * 2 + 2])).collect();
-            keys.push_str(&format!("    [{}], // {}\n", bytes.join(", "), path.display()));
+            let system = !path.file_name().unwrap().to_string_lossy().starts_with("app-");
+            keys.push_str(&format!("    ([{}], {system}), // {}\n", bytes.join(", "), path.display()));
             found += 1;
         }
     }

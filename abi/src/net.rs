@@ -105,7 +105,16 @@ pub mod status {
     pub const OTHER: u32 = 6;
     /// No link has the local address asked for, or the link is not there.
     pub const NO_ADDRESS: u32 = 7;
+    /// The client's grants do not allow the request (doc/52 §3.3).
+    pub const DENIED: u32 = 8;
 }
+
+/// What a client's grants (`svc:net/GRANT`, doc/52 §3.3) allow: `udp:PORT`
+/// or `udp:any` (UDP_BIND), `tcp-listen:PORT` or `tcp-listen:any`,
+/// `tcp-connect` (any port) or `tcp-connect:PORT`, `mcast` (UDP_JOIN),
+/// `ping`, `resolve`, `info` (IF_INFO), `link` (LINK_RENEW, system key
+/// only). Requests on the client's own sockets need nothing more.
+pub mod grant {}
 
 /// Links for TCP_LISTEN and UDP_BIND.
 pub mod link {

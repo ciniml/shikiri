@@ -145,14 +145,20 @@ impl Drop for ListHandle {
     }
 }
 
-/// A handle on `proc:kill`.
+/// A handle on `proc:kill` (doc/52 §3.3): `any`, or only the processes
+/// this one started (and theirs).
 pub struct KillHandle {
     pub pid: u32,
+    pub any: bool,
 }
 
 impl KillHandle {
     pub fn write(&mut self, req: &[u8]) -> Result<usize, Error> {
         let pid = u32::from_le_bytes(req.try_into().map_err(|_| Error::Size)?);
+        if !self.any && !crate::ident::descends_from(pid, self.pid) {
+            event!(Warn, "proc.kill_denied", by = self.pid, pid = pid);
+            return Err(Error::Denied);
+        }
         let st = st();
         if st.n_kills == KILLS {
             return Err(Error::Busy);

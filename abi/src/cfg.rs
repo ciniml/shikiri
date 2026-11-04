@@ -1,11 +1,14 @@
-//! The settings service (doc/50): named values kept on the SD card by the
-//! `cfg` process. A client connects to `svc:cfg` or, to read secrets, to
-//! `svc:cfgsec` (the permission decides who can: `wifi` only). One request
-//! at a time; each gets one answer (`LIST`: one entry per request).
+//! The settings service (doc/50, doc/51): named values kept by the `cfg`
+//! process. A client connects to `svc:cfg`; its grants (doc/52) say which
+//! keys it may read (`svc:cfg/r:PREFIX`), change (`w:PREFIX`) and read the
+//! secret values of (`secret:PREFIX`, system key only); an empty PREFIX is
+//! every key. Other keys answer `ERR DENIED` (and `LIST` skips them). One
+//! request at a time; each gets one answer (`LIST`: one entry per
+//! request).
 //!
 //! | request | answer |
 //! |---|---|
-//! | `[GET, key_len, key…]` | `[VALUE, flags, value…]` (a secret over `svc:cfg`: no value) or `[NONE]` |
+//! | `[GET, key_len, key…]` | `[VALUE, flags, value…]` (a secret without `secret:`: no value) or `[NONE]` |
 //! | `[SET, flags, key_len, key…, value…]` | `[OK]` or `[ERR, code]` |
 //! | `[DEL, key_len, key…]` | `[OK]` (also when there was none) or `[ERR, code]` |
 //! | `[LIST, index]` | `[ENTRY, flags, key_len, key…, value…]` (secrets as for `GET`) or `[END]` |
@@ -23,8 +26,6 @@
 use crate::store::crc32;
 
 pub const SVC: &str = "cfg";
-/// The same requests; `GET` and `LIST` also give secrets.
-pub const SVC_SECRET: &str = "cfgsec";
 pub const KEY_MAX: usize = 32;
 /// The longest value a client gives or gets.
 pub const VALUE_MAX: usize = 128;
@@ -66,8 +67,10 @@ pub mod err {
     pub const TOO_LONG: u8 = 2;
     /// No room left in the table.
     pub const FULL: u8 = 3;
-    /// Changed, but not saved to the SD card (lost when `cfg` restarts).
+    /// Changed, but not saved (lost when `cfg` restarts).
     pub const NOT_SAVED: u8 = 4;
+    /// The client's grants do not cover the key (doc/52).
+    pub const DENIED: u8 = 5;
 }
 
 pub fn valid_key(key: &[u8]) -> bool {

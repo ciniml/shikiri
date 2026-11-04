@@ -293,9 +293,38 @@ impl Info<'_> {
     }
 }
 
-/// Whether the NUL-separated `permissions` (the Permissions TLV) name `name`.
+/// Whether the NUL-separated `permissions` (the Permissions TLV) allow
+/// `open(name)`: `name` itself, or `name/GRANT` (doc/52 §3.1: the object
+/// with part of what it offers).
 pub fn permits(permissions: &[u8], name: &[u8]) -> bool {
-    permissions.split(|&b| b == 0).any(|p| !p.is_empty() && p == name)
+    entries(permissions).any(|p| p == name || (p.len() > name.len() && p.starts_with(name) && p[name.len()] == b'/'))
+}
+
+/// Whether `permissions` name `name` itself (all of the object).
+pub fn permits_all(permissions: &[u8], name: &[u8]) -> bool {
+    entries(permissions).any(|p| p == name)
+}
+
+/// The grants on `name`: GRANT of each `name/GRANT` (doc/52 §3.1).
+pub fn grants<'a>(permissions: &'a [u8], name: &'a [u8]) -> impl Iterator<Item = &'a [u8]> + 'a {
+    entries(permissions).filter_map(move |p| {
+        (p.len() > name.len() && p.starts_with(name) && p[name.len()] == b'/').then(|| &p[name.len() + 1..])
+    })
+}
+
+fn entries(permissions: &[u8]) -> impl Iterator<Item = &[u8]> {
+    permissions.split(|&b| b == 0).filter(|p| !p.is_empty())
+}
+
+/// Permissions only images signed with a system key may hold (doc/52 §4):
+/// serving a service, the devices a service owns, the keyboard, readiness
+/// marks, starting or stopping any app, files outside the app's own
+/// folder, secrets in the settings, and changing the network.
+pub fn strong(entry: &[u8]) -> bool {
+    const EXACT: [&[u8]; 9] =
+        [b"sd", b"wlan:ctl", b"bt:hci", b"flash:cfg", b"kbd", b"proc:kill", b"proc:kill/any", b"proc:spawn", b"svc:net/link"];
+    const PREFIX: [&[u8]; 6] = [b"listen:", b"netdev:", b"ready:", b"svc:fs/", b"svc:cfg/secret:", b"svc:wifi/join"];
+    EXACT.contains(&entry) || PREFIX.iter().any(|p| entry.starts_with(p))
 }
 
 /// A verified image: the header, what its TLVs say, and its parts.

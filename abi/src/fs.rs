@@ -16,6 +16,14 @@
 //! | LIST | – | – | directory ("" = root) | entries written (`ENTRY_SIZE` each) / entries in all |
 //! | DELETE | – | – | file | – |
 //! | MKDIR | – | – | directory | – |
+//!
+//! Access (doc/52 §3.3): a client may use its own folder `T5OS/APPS/<NAME>`
+//! (its app name, upper case, cut to 8 characters; written `~` in a path,
+//! made on first use), and what its grants say: `svc:fs/r:PATH` (read,
+//! list) and `svc:fs/rw:PATH` (also write, delete, make directories), PATH
+//! and everything under it (an empty PATH: the whole card). Making the
+//! directories above an allowed place is allowed. Paths are compared in
+//! upper case; `.` and `..` are refused. Anything else is `DENIED`.
 
 pub const SERVICE: &str = "fs";
 pub const SLICE: usize = 64 << 10;
@@ -55,6 +63,8 @@ pub mod status {
     pub const NOT_A_FILE: u32 = 7;
     pub const FULL: u32 = 8;
     pub const OTHER: u32 = 9;
+    /// The client's grants do not cover the path (doc/52).
+    pub const DENIED: u32 = 10;
 }
 
 /// One LIST entry in the slice: name (NUL-padded "NAME.EXT"), size,

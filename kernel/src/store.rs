@@ -162,7 +162,7 @@ impl Store {
             return Err("image incomplete");
         }
         let image = self.bytes(i.offset(), i.length as usize);
-        let info = match loader::verify(image).and_then(|signed| t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR)) {
+        let info = match loader::verify(image).and_then(|(signed, _)| t5a::parse(signed, t5_abi::ABI_MAJOR, t5_abi::ABI_MINOR)) {
             Ok(img) => img.info,
             Err(e) => {
                 let mut why = t5_abi::log::FmtBuf::<64>::new();

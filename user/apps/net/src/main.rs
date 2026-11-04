@@ -38,7 +38,7 @@ use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address, Ipv6Cidr};
 use t5_rt::net::{self as proto, iface, op, state, status};
-use t5_rt::{Channel, Error, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
+use t5_rt::{Channel, Error, Grants, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
 
 use fwd::{Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
 use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, Port};
@@ -1457,6 +1457,8 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     }
 
     let mut clients: [Option<Channel>; CLIENTS] = [const { None }; CLIENTS];
+    // Each client's grants (doc/52 §3.3).
+    let mut grants: [Grants; CLIENTS] = [const { Grants::NONE }; CLIENTS];
     let mut msg = [0u8; chan::MSG_MAX];
     // Without Wi-Fi (started before the Wi-Fi service had the chip up, at
     // boot), try again every second.
@@ -1566,6 +1568,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             let Some(i) = clients.iter().position(Option::is_none) else { continue };
             let offset = i * proto::SLICE;
             if pool_shm.grant(&c, offset, proto::SLICE).is_ok() {
+                grants[i] = c.peer_grants();
                 clients[i] = Some(c);
             }
             continue;
@@ -1586,6 +1589,13 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
                 let _ = c.send(&reply(status::OK, 0, 0));
             }
             stack.reply_addr = None;
+            if let Some(what) = refused(&grants[i], &msg[..len]) {
+                let mut name = [0u8; t5_rt::t5a::MAX_NAME];
+                let n = c.peer_name(&mut name);
+                event!(Warn, "net.denied", app = core::str::from_utf8(&name[..n]).unwrap_or("?"), op = what);
+                let _ = c.send(&reply(status::DENIED, 0, 0));
+                continue;
+            }
             let (st, v0, v1) = match stack.handle(i, mem, &msg[..len]) {
                 Ok((v0, v1)) => (status::OK, v0, v1),
                 Err(DEFERRED) => continue,
@@ -1600,4 +1610,26 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             };
         }
     }
+}
+
+/// What of request `m` the client's grants do not allow (doc/52 §3.3,
+/// `net::grant`); `None` if they do.
+fn refused(g: &Grants, m: &[u8]) -> Option<&'static str> {
+    let (&code, port) = (m.first()?, m.get(8..10).map_or(0, |p| u16::from_le_bytes([p[0], p[1]])));
+    // `kind:any`, or `kind:PORT` for this port.
+    let port_ok = |kind: &[u8]| {
+        g.values(kind).any(|v| v == b"any" || core::str::from_utf8(v).ok().and_then(|v| v.parse::<u16>().ok()) == Some(port))
+    };
+    let (ok, what) = match code {
+        op::UDP_BIND => (port_ok(b"udp"), "udp"),
+        op::TCP_LISTEN => (port_ok(b"tcp-listen"), "tcp-listen"),
+        op::TCP_CONNECT => (g.has(b"tcp-connect") || port_ok(b"tcp-connect"), "tcp-connect"),
+        op::PING | op::PING_RESULT => (g.has(b"ping"), "ping"),
+        op::RESOLVE | op::RESOLVE_RESULT => (g.has(b"resolve"), "resolve"),
+        op::IF_INFO => (g.has(b"info"), "info"),
+        op::UDP_JOIN => (g.has(b"mcast"), "mcast"),
+        op::LINK_RENEW => (g.has(b"link"), "link"),
+        _ => (true, ""),
+    };
+    (!ok).then_some(what)
 }

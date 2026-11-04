@@ -183,10 +183,14 @@ impl Kupdate {
         if p.total_size != s.length as usize {
             return Err("length mismatch");
         }
-        loader::check_signature(&p.signed).map_err(|e| match e {
+        // Kernels only from a system key (doc/52 §4).
+        let system = loader::check_signature(&p.signed).map_err(|e| match e {
             t5_abi::t5a::Error::UnknownKey => "unknown key",
             _ => "bad signature",
         })?;
+        if !system {
+            return Err("app key");
+        }
         let rev = Current::chip_revision();
         if p.image.check_chip(rev).is_err() {
             event!(Warn, "kupdate.wrong_chip", chip_rev = rev, chip_id = p.image.chip_id, min_rev = p.image.min_rev, max_rev = p.image.max_rev);

@@ -168,6 +168,17 @@ fn num(s: Option<&str>) -> Option<u64> {
     }
 }
 
+/// The grant a request needs (doc/52 §3.3): `read` (what the node and the
+/// controller know), `control` (operating nodes), `admin` (commissioning,
+/// windows, credentials).
+fn grant_for(cmd: &str) -> &'static str {
+    match cmd {
+        "status" | "nodes" | "read" | "sub" | "help" | "" => "read",
+        "on" | "off" | "toggle" | "invoke" | "write" => "control",
+        _ => "admin",
+    }
+}
+
 /// One request; true if the answer comes later (from the controller).
 fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &mut BleLink, now: u64) -> bool {
     let mut w = line.split_ascii_whitespace();
@@ -477,7 +488,15 @@ fn run(test: bool) -> Result<(), u32> {
                 Ok(n) if !cl.waiting => {
                     busy = true;
                     let line = core::str::from_utf8(&m[..n]).unwrap_or("");
-                    cl.waiting = request(line, &cl.chan, dev, ctrl, &mut ble, now_ms());
+                    let need = grant_for(line.split_ascii_whitespace().next().unwrap_or(""));
+                    cl.waiting = if cl.chan.peer_grants().has(need.as_bytes()) {
+                        request(line, &cl.chan, dev, ctrl, &mut ble, now_ms())
+                    } else {
+                        event!(Warn, "matter.denied", need = need);
+                        reply(&cl.chan, "denied: this app may not ask that");
+                        end(&cl.chan, false);
+                        false
+                    };
                     if !cl.waiting {
                         client = None;
                     }

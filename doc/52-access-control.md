@@ -1,4 +1,4 @@
-# 52. アプリの権限とアプリ間通信のアクセス制御（検討）
+# 52. アプリの権限とアプリ間通信のアクセス制御
 
 利用者の指示（2026-11-05）:「アプリケーションの権限と、アプリケーション間通信の権限の確認を行う仕組みを考えたいです。wifi/ble/net/fsなどにアクセスする必要がないアプリからはアクセスできなくする、一部のみアクセスを許可するアクセスコントロールの仕組みです。検討してください。」、「ちなみにあるアプリケーションは別のアプリケーションのRAMを読むことができますか？」
 
@@ -104,3 +104,84 @@
   - **カーネル**（M モード）はすべてを読める。
   - **デバッガ**（USB-JTAG のプローブ）はすべてを読める。プローブで止めた後は、隔離を信用できない（メモリ: プローブで止めるとプロセスが M モードで動きうる）。製品にするなら JTAG を閉じる（doc/51 §2.3 と同じ話）。
   - タイミングやキャッシュの横の通り道は考えていない。
+
+## 7. 実装（2026-11-05）
+利用者の判断:「1, 2, 3すすめて。」（§5 の A1 から、`T5OS/APPS/<名前>/`、鍵を 2 つに。A1〜A5 を一度に入れた。アプリは全部この中にあるので、古い形の許可を「全部」とみなす移行の段は飛ばし、初めから既定は拒否にした（判断））
+
+### 7.1 カーネル
+- **許可の一致**（`t5a::permits`）: 名前そのもの、または `名前/…`。
+  - `t5a::permits_all`（名前そのもの）、`t5a::grants`（`名前/` の後ろ）。
+- **`ident`**: 起動のときに、プロセスの pid、親の pid、アプリの名前、署名した Permissions TLV（512 バイトまで、`chan::GRANTS_MAX`）を写す。終われば消す（`Process` の `Drop`）。
+  - `open` の許可はこの写しで確かめる。前はストアの像を指していたので、動いている間に像が入れ替わると変わりえた。
+  - `proc:spawn` で起動したものには親を記録する（`proc.spawned` の `by`）。
+- **接続相手**: サービスのチャネルの ctl。
+  - `PEER_PID`
+  - `PEER_NAME`（バッファへ）
+  - `PEER_GRANTS`（このサービスの `svc:NAME/GRANT` の GRANT を NUL 区切りで）
+  - `t5_rt` に `Channel::peer_pid`、`peer_name`、`peer_grants` と `Grants`（`has`、`values`、`prefix_of`）。
+- **`proc:kill`**:
+  - `proc:kill` か `proc:kill/any` はどれでも止められる。
+  - `proc:kill/own` は `ident::descends_from` で、自分が起動したもの（とその子）だけ。外は `write` が `Denied`（`proc.kill_denied`）。
+- **`proc:spawn`**: `proc:spawn` はどれでも、`proc:spawn/NAME` はその名前だけ（`proc.spawn_denied`）。
+- **鍵を 2 つに**:
+  - `keys/app-*.pub` はアプリの鍵、ほかはシステムの鍵（`kernel/build.rs`）。
+  - ローダは、アプリの鍵の像が強い許可（`t5a::strong`）を持てば断る（`LoadError::StrongPermit`、`loader.strong_permit`）。
+  - カーネルの更新（T5K）はシステムの鍵だけ（`kupdate` の "app key"）。
+  - 強い許可:
+    - そのものの名前: `sd`、`wlan:ctl`、`bt:hci`、`flash:cfg`、`kbd`、`proc:kill`、`proc:kill/any`、`proc:spawn`、`svc:net/link`
+    - 前方一致: `listen:*`、`netdev:*`、`ready:*`、`svc:fs/*`（自分のフォルダの外のファイル）、`svc:cfg/secret:*`、`svc:wifi/join*`
+- 自己試験を 3 つ足した:
+  - `fault/load-other-slot`、`fault/store-other-slot`: 隣のスロットを読む、書く。アクセスフォールト。
+  - `verify/app-key-strong`: アプリの鍵で `--permit sd` の `hello-strong` が `StrongPermit` で断られる。
+- `elf2t5a` は 512 バイトを超える許可を断る。
+
+### 7.2 サービス
+| サービス | grant | 断ったとき |
+|---|---|---|
+| `fs` | `r:PATH`、`rw:PATH`（成分の単位の前方一致、空は全部）。自分のフォルダ `T5OS/APPS/<名前8文字>`（パスでは `~`、初めて使うときに作る）。許された場所の上のディレクトリは作れる。パスは大文字にし、`.` と `..` は `BAD_NAME` | `status::DENIED`、`fs.denied app op path` |
+| `net` | `udp:PORT`、`udp:any`、`tcp-listen:PORT`、`tcp-listen:any`、`tcp-connect[:PORT]`、`mcast`、`ping`、`resolve`、`info`、`link`。自分のソケットへの要求はそのまま | `status::DENIED`、`net.denied` |
+| `wifi` | `status`（STATUS）、`join`（全部） | `[DENIED, 要求]`、`wifi.denied` |
+| `ble` | `scan`、`central`、`peripheral` | `FAILED` のコード 6、`ble.denied` |
+| `cfg` | `r:PREFIX`、`w:PREFIX`、`secret:PREFIX`。`LIST` は読めるキーだけ。**`svc:cfgsec` はやめた** | `err::DENIED`、`cfg.denied app op key` |
+| `matter` | `read`、`control`、`admin` | `denied: …` と `END` の失敗、`matter.denied` |
+
+- 各アプリの許可（Makefile の `PERMIT_<app>`）を、使うものだけに絞り直した。
+  - `matter`: UDP 5540、5541、5353、`mcast`、`info`、`T5OS/MATTER`、BLE の 3 つ、`wifi` の 2 つ。
+  - `shell`: SD 全体、`tcp-connect`、`ping`、`resolve`、`info`、`proc:kill/own`、`cfg` の `r:` と `w:`（秘密は読めない）。
+  - `term`: `proc:spawn/shell` だけ。
+  - `init`: `T5OS/START.CFG`。`netctl`: `T5OS/NET.RUL`。`cfg`: `T5OS/CONFIG.A` と `.B`（引き継ぎ）。
+  - `wifi`: `svc:net/link`、`cfg` の `wifi.` の読み、書き、秘密。
+  - `cfgctl`: `cfg` の `r:`、`w:test.`、`w:wifi.`。
+  - `fstest`: 何も持たない（自分のフォルダだけ）。
+  - `nettest`: `link` のほかの全部。
+  - `blescan`/`blegatt`/`bleecho`: それぞれの役割だけ。
+- システムの鍵で署名するもの（`SYSTEM_APPS`）: fs、net、wifi、netctl、init、term、shell、ble、matter、cfg、font、echo、keylog、hcitest、mtbench。ほかはアプリの鍵（`~/.config/tab5-os/app-ed25519.key`。`make keys` が作る。リポジトリには公開鍵だけ）。
+- `fstest` は自分のフォルダで試し、続けて SD の根、`T5OS/START.CFG`、`T5OS/OTHER` の作成が `DENIED`、`~/..` が `BAD_NAME` になることを確かめる（`fstest.denied_ok`）。
+- `cfgctl 0` は、`other.key` の書き込みと削除が `DENIED` になることも確かめる。
+
+## 8. 試験の結果（2026-11-05）
+- `make test-virt`、`make test-p4emu` が通った。
+  - 自己試験の 3 つ（隣のスロットの読み・書きでアクセスフォールト、アプリの鍵で `sd` を求める像が `StrongPermit`）も通った。
+  - shell の試験の `kill 99` は `proc.kill_denied` に変えた（shell が起動したプロセスではない）。
+  - QEMU の virt は RAM が足りないので、チャネルを 16 に（1 つ 2 KiB）。
+- **実機**: カーネルを入れ替え、全アプリを入れ直した（アプリの鍵の像を含む。入らなかったものなし）。
+  - 自己試験: 隣のスロットの読み・書きがアクセスフォールト。`hello-strong` は `loader.strong_permit permit=sd` で断られた。
+  - 再起動の後、常駐（cfg、wifi、net、netctl、font、term、shell）は断られることなく動いた。`wifi 1`、`ble`（`ready:bt` を待つ）、`matter` も同じ。
+  - `fstest`（アプリの鍵、grant なし）:
+    - 自分のフォルダ `T5OS/APPS/FSTEST` で 100 KiB の書き（1163 ms）と読み（125 ms）。
+    - SD の根の一覧、`T5OS/START.CFG` の読み、`T5OS/OTHER` の作成は `fs.denied`、`~/..` は `BAD_NAME`。
+  - `cfgctl 0`: `other.key` の書き込みと削除が `cfg.denied`。ほかは今までどおり。
+  - `mtreq 0`（`read`）、`blescan`（`scan`）、smctl から fabric 1 の toggle（`matter` の UDP 5540）。
+  - **BLE のコミッショニングで Wi-Fi を渡す流れ**:
+    - smctl の ble-wifi で 12.4 秒（1 回目でつながった）。`matter` は BLE の 3 つと `wifi/join`、`wifi` は `cfg` の `w:wifi.` で保存した。
+    - `wifi` を起動し直すと、`secret:wifi.` で封をした passphrase を開いて `matter-test` へ。toggle も通った。
+    - unpair、`cfgctl 2`（`w:wifi.`）で消し、`iotap` へ戻した。
+    - passphrase は、smctl の出力にも RTT のログにも 0 回。
+  - 戻した後: fabric 1 の toggle、ファイアウォール（rules=6、PC からの ping は届かない）。
+
+## 9. 残り
+- サーバの中の確かめは、サーバのコードの正しさに頼る。サーバの数は少なく保つ。
+- 動いている間の取り上げ、利用者の同意、署名した許可を狭める上書きは、まだない（§4）。
+- 8.3 の名前の制限で、アプリの名前の最初の 8 文字が同じだと、フォルダを共有してしまう。ストアに入れるときに確かめる仕組みはまだない。
+- `fs` のクライアントは 4 つまで（`CLIENTS`）。アプリが増えれば足りなくなる。
+- 開発のあいだは、システムの鍵もアプリの鍵も同じ PC の `~/.config/tab5-os/` にある。

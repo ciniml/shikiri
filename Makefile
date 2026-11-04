@@ -9,31 +9,42 @@ T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
 APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq cfg cfgctl
-# Permissions TLV per app (doc/14 §4): the objects it may open.
+# Permissions TLV per app (doc/14 §4): the objects it may open, and with
+# `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
+# ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
 PERMIT_timers := --permit timer
 PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --permit shm --permit listen:shmt --permit svc:shmt
 PERMIT_paint  := --permit display --permit touch
 PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
 PERMIT_net    := --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
-PERMIT_nettest := --permit svc:net --stack 32768
-PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net --permit svc:cfgsec --permit ready:bt --stack 16384
-PERMIT_netctl := --permit svc:netctl --permit svc:fs --stack 32768
-PERMIT_init   := --permit proc:spawn --permit svc:fs --stack 16384
+PERMIT_nettest := --permit svc:net/udp:any --permit svc:net/tcp-listen:any --permit svc:net/tcp-connect \
+                  --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --stack 32768
+PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net/link --permit svc:cfg/r:wifi. \
+                 --permit svc:cfg/w:wifi. --permit svc:cfg/secret:wifi. --permit ready:bt --stack 16384
+PERMIT_netctl := --permit svc:netctl --permit svc:fs/rw:T5OS/NET.RUL --stack 32768
+PERMIT_init   := --permit proc:spawn --permit svc:fs/rw:T5OS/START.CFG --stack 16384
 PERMIT_keylog := --permit kbd
 PERMIT_hcitest := --permit bt:hci
 PERMIT_ble    := --permit bt:hci --permit listen:ble --stack 65536
-PERMIT_blescan := --permit svc:ble
-PERMIT_blegatt := --permit svc:ble
-PERMIT_bleecho := --permit svc:ble
-PERMIT_mtbench := --permit random --permit svc:fs --stack 32768
-PERMIT_mtreq  := --permit svc:matter
-PERMIT_cfg    := --permit listen:cfg --permit listen:cfgsec --permit flash:cfg --permit random --permit svc:fs --stack 16384
-PERMIT_cfgctl := --permit svc:cfg
-PERMIT_matter := --permit svc:net --permit svc:fs --permit random --permit listen:matter --permit svc:ble --permit svc:wifi --stack 131072
+PERMIT_blescan := --permit svc:ble/scan
+PERMIT_blegatt := --permit svc:ble/central
+PERMIT_bleecho := --permit svc:ble/peripheral
+PERMIT_mtbench := --permit random --permit svc:fs/rw:T5OS/MATTER --stack 32768
+PERMIT_mtreq  := --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin
+PERMIT_cfg    := --permit listen:cfg --permit flash:cfg --permit random --permit svc:fs/rw:T5OS/CONFIG.A \
+                 --permit svc:fs/rw:T5OS/CONFIG.B --stack 16384
+PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w:wifi.
+PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
+                 --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
+                 --permit svc:ble/scan --permit svc:ble/central --permit svc:ble/peripheral \
+                 --permit svc:wifi/status --permit svc:wifi/join --stack 131072
 PERMIT_font   := --permit listen:font --permit shm
-PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn --permit svc:font --stack 16384
-PERMIT_shell  := --permit svc:tty --permit svc:fs --permit svc:net --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:kill --permit svc:matter --permit svc:cfg --stack 32768
+PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn/shell --permit svc:font --stack 16384
+PERMIT_shell  := --permit svc:tty --permit svc:fs/rw: --permit svc:net/tcp-connect --permit svc:net/ping \
+                 --permit svc:net/resolve --permit svc:net/info --permit proc:spawn --permit proc:list --permit proc:apps \
+                 --permit proc:kill/own --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
+                 --permit svc:cfg/r: --permit svc:cfg/w: --stack 32768
 # What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a
 # service listens) or `ready:NAME` (a process raised the mark). The kernel
 # holds the start up to 10 s.
@@ -86,40 +97,54 @@ tools:
 # kernel embeds the public key in keys/. `make keys` creates a pair once.
 DEV_KEY       ?= $(HOME)/.config/tab5-os/dev-ed25519.key
 DEV_PUB       := keys/dev-ed25519.pub
+# The app key (doc/52 §4): images signed with it may not hold strong
+# permissions (`t5a::strong`: serving, the devices services own, any file
+# outside the app's folder, secrets, starting or stopping any app). The
+# kernel tells the keys apart by the file name (keys/app-*.pub).
+APP_KEY       ?= $(HOME)/.config/tab5-os/app-ed25519.key
+APP_PUB       := keys/app-ed25519.pub
+# Signed with the system key (DEV_KEY): the services and the apps that need
+# strong permissions. The rest get APP_KEY.
+SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench
+KEY_OF         = $(if $(filter $(1),$(SYSTEM_APPS)),$(DEV_KEY),$(APP_KEY))
 # A key the kernel does not trust, for the rejection test. Not a secret.
 UNTRUSTED_KEY := $(BUILD)/keys/untrusted.key
 
 keys: tools
 	@if [ -f $(DEV_KEY) ]; then echo "$(DEV_KEY) exists; not overwriting"; \
 	else $(ELF2T5A) keygen --secret $(DEV_KEY) --public $(DEV_PUB); fi
+	@if [ -f $(APP_KEY) ]; then echo "$(APP_KEY) exists; not overwriting"; \
+	else $(ELF2T5A) keygen --secret $(APP_KEY) --public $(APP_PUB); fi
 
 $(UNTRUSTED_KEY): | tools
 	$(ELF2T5A) keygen --secret $@ --public $(BUILD)/keys/untrusted.pub \
 	    --seed 4242424242424242424242424242424242424242424242424242424242424242
 
 apps: tools $(UNTRUSTED_KEY)
-	@test -f $(DEV_KEY) || { echo "no signing key $(DEV_KEY): run make keys"; exit 1; }
+	@test -f $(DEV_KEY) -a -f $(APP_KEY) || { echo "no signing key $(DEV_KEY) or $(APP_KEY): run make keys"; exit 1; }
 	cd user && cargo build --release
 	cd user && RUSTFLAGS="$(XIP_RUSTFLAGS)" cargo build --release --target-dir target/xip $(addprefix -p ,$(XIP_APPS))
 	mkdir -p $(APPS_DIR)
-	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(DEV_KEY) $(PERMIT_$(a)) $(NEEDS_$(a)) &&) true
+	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(call KEY_OF,$(a)) $(PERMIT_$(a)) $(NEEDS_$(a)) &&) true
 	@# Images the kernel must reject (self-test, doc/14 §1.4).
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-untrusted.t5a --key $(UNTRUSTED_KEY) \
 	    --name hello-untrusted
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-badabi.t5a --key $(DEV_KEY) --abi 9.0 \
 	    --name hello-badabi
-	$(ELF2T5A) build $(XIP_TARGET)/hello $(APPS_DIR)/hello-xip.t5a --key $(DEV_KEY) --name hello-xip
-	$(ELF2T5A) build $(XIP_TARGET)/xipcheck $(APPS_DIR)/xipcheck.t5a --key $(DEV_KEY)
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-strong.t5a --key $(APP_KEY) --permit sd \
+	    --name hello-strong
+	$(ELF2T5A) build $(XIP_TARGET)/hello $(APPS_DIR)/hello-xip.t5a --key $(APP_KEY) --name hello-xip
+	$(ELF2T5A) build $(XIP_TARGET)/xipcheck $(APPS_DIR)/xipcheck.t5a --key $(APP_KEY)
 	$(ELF2T5A) build $(XIP_TARGET)/font $(APPS_DIR)/font.t5a --key $(DEV_KEY) $(PERMIT_font)
-	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip.t5a --key $(DEV_KEY) --name spin-xip
+	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip.t5a --key $(APP_KEY) --name spin-xip
 	@# Not in the store image: installed over the control channel (doc/14 §3).
-	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter.t5a --key $(DEV_KEY) --name greeter
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter.t5a --key $(APP_KEY) --name greeter
 	@# App updates (M5b, doc/16 §4.3): a newer greeter, one that faults
 	@# (the fault app under greeter's name) and a newer XIP spin.
-	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter-0.2.t5a --key $(DEV_KEY) --name greeter --version 0.2.0
-	$(ELF2T5A) build $(APP_TARGET)/fault $(APPS_DIR)/greeter-bad.t5a --key $(DEV_KEY) --name greeter --version 0.3.0
-	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip-0.2.t5a --key $(DEV_KEY) --name spin-xip --version 0.2.0
-	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-xip xipcheck font))
+	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter-0.2.t5a --key $(APP_KEY) --name greeter --version 0.2.0
+	$(ELF2T5A) build $(APP_TARGET)/fault $(APPS_DIR)/greeter-bad.t5a --key $(APP_KEY) --name greeter --version 0.3.0
+	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip-0.2.t5a --key $(APP_KEY) --name spin-xip --version 0.2.0
+	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-strong hello-xip xipcheck font))
 
 # The services started at boot on the Tab5 (doc/30 §5): the same apps with
 # the autostart flag, installed over RTT by `make install-auto`. The store
@@ -144,7 +169,7 @@ install-auto: apps-auto schemas-p4
 # without the autostart services, and those with the flag. Not `fault`,
 # which always faults, so its update would be rolled back. Run on the next
 # boot (`reboot`).
-STORE_APPS := $(filter-out fault $(AUTO_APPS),$(APPS)) hello-xip xipcheck font
+STORE_APPS := $(filter-out fault $(AUTO_APPS),$(APPS)) hello-strong hello-xip xipcheck font
 install-apps: apps-auto schemas-p4
 	@test -n "$(PROBE)" || { echo "set PROBE=VID:PID:SERIAL (see: probe-rs list)"; exit 1; }
 	$(T5LOG) rtt --probe $(PROBE) --chip-description tools/probe-rs/esp32p4-tab5.yaml \
@@ -338,7 +363,7 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --ctl "run term" --ctl "wait-ms 3000" --ctl "keys echo hi\n" --ctl "wait-ms 1000" \
 	    --ctl "keys ps\napps\nkill 99\n" --ctl "wait-ms 2000" \
 	    --expect-event term.ready --expect-event term.session --expect-event shell.exec \
-	    --expect-event shell.listed --expect-event proc.kill_failed \
+	    --expect-event shell.listed --expect-event proc.kill_denied \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# The terminal's drawing (doc/42): 100 lines that scroll, then every
 	@# pixel checked against the cells.

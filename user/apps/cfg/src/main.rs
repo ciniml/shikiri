@@ -6,9 +6,9 @@
 //! 64 KiB of `userdata`): the table in sectors 0 and 1 (`cfg::Table`'s
 //! image; a save goes to the older copy, so one cut short leaves the last),
 //! the sealing key in sectors 2 and 3. A secret's value is sealed
-//! (`seal`). Clients of `svc:cfg` read and change values but get no
-//! secret's value; clients of `svc:cfgsec` (`wifi`) get those too. Values
-//! are never logged, keys are.
+//! (`seal`). Each client's grants (doc/52, `t5_abi::cfg`) say which keys it
+//! may read, change, and read the secret values of; others are refused
+//! (`cfg.denied`). Values are never logged, keys are.
 //!
 //! The first time the flash holds no table, the SD card's `T5OS/CONFIG.A`
 //! and `.B` (doc/50, before the flash) are taken over, their secrets
@@ -16,13 +16,13 @@
 //!
 //! `run cfg MODE`: 0, the flash (without it, as 1 but changes answer
 //! `NOT_SAVED`); 1, in memory only. Built with `--permit listen:cfg
-//! --permit listen:cfgsec --permit flash:cfg --permit random --permit
-//! svc:fs`.
+//! --permit flash:cfg --permit random --permit svc:fs/rw:T5OS/CONFIG.A
+//! --permit svc:fs/rw:T5OS/CONFIG.B`.
 
 mod seal;
 
 use t5_rt::cfg::{self, FILE_MAX, HEADER, STORED_MAX, Table, VALUE_MAX, err};
-use t5_rt::{Channel, Error, FOREVER, Files, Handle, Listener, cfgflash, chan, event, fs, rights, sleep_ms, wait_raw};
+use t5_rt::{Channel, Error, FOREVER, Files, Grants, Handle, Listener, cfgflash, chan, event, fs, rights, sleep_ms, t5a, wait_raw};
 
 use seal::Key;
 
@@ -51,11 +51,10 @@ fn main(mode: usize, _: usize) -> usize {
     let store = unsafe { &mut *core::ptr::addr_of_mut!(STORE) };
     // Listening first: apps that need `svc:cfg` start meanwhile, and their
     // requests wait until the table is loaded.
-    let (public, secret) = match (Listener::open(cfg::SVC), Listener::open(cfg::SVC_SECRET)) {
-        (Ok(p), Ok(s)) => (p, s),
-        (p, s) => {
-            let e = p.err().or(s.err()).map_or(0, |e| e as u32);
-            event!(Error, "cfg.failed", step = 1u32, error = e);
+    let listener = match Listener::open(cfg::SVC) {
+        Ok(l) => l,
+        Err(e) => {
+            event!(Error, "cfg.failed", step = 1u32, error = e as u32);
             return 1;
         }
     };
@@ -63,7 +62,7 @@ fn main(mode: usize, _: usize) -> usize {
         store.open_flash();
     }
     event!(Info, "cfg.ready", values = store.table.iter().count() as u32, flash = store.flash.is_some(), sealing = store.key.is_some());
-    serve(store, &public, &secret)
+    serve(store, &listener)
 }
 
 impl Store {
@@ -233,7 +232,7 @@ impl Store {
     }
 
     /// A value as a client may see it into `out` after `head` bytes: none
-    /// of a secret for `svc:cfg`, a sealed one opened for `svc:cfgsec`.
+    /// of a secret without a `secret:` grant on it, a sealed one opened.
     fn value_out(&self, out: &mut [u8; cfg::MSG_MAX], head: usize, flags: u8, name: &[u8], v: &[u8], secret: bool) -> usize {
         if flags & cfg::SECRET != 0 && !secret {
             return head;
@@ -252,8 +251,16 @@ impl Store {
         head + v.len()
     }
 
-    /// One request; the answer into `out`.
-    fn handle(&mut self, req: &[u8], secret: bool, out: &mut [u8; cfg::MSG_MAX]) -> usize {
+    /// One request of client `c`; the answer into `out`.
+    fn handle(&mut self, req: &[u8], c: &Client, out: &mut [u8; cfg::MSG_MAX]) -> usize {
+        let g = &c.grants;
+        let readable = |k: &[u8]| g.prefix_of(b"r", k) || g.prefix_of(b"secret", k);
+        let denied = |out: &mut [u8; cfg::MSG_MAX], op: &str, k: &[u8]| {
+            event!(Warn, "cfg.denied", app = c.name(), op = op, key = core::str::from_utf8(k).unwrap_or("?"));
+            out[0] = cfg::ERR;
+            out[1] = err::DENIED;
+            2
+        };
         // `[op, key_len, key…, rest…]` (`SET`: the flags first).
         let keyed = |at: usize| -> Option<(&[u8], &[u8])> {
             let k = *req.get(at)? as usize;
@@ -265,19 +272,24 @@ impl Store {
             2
         };
         match (req.first().copied(), req.get(1).copied()) {
-            (Some(cfg::GET), _) => match keyed(1).and_then(|(k, _)| self.table.get(k).map(|(f, v)| (k, f, v))) {
-                Some((k, flags, v)) => {
+            (Some(cfg::GET), _) => match keyed(1).map(|(k, _)| (k, self.table.get(k))) {
+                Some((k, _)) if !readable(k) => denied(out, "get", k),
+                Some((k, Some((flags, v)))) => {
                     out[0] = cfg::VALUE;
                     out[1] = flags & cfg::SECRET;
-                    self.value_out(out, 2, flags, k, v, secret)
+                    self.value_out(out, 2, flags, k, v, g.prefix_of(b"secret", k))
                 }
-                None => {
+                Some((_, None)) => {
                     out[0] = cfg::NONE;
                     1
                 }
+                None => error(out, err::BAD),
             },
             (Some(cfg::SET), Some(flags)) => {
                 let Some((k, v)) = keyed(2) else { return error(out, err::BAD) };
+                if !g.prefix_of(b"w", k) {
+                    return denied(out, "set", k);
+                }
                 if v.len() > VALUE_MAX {
                     return error(out, err::TOO_LONG);
                 }
@@ -305,6 +317,9 @@ impl Store {
             }
             (Some(cfg::DEL), _) => {
                 let Some((k, _)) = keyed(1) else { return error(out, err::BAD) };
+                if !g.prefix_of(b"w", k) {
+                    return denied(out, "del", k);
+                }
                 if self.table.remove(k) {
                     let code = self.changed(k);
                     if code != 0 {
@@ -314,13 +329,14 @@ impl Store {
                 out[0] = cfg::OK;
                 1
             }
-            (Some(cfg::LIST), Some(index)) => match self.table.iter().nth(index as usize) {
+            // Only the keys the client may read.
+            (Some(cfg::LIST), Some(index)) => match self.table.iter().filter(|(_, k, _)| readable(k)).nth(index as usize) {
                 Some((flags, k, v)) => {
                     out[0] = cfg::ENTRY;
                     out[1] = flags & cfg::SECRET;
                     out[2] = k.len() as u8;
                     out[3..3 + k.len()].copy_from_slice(k);
-                    self.value_out(out, 3 + k.len(), flags, k, v, secret)
+                    self.value_out(out, 3 + k.len(), flags, k, v, g.prefix_of(b"secret", k))
                 }
                 None => {
                     out[0] = cfg::END;
@@ -332,44 +348,58 @@ impl Store {
     }
 }
 
-/// Clients of both listeners; whether each may read secrets.
-fn serve(store: &mut Store, public: &Listener, secret: &Listener) -> ! {
-    let mut clients: [Option<(Channel, bool)>; CLIENTS] = [const { None }; CLIENTS];
+/// A client: its connection, its grants and its app name (for the log).
+struct Client {
+    chan: Channel,
+    grants: Grants,
+    name: [u8; t5a::MAX_NAME],
+    name_len: usize,
+}
+
+impl Client {
+    fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("?")
+    }
+}
+
+fn serve(store: &mut Store, listener: &Listener) -> ! {
+    let mut clients: [Option<Client>; CLIENTS] = [const { None }; CLIENTS];
     loop {
-        let mut hs = [0u32; 2 + CLIENTS];
-        let mut at = [usize::MAX; 2 + CLIENTS];
-        hs[0] = public.0.raw();
-        hs[1] = secret.0.raw();
-        let mut n = 2;
+        let mut hs = [0u32; 1 + CLIENTS];
+        let mut at = [usize::MAX; 1 + CLIENTS];
+        hs[0] = listener.0.raw();
+        let mut n = 1;
         for (i, c) in clients.iter().enumerate() {
-            if let Some((c, _)) = c {
-                hs[n] = c.0.raw();
+            if let Some(c) = c {
+                hs[n] = c.chan.0.raw();
                 at[n] = i;
                 n += 1;
             }
         }
         let closed = match wait_raw(&hs[..n], FOREVER) {
-            Ok(ev) if ev.kind == chan::PEER_CLOSED && ev.index >= 2 => Some(at[ev.index]),
+            Ok(ev) if ev.kind == chan::PEER_CLOSED && ev.index >= 1 => Some(at[ev.index]),
             _ => None,
         };
-        for (l, is_secret) in [(public, false), (secret, true)] {
-            while let Ok(c) = l.accept() {
-                match clients.iter_mut().find(|c| c.is_none()) {
-                    Some(slot) => *slot = Some((c, is_secret)),
-                    // Too many: closing it tells the client.
-                    None => event!(Warn, "cfg.too_many_clients"),
+        while let Ok(chan) = listener.accept() {
+            match clients.iter_mut().find(|c| c.is_none()) {
+                Some(slot) => {
+                    let mut name = [0u8; t5a::MAX_NAME];
+                    let name_len = chan.peer_name(&mut name);
+                    *slot = Some(Client { grants: chan.peer_grants(), chan, name, name_len });
                 }
+                // Too many: closing it tells the client.
+                None => event!(Warn, "cfg.too_many_clients"),
             }
         }
         for (i, slot) in clients.iter_mut().enumerate() {
-            let Some((c, is_secret)) = slot else { continue };
+            let Some(c) = slot else { continue };
             let mut req = [0u8; cfg::MSG_MAX];
             let mut out = [0u8; cfg::MSG_MAX];
             loop {
-                match c.0.read(&mut req) {
+                match c.chan.0.read(&mut req) {
                     Ok(k) => {
-                        let m = store.handle(&req[..k], *is_secret, &mut out);
-                        let _ = c.send(&out[..m]);
+                        let m = store.handle(&req[..k], c, &mut out);
+                        let _ = c.chan.send(&out[..m]);
                     }
                     Err(Error::Busy) if closed != Some(i) => break,
                     Err(_) => {

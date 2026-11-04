@@ -9,7 +9,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, ble, bt, cfg, cfgflash, chan, display, event, font, fs, kbd, matter, net, netdev, proc, random, ready, rights, sd, shm, spawn, store, svc, sys, timer, touch, wifi, wlan};
+pub use t5_abi::{Error, FOREVER, ble, bt, cfg, cfgflash, chan, display, event, font, fs, kbd, matter, net, netdev, proc, random, ready, rights, sd, shm, spawn, store, svc, sys, t5a, timer, touch, wifi, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -544,6 +544,62 @@ impl Shm {
 }
 
 impl Channel {
+    /// On a service connection (doc/52 §3.2): the client's pid, 0 if gone.
+    pub fn peer_pid(&self) -> u32 {
+        self.0.ctl(chan::PEER_PID, 0).unwrap_or(0) as u32
+    }
+
+    /// The client's app name (from its signed image) into `buf`; its length.
+    pub fn peer_name(&self, buf: &mut [u8; t5_abi::t5a::MAX_NAME]) -> usize {
+        self.0.ctl(chan::PEER_NAME, buf.as_mut_ptr() as u64 | (buf.len() as u64) << 32).unwrap_or(0)
+    }
+
+    /// The client's grants on this service (doc/52 §3.1).
+    pub fn peer_grants(&self) -> Grants {
+        let mut g = Grants { buf: [0; GRANTS], len: 0 };
+        // Longer than a server keeps: none (and the server denies).
+        g.len = self.0.ctl(chan::PEER_GRANTS, g.buf.as_mut_ptr() as u64 | (GRANTS as u64) << 32).unwrap_or(0);
+        g
+    }
+}
+
+/// The bytes of grants a server keeps per client.
+pub const GRANTS: usize = 256;
+
+/// A client's grants on a service: the GRANT of each `svc:NAME/GRANT` in
+/// its signed permissions (doc/52 §3.1). What a grant allows is the
+/// service's to say; these are the common forms.
+#[derive(Clone)]
+pub struct Grants {
+    buf: [u8; GRANTS],
+    len: usize,
+}
+
+impl Grants {
+    pub const NONE: Grants = Grants { buf: [0; GRANTS], len: 0 };
+
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.buf[..self.len].split(|&b| b == 0).filter(|g| !g.is_empty())
+    }
+
+    /// Whether `grant` is there exactly (`scan`, `ping`).
+    pub fn has(&self, grant: &[u8]) -> bool {
+        self.iter().any(|g| g == grant)
+    }
+
+    /// The values of `kind:VALUE` grants (`udp:5540` → `5540`).
+    pub fn values<'a>(&'a self, kind: &'a [u8]) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.iter().filter_map(move |g| (g.len() > kind.len() && g.starts_with(kind) && g[kind.len()] == b':').then(|| &g[kind.len() + 1..]))
+    }
+
+    /// Whether a `kind:PREFIX` grant's PREFIX starts `s` (`r:wifi.` and
+    /// `wifi.ssid`; an empty PREFIX allows all).
+    pub fn prefix_of(&self, kind: &[u8], s: &[u8]) -> bool {
+        self.values(kind).any(|p| s.starts_with(p)) || self.iter().any(|g| g.len() == kind.len() + 1 && g.starts_with(kind) && g[kind.len()] == b':')
+    }
+}
+
+impl Channel {
     /// The shared memory the other end granted (`Error::Busy` if none).
     pub fn take_shm(&self) -> Result<Shm, Error> {
         self.0.ctl(chan::TAKE_SHM, 0).map(|h| Shm(Handle(h as u32)))
@@ -551,7 +607,7 @@ impl Channel {
 }
 
 /// A connection to the settings service (doc/50, `t5_abi::cfg`). Needs
-/// `--permit svc:cfg`, or `svc:cfgsec` to read secrets.
+/// `--permit svc:cfg/…` grants for the keys it uses (doc/52).
 pub struct Config(pub Channel);
 
 /// A failed request: the service's `cfg::err` code, or a channel error.
@@ -570,16 +626,16 @@ pub struct CfgValue {
 }
 
 impl Config {
-    pub fn connect(secret: bool) -> Result<Config, Error> {
-        Channel::connect(if secret { cfg::SVC_SECRET } else { cfg::SVC }).map(Config)
+    pub fn connect() -> Result<Config, Error> {
+        Channel::connect(cfg::SVC).map(Config)
     }
 
     /// Like `connect`, trying again for up to `ms` (the service may not be
     /// up yet at boot).
-    pub fn connect_within(secret: bool, ms: u64) -> Result<Config, Error> {
+    pub fn connect_within(ms: u64) -> Result<Config, Error> {
         let end = time_ns() + ms * 1_000_000;
         loop {
-            match Config::connect(secret) {
+            match Config::connect() {
                 Ok(c) => return Ok(c),
                 Err(e) if time_ns() >= end => return Err(e),
                 Err(_) => sleep_ms(100),

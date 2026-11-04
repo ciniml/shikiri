@@ -238,7 +238,12 @@ fn assemble(app: &App, name: &str, o: &BuildOpts, elf_sha256: &[u8], kp: &KeyPai
     push(tlv::ABI_VERSION, &abi)?;
     push(tlv::BUILD_ID, &elf_sha256[..t5a::BUILD_ID_SIZE])?;
     if !o.permits.is_empty() {
-        push(tlv::PERMISSIONS, o.permits.join("\0").as_bytes())?;
+        let p = o.permits.join("\0");
+        // The kernel keeps this much of it per process (doc/52 §3.2).
+        if p.len() > t5_abi::chan::GRANTS_MAX {
+            return Err(format!("permissions are {} bytes; the kernel keeps {}", p.len(), t5_abi::chan::GRANTS_MAX));
+        }
+        push(tlv::PERMISSIONS, p.as_bytes())?;
     }
     if !o.needs.is_empty() {
         push(tlv::NEEDS, o.needs.join("\0").as_bytes())?;
