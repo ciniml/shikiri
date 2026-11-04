@@ -146,6 +146,7 @@ PC（有線、同じ LAN）から Tab5 へ、50 ms おきに ping を 200 回。
   - `SET`（ハンドル、値）: 相手が読む値。答えは `WRITTEN`。
   - `SEND`（ハンドル、indication か、値）: 購読している相手へ通知か indication。答えは `SENT`。
   - `STOP`: 広告をやめる。つながっていれば切る。
+  - `MTU`（イベント、doc/49 §10 で追加）: 接続の ATT MTU。変わっていれば `PEER_WRITE` の前に送る（つないだ直後は 23、セントラルがたいてい上げる）。
 - **作り**（`ble/src/periph.rs`）:
   - TrouBLE の `AttributeTable` を実行時に組み立てる。GAP（Device Name、Appearance）と GATT のサービスの後に、クライアントのサービスを 1 つ置く。
   - 値は可変長（`heapless::Vec<u8, 244>`）で、領域は `advertise` の間だけの配列。

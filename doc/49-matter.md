@@ -21,7 +21,7 @@
   | MT1b | `net` にマルチキャストの参加、受けた宛先、送り元の固定。mDNS のレスポンダ。PC の chip-tool か smctl から on-network でコミッショニング | まだ |
   | MT2 | コントローラの役と、シェルの `mt` コマンド | 済み（§6。運用中の機器ではなく PC の試験用のデバイスで） |
   | MT3 | Tab5 のデバイスの窓を開ける（OCW）、複数の fabric | 済み（§8） |
-  | MT4 | BLE のコミッショニング（`ble` の M3/M4 の上） | まだ |
+  | MT4 | BLE のコミッショニング（`ble` の M3/M4 の上） | デバイスの側は済み（§10）、コントローラの側はまだ |
   | MT5 | アプリがエンドポイントを持ち込む仕組みと、GUI | まだ |
 
 ## 2. MT0
@@ -143,9 +143,49 @@
   - Tab5 がデバイス: smctl の fabric（ノード 1）から `admincommissioning open-window 1 300 1234`、別の smctl の fabric がノード 5 としてコミッショニング（3.8 秒）。両方の fabric から On/Off を操作し、`CommissionedFabrics` は 2。`matter` を動かし直しても fabrics=2 のまま。窓を開けると Tab5 は CM=2、discriminator 777 で広告した。開いている窓をもう 1 度開けると Failure（Busy）、閉じた窓の revoke も Failure（WindowNotOpen）。最後に 2 つ目の fabric を unpair し、1 つ目はそのまま使えた。
 - **コアの別の問題**（試験用のデバイスで見えた。記録だけ）: simple-matter のデバイスは、非暗号のセッションの送信カウンタを毎回 1 から始める（仕様は乱数）。コントローラは、同じ相手のアドレスへの古い非暗号のセッションを使い回し、その受信の窓も引き継ぐ。PC の例を起動し直してから、同じ `matter` で 2 度目のコミッショニングをすると、PBKDFParamResponse を重複として捨てて PASE が進まなかった（`matter` を動かし直すと通る）。CASE でも同じことが起きうる（MT3 の試験の途中で、CASE が 1 度 40 秒かけて失敗した）。
 
-## 9. 残り
+## 9. 残り（§8 の時点）
 - MT4: BLE のコミッショニング（`ble` の M3/M4 の上）。
 - 購読（subscribe）、書き込み、任意のコマンド（引数つき）。
 - MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
 - UDP の受信の通知（今は 20 ms ごとに見に行く）。
 - simple-matter のコアの直し（§8: 再送バッファが尽きたときと、セッションを閉じたときの exchange の扱い、非暗号のカウンタと非暗号のセッションの使い回し）。
+
+## 10. MT4: BLE のコミッショニング（デバイスの側）
+利用者の指示（2026-11-04）:「すすめて」。
+
+- **作り**（`matter/src/blelink.rs`）:
+  - コアの `ble` の feature（`Btp` と `PeerAddr::Ble`）を使う。
+  - デバイスが commissionable の間（最初の窓、開けられた窓）は、`svc:ble` に `ADVERTISE` を送る（doc/48 M4）。
+    - サービスは 0xFFF6、特性は C1（18EE2EF5-…-9D11、書き込み）と C2（…-9D12、読みと indication）。
+    - 広告のデータはコアの `AdvData::encode_adv`（flags と、discriminator、VID、PID の入った service data。15 バイト）。間隔 100 ms。
+  - `device.rs` は commissionable の状態（discriminator と CM）を 1 つ持ち、mDNS と BLE の両方をそこから作る。前は、窓が開いている間にアドレスが変わると、mDNS を作り直したときに commissionable の広告が消えていた。
+  - C1 への書き込み（`PEER_WRITE`）を `Btp::process_incoming` へ渡し、組み上がったメッセージを `handle_rx(…, PeerAddr::Ble)` へ渡す。
+    - 返事と `poll` の BLE 宛ての送信は、待ち行列（3 つ）から 1 つずつ `Btp::send` へ入れる。
+    - BTP のフラグメントは C2 の indication で 1 つずつ送る（`SENT` を待ってから次）。
+  - C2 の購読（CCCD の bit 1）より前は何も送らない。BTP の無通信や ACK のタイムアウトでは `STOP`（切断）する。
+  - `ble` はクライアントを 1 つずつしか扱わない。そのため、チャネルは commissionable の間と、コミッショナがつないでいる間だけ持つ。窓が閉じて相手が切れたら閉じ、ほかのアプリが `ble` を使えるようにする。
+  - `ble` が動いていなければ 5 秒ごとに試す。`ADVERTISE` に 5 秒答えがなければ（BT のコントローラが起動していないと、`ble` は HCI の答えを待ち続ける）、やめてやり直す。
+  - 相手が閉じたことは `wait` のイベントでしか分からないので、2 秒ごとに見る。ループの眠りも、`ble` のチャネルがあるときはそれを `wait` する（何か来たらすぐ起きる）。
+- **`svc:ble` の `MTU` イベント**（`[MTU, att_mtu]`、doc/48 M4 に追加）: `ble` は、接続の ATT MTU が変わっていれば、`PEER_WRITE` の前に知らせる。BTP の handshake で、こちらの MTU として渡す（コアは相手が出した MTU と小さい方を使う）。
+- **PC の側**: smctl を `--features ble`（btleplug）でビルドした。simple_matter の a163275 を `git archive` で取り出し、別のターゲットのディレクトリへ。
+  - `pairing ble-handoff NODE PASSCODE DISCRIMINATOR` を使う。PASE から AddNOC までは BLE、CASE と CommissioningComplete は UDP（運用の mDNS で引く）。
+  - Tab5 は Wi-Fi に既につながっているので、ネットワークの設定（Wi-Fi の資格情報）は要らない（NetworkCommissioning はこれまでどおり）。
+- **実機**（2026-11-04）:
+  - BT のコントローラは、`wifi` を引数 1 で動かし直して起動した（`kill` の後 `run wifi 1`、doc/48 §3）。最初は、BT が起動していないまま `run ble` していた。`ble` は `ADVERTISE` の HCI の答えを待ったまま、CPU を使い続けた。
+  - smctl（ノード 1 の fabric）から `admincommissioning open-window 1 300 1234` を送ると、Tab5 は discriminator 1234 で BLE の広告を始めた（`matter.ble_advertising`）。
+  - 別の smctl の fabric が `pairing ble-handoff 6 …` で見つけ、接続、BTP（window 6）、PASE、Attestation、CSR、AddNOC を BLE で行った。続けて CASE と CommissioningComplete を UDP で行い、fabrics=2 になった。
+  - その fabric から UDP で toggle が通った。終わったら unpair し、fabrics=1 に戻した。
+  - **かかった時間は 54〜64 秒**（PC の 2 つのアダプタのどちらでも）。Attestation だけで 28〜34 秒。
+    - smctl（btleplug）は ATT MTU を知らない（`att_mtu=None`）。そのため BTP の handshake で 23 を出し、フラグメントは 20 バイトになった。Tab5 の側の MTU は 247（`matter.ble_mtu`）。
+    - 1 回のコミッショニングで C1 への書き込みが 111、indication が 171。
+    - 接続の間隔は 50 ms（LE Enhanced Connection Complete の 0x0028）。それに対して、indication 1 つに平均 205 ms、最大 399 ms かかった（`ble` の中で `indicate_raw` の時間を測った。測った後で外した）。接続のイベント 4 回に 1 回ほどしか通っていない。C6 が無線を Wi-Fi と分け合っているためと思われる（doc/48 §9 の接続の失敗と同じ根）。
+    - MTU を出すコミッショナ（chip-tool やスマホ）なら、フラグメントは 244 バイトになり、数は 1/12 ほどになる見込み（まだ試していない）。
+  - ATT MTU は接続から約 2 秒後に 247 になった（最初の C1 への書き込みの前）。
+- `ble` のログ: HCI のイベントの頭を 24 バイトから 32 バイトにした（接続の間隔まで見えるように）。
+
+## 11. 残り
+- MT4 のコントローラの側: Tab5 が BLE で PC の `ble-onoff-light`（simple-matter-ble、BlueZ）をコミッショニングする（`ble` の M3、BTP の central）。
+- 購読（subscribe）、書き込み、任意のコマンド（引数つき）。
+- MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
+- UDP の受信の通知（今は 20 ms ごとに見に行く）。
+- simple-matter のコアの直し（§8）: simple-matter の側で直った（44f3dce、未 push）。実機での確認を頼まれている。

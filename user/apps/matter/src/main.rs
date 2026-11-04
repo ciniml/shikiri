@@ -8,11 +8,14 @@
 //! UDP port), driven through `svc:matter` (`t5_abi::matter`: the shell's
 //! `mt`). Matter's UDP 5540, the controller's 5541 and mDNS 5353
 //! (ff02::fb and 224.0.0.251 joined) through `svc:net`; one store on the
-//! SD card (`mtport::FileKvs`) for both; the kernel's `random`.
+//! SD card (`mtport::FileKvs`) for both; the kernel's `random`. While
+//! the device is commissionable it also advertises over BLE through
+//! `svc:ble` (`blelink`, MT4), if the `ble` service runs.
 //!
 //! Built with `--permit svc:net --permit svc:fs --permit random --permit
-//! listen:matter`.
+//! listen:matter --permit svc:ble`.
 
+mod blelink;
 mod controller;
 mod device;
 
@@ -21,6 +24,7 @@ use core::fmt::Write as _;
 use core::mem::MaybeUninit;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use blelink::BleLink;
 use controller::{Controller, Op, Outcome};
 use device::{Change, Device, Identity};
 use mtport::{FileKvs, KernelRng};
@@ -281,8 +285,6 @@ fn outcome(c: &Channel, o: Outcome) {
     end(c, ok);
 }
 
-// `PeerAddr` has only UDP without the core's `ble` feature (MT4 adds BLE).
-#[allow(irrefutable_let_patterns)]
 fn run() -> Result<(), u32> {
     let mut net = Net::connect().map_err(|_| 1u32)?;
     // The Wi-Fi link's MAC is known once the link is up.
@@ -331,6 +333,7 @@ fn run() -> Result<(), u32> {
     event!(Info, "matter.ready", fabrics = dev.fabrics() as u32, discriminator = DISCRIMINATOR as u32, mac = &addrs.mac[..], on = dev.on());
 
     let mut client: Option<Client> = None;
+    let mut ble = BleLink::new();
     let mut rx = [0u8; PKT];
     let mut tx = [0u8; PKT];
     let mut next_addrs = now_ms() + ADDRS_MS;
@@ -389,13 +392,20 @@ fn run() -> Result<(), u32> {
                 send(&mut net, mdns, &tx[..k], to);
             }
         }
+        // BLE: a commissioner's messages over BTP.
+        busy |= ble.rx(dev, now_ms(), &mut tx);
         let now = now_ms();
         dev.housekeep(now, log_change);
         // Retransmissions, acknowledgements, reports; announcements.
         while let Some(d) = dev.poll(now_ms(), &mut tx) {
-            if let PeerAddr::Udp(to) = d.addr {
-                send(&mut net, udp, &tx[..d.len], to);
+            match d.addr {
+                PeerAddr::Udp(to) => send(&mut net, udp, &tx[..d.len], to),
+                PeerAddr::Ble(_) => ble.queue(&tx[..d.len]),
             }
+        }
+        ble.advertise(dev.ble_adv(), now_ms());
+        while ble.pump(now_ms()) {
+            busy = true;
         }
         while let Some(k) = dev.mdns_poll(now_ms(), &mut tx) {
             send(&mut net, mdns, &tx[..k], mdns_group(has_v4));
@@ -427,8 +437,12 @@ fn run() -> Result<(), u32> {
             }
         }
         if !busy {
-            let deadline = dev.next_deadline(now).unwrap_or(u64::MAX).min(ctrl.next_deadline(now).unwrap_or(u64::MAX));
-            sleep_ms(deadline.saturating_sub(now).clamp(1, TICK_MS));
+            let deadline = dev
+                .next_deadline(now)
+                .unwrap_or(u64::MAX)
+                .min(ctrl.next_deadline(now).unwrap_or(u64::MAX))
+                .min(ble.next_deadline().unwrap_or(u64::MAX));
+            ble.idle(deadline.saturating_sub(now).clamp(1, TICK_MS), now);
         }
     }
 }

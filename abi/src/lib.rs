@@ -374,6 +374,10 @@ pub mod ble {
     pub const PEER_WRITE: u8 = 15;
     /// Event `[SENT, handle: u16 LE]`.
     pub const SENT: u8 = 16;
+    /// Event `[MTU, att_mtu: u16 LE]`: the peer's connection's ATT MTU, sent
+    /// before a `PEER_WRITE` whenever it has changed (it starts at 23, and
+    /// the central usually raises it after connecting).
+    pub const MTU: u8 = 17;
     /// Characteristics in an `ADVERTISE`, at most.
     pub const CHARS_MAX: usize = 4;
     /// Longest characteristic value.

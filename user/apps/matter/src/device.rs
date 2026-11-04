@@ -1,7 +1,7 @@
 //! The device role (doc/49 §5): simple-matter's core put together for an
 //! On/Off light, as `simple-matter-cffi` does it (its `Light`, `Owned`,
 //! `Shim::housekeep`), without composition, custom clusters, BLE or
-//! Thread. Endpoint 0 has the node's clusters, endpoint 1 Identify,
+//! Thread; BLE commissioning is `blelink`'s. Endpoint 0 has the node's clusters, endpoint 1 Identify,
 //! Groups, On/Off and Descriptor.
 
 use core::cell::RefCell;
@@ -12,6 +12,8 @@ use core::ptr::addr_of_mut;
 
 use mtport::{FileKvs, KernelRng};
 use simple_matter::acl::{AclHandle, AclTable};
+use simple_matter::btp::AdvData;
+use simple_matter::btp::gatt::ADV_TOTAL_LEN;
 use simple_matter::crypto::rustcrypto::RustCrypto;
 use simple_matter::discovery::{Commissionable, CommissioningMode, Host, MATTER_PORT, MdnsResponder, Operational};
 use simple_matter::dm::clusters::{
@@ -211,6 +213,8 @@ pub struct Device {
     ipv4: Option<[u8; 4]>,
     ipv6_ll: Option<[u8; 16]>,
     boot_window_open: bool,
+    /// What the node advertises as commissionable (mDNS and BLE).
+    commissionable: Option<(u16, CommissioningMode)>,
     last_fabric_gen: u32,
     last_group_gen: u32,
     last_resumption_gen: u32,
@@ -294,6 +298,7 @@ impl Device {
             stack,
             kvs,
             instance_id: u64::from_be_bytes(instance),
+            commissionable: (count == 0).then_some((id.discriminator, CommissioningMode::Standard)),
             id,
             ipv4: None,
             ipv6_ll: None,
@@ -368,19 +373,34 @@ impl Device {
     fn rebuild_mdns(&mut self, now: u64) {
         let host = Host::from_mac(&self.id.mac, self.ipv6_ll.map(Ipv6Addr::from), self.ipv4.map(Ipv4Addr::from));
         self.mdns = MdnsResponder::new(host, MATTER_PORT);
-        if self.o.fabrics.borrow().len() == 0 && self.boot_window_open {
-            let ad = self.commissionable(self.id.discriminator, CommissioningMode::Standard);
+        self.refresh_operational();
+        if let Some((d, m)) = self.commissionable {
+            let ad = self.commissionable(d, m);
             self.mdns.set_commissionable(Some(ad));
-        } else {
-            self.refresh_operational();
         }
         self.mdns.notify_change(now);
     }
 
     fn set_commissionable(&mut self, discriminator: Option<(u16, CommissioningMode)>, now: u64) {
+        self.commissionable = discriminator;
         let ad = discriminator.map(|(d, m)| self.commissionable(d, m));
         self.mdns.set_commissionable(ad);
         self.mdns.notify_change(now);
+    }
+
+    /// The BLE advertisement while the node is commissionable.
+    pub fn ble_adv(&self) -> Option<[u8; ADV_TOTAL_LEN]> {
+        let (discriminator, _) = self.commissionable?;
+        let ad = AdvData {
+            discriminator,
+            vendor_id: self.id.vendor_id,
+            product_id: self.id.product_id,
+            additional_data: false,
+            ext_announcement: false,
+        };
+        let mut b = [0u8; ADV_TOTAL_LEN];
+        ad.encode_adv(&mut b).ok()?;
+        Some(b)
     }
 
     /// After each datagram and poll (cffi's `housekeep`): On/Off events,

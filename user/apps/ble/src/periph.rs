@@ -1,6 +1,7 @@
 //! The peripheral role (doc/48 M4): the client's GATT service, built at
 //! run time behind the GAP and GATT services, advertised until one central
-//! connects; its writes go to the client, which sets values and sends
+//! connects; its writes go to the client (each after the connection's
+//! ATT MTU, when that has changed), which sets values and sends
 //! notifications or indications.
 
 use embassy_futures::select::{Either, select};
@@ -159,6 +160,7 @@ pub async fn advertise(stack: &Host<'_>, reports: &Reports, req: &[u8]) -> bool 
     reports.send_wait(&p).await;
 
     let mut out = [0u8; ble::MSG_MAX];
+    let mut mtu = 0;
     loop {
         let next = select(gatt.next(), request(reports, &mut buf)).await;
         match next {
@@ -184,6 +186,12 @@ pub async fn advertise(stack: &Host<'_>, reports: &Reports, req: &[u8]) -> bool 
                     reply.send().await;
                 }
                 if len > 0 {
+                    let now = gatt.raw().att_mtu();
+                    if now != mtu {
+                        mtu = now;
+                        let [a, b] = mtu.to_le_bytes();
+                        reports.send_wait(&[ble::MTU, a, b]).await;
+                    }
                     reports.send_wait(&out[..len]).await;
                 }
             }
