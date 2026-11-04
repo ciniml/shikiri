@@ -15,7 +15,9 @@ use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 use core::ptr::addr_of_mut;
 
-use mtport::{FileKvs, KernelRng};
+use mtport::KernelRng;
+
+use crate::store::Store;
 use simple_matter::controller::ca::{CA_STATE_MAX_LEN, Ca};
 use simple_matter::controller::nodes as nodes_codec;
 use simple_matter::controller::{
@@ -166,7 +168,7 @@ pub struct Controller {
     /// Messages for the device over BLE; whether the link can go.
     ble_txq: heapless::Deque<Tx, TX_QUEUE>,
     ble_close: bool,
-    kvs: &'static RefCell<FileKvs>,
+    kvs: &'static RefCell<Store>,
     last_phase: Option<Phase>,
     outcome: Option<Outcome>,
 }
@@ -200,7 +202,7 @@ fn phase_name(p: Phase) -> &'static str {
 impl Controller {
     /// Restores the CA (or makes one) and the nodes from the store. Only
     /// once per process.
-    pub fn init(kvs: &'static RefCell<FileKvs>) -> Result<&'static mut Controller, &'static str> {
+    pub fn init(kvs: &'static RefCell<Store>) -> Result<&'static mut Controller, &'static str> {
         let crypto = RustCrypto::new(KernelRng);
         let mut rec = [0u8; CA_STATE_MAX_LEN];
         let saved = kvs.borrow_mut().get(b"cast", &mut rec);
@@ -565,6 +567,20 @@ impl Controller {
         let port = if found.port == 0 { MATTER_PORT } else { found.port };
         let addr = SocketAddr::new(ip, port);
         event!(Info, "matter.found", discriminator = discriminator as u32, v4 = ip.is_ipv4(), port = port as u32);
+        self.begin_pair(node, passcode, addr, now);
+    }
+
+    /// Commissions the device at `addr` as node `node`, without looking
+    /// for it (as smctl's `pairing address`).
+    pub fn pair_addr(&mut self, node: u64, passcode: u32, addr: SocketAddr, now: u64) -> Result<(), &'static str> {
+        if self.busy() {
+            return Err("busy");
+        }
+        self.begin_pair(node, passcode, addr, now);
+        Ok(())
+    }
+
+    fn begin_pair(&mut self, node: u64, passcode: u32, addr: SocketAddr, now: u64) {
         let mut comm = Commissioner::new(&self.o.ca, &self.o.crypto, AttestationPolicy::VerifyNoPaa);
         if comm.commission(PeerAddr::Udp(addr), passcode, node, now).is_err() {
             self.finish(Outcome::PairFailed { stage: 0, reason: "start" });

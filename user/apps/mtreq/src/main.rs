@@ -9,8 +9,9 @@
 //! commissioning window on the node, MT3), 8 `revoke NODE`, 9 `pairble
 //! NODE 20202021 3840` (over BLE, MT4), 10 `forget NODE`, 11 `write NODE 1
 //! 3 0 10` (Identify's IdentifyTime), 12 `invoke NODE 1 3 0 5` (Identify,
-//! 5 s), 13 `sub NODE 1 6 0 1 10` (On/Off's OnOff, every 1 to 10 s). The
-//! answer's lines are logged. Built with `--permit svc:matter`. Exit 0 if
+//! 5 s), 13 `sub NODE 1 6 0 1 10` (On/Off's OnOff, every 1 to 10 s), 14
+//! `pairaddr NODE 20202021 127.0.0.1 5540` (its own device, the
+//! emulator's test). The answer's lines are logged. Built with `--permit svc:matter`. Exit 0 if
 //! the answer ended well.
 
 use core::fmt::Write as _;
@@ -37,6 +38,7 @@ fn main(op: usize, node: usize) -> usize {
         11 => write!(req, "write {node} 1 3 0 10"),
         12 => write!(req, "invoke {node} 1 3 0 5"),
         13 => write!(req, "sub {node} 1 6 0 1 10"),
+        14 => write!(req, "pairaddr {node} 20202021 127.0.0.1 5540"),
         _ => return 1,
     };
     let Ok(c) = Channel::connect(matter::SVC) else {

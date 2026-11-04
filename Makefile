@@ -449,6 +449,16 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --flash $(KUPDATE_DIR)/bad-panic.bin@10000 \
 	    --expect-event kupdate.pending --expect-event kernel.panic --expect-event kupdate.panic_reset \
 	    $(KUPDATE_DIR)/bad-panic.elf
+	@# Matter (doc/49 §16): `matter 1` (any link, the store in memory) and
+	@# its own controller over 127.0.0.1: commissioning, a subscription to
+	@# OnOff, a toggle (the device's event and the report), a read.
+	$(T5EMU) --quiet --max-ms 120000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net" --ctl "wait-ms 3000" --ctl "run matter 1" --ctl "wait-ms 3000" \
+	    --ctl "run mtreq 14 1" --ctl "wait-ms 25000" --ctl "run mtreq 13 1" --ctl "wait-ms 5000" \
+	    --ctl "run mtreq 5 1" --ctl "wait-ms 5000" --ctl "run mtreq 6 1" --ctl "wait-ms 3000" \
+	    --expect-event matter.ready --expect-event matter.commissioned --expect-event matter.onoff \
+	    --expect-event matter.report \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

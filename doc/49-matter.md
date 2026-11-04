@@ -250,8 +250,28 @@
   - PC の例を止めると、約 50 秒後に `matter.subscription_lost id=1`。
   - 試験の後、ノード 20 は `forget` で消した。
 
-## 15. 残り
+## 15. 残り（§14 の時点）
 - MT1/MT2 の t5emu の試験（Wi-Fi がないので、ホストリンクで）。
 - UDP の受信の通知（今は 20 ms ごとに見に行く）。
 - BLE: Wi-Fi の資格情報を BLE で渡すコミッショニング（`AddOrUpdateWiFiNetwork` と `ConnectNetwork`）。Tab5 はどちらの側も、相手がもうネットワークにいる前提。
 - 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。
+
+## 16. t5emu の試験
+利用者の指示（2026-11-04）:「すすめて」。
+
+- **やり方を変えた**: 計画は「ホストリンクで」だったが、t5emu には SD カードがない（`fs` が動かず、KVS がない）。また、PC の側（t5emu の中の smoltcp の相手）に Matter のコントローラを作るのは大きい。そこで `matter` の中のコントローラが、同じプロセスの中のデバイスを 127.0.0.1 でコミッショニングする形にした。PASE、CASE、IM、購読、`svc:net` の UDP の上で、デバイスとコントローラの両方を通す。
+- **`run matter 1`**（試験の形）:
+  - ソケットはどのリンクにも開く（`link::ANY`。ループバックが通る）。wlan0 を待たず、MAC は作ったもの（02:00:00:00:00:01）。
+  - ストアはメモリの中（`store.rs` の `MemKvs`。プロセスが終われば消える。SD の `FileKvs` と `Store` の enum で切り替える）。BLE は使わない。
+  - mDNS のグループには入れない（警告だけ）。
+- **`pairaddr NODE PASSCODE IP PORT`**: 探さずにそのアドレスをコミッショニングする（smctl の `pairing address` と同じ）。`mtreq` の OP 14 は `pairaddr NODE 20202021 127.0.0.1 5540`。
+- **`make test-p4emu` の最後**: `run net`、`run matter 1`、`mtreq` で pairaddr、sub、toggle、read。期待するイベントは `matter.ready`、`matter.commissioned`、`matter.onoff`、`matter.report`（`--expect-event` は名前だけを見るので、成功のときだけ出るものを選んだ）。
+- **結果**: エミュレータの時間で、コミッショニングは 16.9 秒（PASE だけで約 6 秒。暗号が遅い）。購読、toggle（デバイスの `matter.onoff on=true` と、レポートの `value=1`）、読み（`1`）が通った。実時間では約 2 分 44 秒かかる。
+- 最初は `run net` の直後に `run matter 1` を始めて、`net` がまだ待ち受けておらず失敗した（`matter.failed step=1`）。3 秒待つようにした。
+- 実機（引数なし）は今までどおり: fabric を読み戻し、smctl からの toggle が通った。
+
+## 17. 残り
+- UDP の受信の通知（今は 20 ms ごとに見に行く）。
+- BLE: Wi-Fi の資格情報を BLE で渡すコミッショニング（`AddOrUpdateWiFiNetwork` と `ConnectNetwork`）。Tab5 はどちらの側も、相手がもうネットワークにいる前提。
+- 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。
+- t5emu の試験は、デバイスとコントローラが同じプロセスで同じコア。別の実装（chip-tool など）との相互接続は実機でしか見ていない（PC の smctl と例）。

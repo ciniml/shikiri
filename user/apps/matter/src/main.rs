@@ -13,12 +13,17 @@
 //! `svc:ble` (`blelink`, MT4), if the `ble` service runs; the controller
 //! also commissions over BLE (`pairble`).
 //!
+//! `run matter 1` is the emulator's test (doc/49 §16): no Wi-Fi, no SD card
+//! and no BLE there, so the sockets are on any link (127.0.0.1 works), the
+//! store is in memory and the MAC is made up.
+//!
 //! Built with `--permit svc:net --permit svc:fs --permit random --permit
 //! listen:matter --permit svc:ble`.
 
 mod blelink;
 mod controller;
 mod device;
+mod store;
 
 use core::cell::RefCell;
 use core::fmt::Write as _;
@@ -29,6 +34,7 @@ use blelink::BleLink;
 use controller::{ARGS, Controller, Op, Outcome, Val};
 use device::{Change, Device, Identity};
 use mtport::{FileKvs, KernelRng};
+use store::{MemKvs, Store};
 use simple_matter::controller::{DEFAULT_WINDOW_ITERATIONS, OpenWindowParams};
 use simple_matter::crypto::Rng as _;
 use simple_matter::discovery::onboarding;
@@ -95,8 +101,8 @@ fn wifi_addrs(net: &Net) -> Option<Addrs> {
     None
 }
 
-fn main(_: usize, _: usize) -> usize {
-    match run() {
+fn main(mode: usize, _: usize) -> usize {
+    match run(mode & 1 != 0) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "matter.failed", step = step);
@@ -128,7 +134,7 @@ fn log_change(c: Change) {
 
 /// The store, shared by the device and the controller (one `svc:fs`
 /// connection: a process maps two shared windows, doc/19 §2).
-static mut KVS: MaybeUninit<RefCell<FileKvs>> = MaybeUninit::uninit();
+static mut KVS: MaybeUninit<RefCell<Store>> = MaybeUninit::uninit();
 
 /// The client being served (one request per connection, as the shell's
 /// `mt` asks: dropped after the answer; a closed channel only shows as an
@@ -183,6 +189,10 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
         "pair" => match (num(w.next()), num(w.next()), num(w.next())) {
             (Some(node), Some(passcode), Some(d)) => ctrl.pair(node, passcode as u32, d as u16, now),
             _ => Err("pair NODE PASSCODE DISCRIMINATOR"),
+        },
+        "pairaddr" => match (num(w.next()), num(w.next()), w.next().and_then(|a| a.parse::<IpAddr>().ok()), num(w.next())) {
+            (Some(node), Some(passcode), Some(ip), Some(port)) => ctrl.pair_addr(node, passcode as u32, SocketAddr::new(ip, port as u16), now),
+            _ => Err("pairaddr NODE PASSCODE IP PORT"),
         },
         "pairble" => match (num(w.next()), num(w.next()), num(w.next())) {
             (Some(node), Some(passcode), Some(d)) if !ctrl.busy() => {
@@ -279,7 +289,7 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairble NODE PASSCODE DISCRIMINATOR | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
     };
     match started {
         Ok(()) => true,
@@ -349,24 +359,32 @@ fn outcome(c: &Channel, o: Outcome) {
     end(c, ok);
 }
 
-fn run() -> Result<(), u32> {
+fn run(test: bool) -> Result<(), u32> {
     let mut net = Net::connect().map_err(|_| 1u32)?;
     // The Wi-Fi link's MAC is known once the link is up.
-    let addrs = loop {
-        match wifi_addrs(&net) {
-            Some(a) if a.mac != [0; 6] => break a,
-            _ => sleep_ms(1000),
+    let addrs = if test {
+        Addrs { mac: [0x02, 0, 0, 0, 0, 0x01], ipv4: Some([127, 0, 0, 1]), ipv6_ll: None }
+    } else {
+        loop {
+            match wifi_addrs(&net) {
+                Some(a) if a.mac != [0; 6] => break a,
+                _ => sleep_ms(1000),
+            }
         }
     };
-    let kvs = FileKvs::open().map_err(|e| {
-        let (status, ipc) = match e {
-            FsError::Status(s) => (s, 0),
-            FsError::Ipc(e) => (0, e as u32),
-        };
-        event!(Error, "matter.no_store", status = status, ipc = ipc);
-        2u32
-    })?;
-    let kvs: &'static RefCell<FileKvs> = unsafe { (*core::ptr::addr_of_mut!(KVS)).write(RefCell::new(kvs)) };
+    let kvs = if test {
+        Store::Mem(MemKvs::new())
+    } else {
+        Store::File(FileKvs::open().map_err(|e| {
+            let (status, ipc) = match e {
+                FsError::Status(s) => (s, 0),
+                FsError::Ipc(e) => (0, e as u32),
+            };
+            event!(Error, "matter.no_store", status = status, ipc = ipc);
+            2u32
+        })?)
+    };
+    let kvs: &'static RefCell<Store> = unsafe { (*core::ptr::addr_of_mut!(KVS)).write(RefCell::new(kvs)) };
     let id = Identity {
         mac: addrs.mac,
         discriminator: DISCRIMINATOR,
@@ -385,16 +403,17 @@ fn run() -> Result<(), u32> {
         6u32
     })?;
 
-    let udp = net.udp_bind_at(0, link::WLAN0, MATTER_PORT).map_err(|_| 4u32)?;
-    let mdns = net.udp_bind_at(0, link::WLAN0, MDNS_PORT).map_err(|_| 5u32)?;
-    let cudp = net.udp_bind_at(0, link::WLAN0, CONTROLLER_PORT).map_err(|_| 7u32)?;
+    let on = if test { link::ANY } else { link::WLAN0 };
+    let udp = net.udp_bind_at(0, on, MATTER_PORT).map_err(|_| 4u32)?;
+    let mdns = net.udp_bind_at(0, on, MDNS_PORT).map_err(|_| 5u32)?;
+    let cudp = net.udp_bind_at(0, on, CONTROLLER_PORT).map_err(|_| 7u32)?;
     for group in [IpAddr::V6(MDNS_V6), IpAddr::V4(MDNS_V4)] {
         if net.udp_join(mdns, group).is_err() {
             event!(Warn, "matter.no_multicast", v6 = group.is_ipv6());
         }
     }
     let listener = Listener::open(matter::SVC).map_err(|_| 8u32)?;
-    event!(Info, "matter.ready", fabrics = dev.fabrics() as u32, discriminator = DISCRIMINATOR as u32, mac = &addrs.mac[..], on = dev.on());
+    event!(Info, "matter.ready", fabrics = dev.fabrics() as u32, discriminator = DISCRIMINATOR as u32, mac = &addrs.mac[..], on = dev.on(), test = test);
 
     let mut client: Option<Client> = None;
     let mut ble = BleLink::new();
@@ -467,7 +486,7 @@ fn run() -> Result<(), u32> {
                 PeerAddr::Ble(_) => ble.queue(&tx[..d.len]),
             }
         }
-        ble.advertise(dev.ble_adv(), now_ms());
+        ble.advertise(if test { None } else { dev.ble_adv() }, now_ms());
         while let Some(k) = dev.mdns_poll(now_ms(), &mut tx) {
             send(&mut net, mdns, &tx[..k], mdns_group(has_v4));
         }
@@ -500,7 +519,7 @@ fn run() -> Result<(), u32> {
             }
         }
         let now = now_ms();
-        if now >= next_addrs {
+        if now >= next_addrs && !test {
             next_addrs = now + ADDRS_MS;
             if let Some(a) = wifi_addrs(&net) {
                 has_v4 = a.ipv4.is_some();

@@ -10,7 +10,9 @@ use core::net::{Ipv4Addr, Ipv6Addr};
 use core::num::NonZeroU8;
 use core::ptr::addr_of_mut;
 
-use mtport::{FileKvs, KernelRng};
+use mtport::KernelRng;
+
+use crate::store::Store;
 use simple_matter::acl::{AclHandle, AclTable};
 use simple_matter::btp::AdvData;
 use simple_matter::btp::gatt::ADV_TOTAL_LEN;
@@ -204,7 +206,7 @@ pub struct Device {
     o: &'static Owned,
     stack: Stack,
     mdns: MdnsResponder<NF>,
-    kvs: &'static RefCell<FileKvs>,
+    kvs: &'static RefCell<Store>,
     id: Identity,
     instance_id: u64,
     ipv4: Option<[u8; 4]>,
@@ -223,7 +225,7 @@ impl Device {
     /// Builds the node in static memory, restores fabrics, ACL, groups and
     /// CASE resumption from `kvs`, and starts advertising (commissionable
     /// until it has a fabric). Only once per process.
-    pub fn init(id: Identity, kvs: &'static RefCell<FileKvs>, now: u64) -> Result<&'static mut Device, &'static str> {
+    pub fn init(id: Identity, kvs: &'static RefCell<Store>, now: u64) -> Result<&'static mut Device, &'static str> {
         let basic = BasicInfoConfig {
             vendor_name: "tab5-os",
             vendor_id: id.vendor_id,
