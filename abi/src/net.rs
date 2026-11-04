@@ -29,6 +29,13 @@
 //! | RESOLVE_RESULT | – | – | 1 once answered / IPv4 (`UNREACHABLE`: failed or no record); IPv6 after the reply |
 //! | IF_INFO | interface (0, 1, …) | – | 1 if it is up (0: not there now) / bytes put in the slice (`iface`; doc/41) |
 //! | UDP_JOIN | multicast group (IPv4, or IPv6 with family 6) | – | – (the UDP socket's links join the group; doc/49) |
+//! | UDP_WAIT | – | – | 1 once a datagram waits on one of the client's UDP sockets / – (doc/49 §18) |
+//!
+//! UDP_WAIT is the one request whose reply can come later: when a datagram
+//! waits on any of the client's UDP sockets (at once if one already does),
+//! or, with 0, just before the reply to the client's next request. So the
+//! replies stay in the order of the requests, and a client can `wait` on
+//! its channel (with its other handles) instead of polling.
 //!
 //! TCP_LISTEN and UDP_BIND (doc/23 §5): with address 0 and `link::ANY` the
 //! socket listens on every link (a TCP listener becomes the connection that
@@ -70,6 +77,7 @@ pub mod op {
     pub const RESOLVE_RESULT: u8 = 13;
     pub const IF_INFO: u8 = 14;
     pub const UDP_JOIN: u8 = 15;
+    pub const UDP_WAIT: u8 = 16;
 }
 
 /// IF_INFO's record in the slice (doc/41): `name[8]` (NUL-padded) | `mac[6]`

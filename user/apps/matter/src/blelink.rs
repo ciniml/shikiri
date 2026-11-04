@@ -14,7 +14,7 @@ use simple_matter::btp::AdvData;
 use simple_matter::btp::gatt::{ADV_TOTAL_LEN, C1_UUID128, C2_UUID128, MATTER_SERVICE_UUID16};
 use simple_matter::btp::{Btp, BtpRole};
 use simple_matter::transport::net::{BtpConnId, PeerAddr};
-use t5_rt::{Channel, Error, ble, chan, event, sleep_ms, wait};
+use t5_rt::{Channel, Error, Handle, ble, chan, event, wait};
 
 use crate::controller::Controller;
 use crate::device::Device;
@@ -597,16 +597,15 @@ impl BleLink {
         true
     }
 
-    /// Sleeps up to `ms`, waking early when `ble` has something.
-    pub fn idle(&mut self, ms: u64, now: u64) {
-        let Some(c) = &self.chan else {
-            sleep_ms(ms);
-            return;
-        };
-        if wait(&[&c.0], ms * 1_000_000).is_ok_and(|ev| ev.kind == chan::PEER_CLOSED) {
-            event!(Warn, "matter.ble_gone");
-            self.gone(now);
-        }
+    /// The channel to `ble`, to `wait` on.
+    pub fn handle(&self) -> Option<&Handle> {
+        self.chan.as_ref().map(|c| &c.0)
+    }
+
+    /// `wait` said `ble` closed its end.
+    pub fn closed(&mut self, now: u64) {
+        event!(Warn, "matter.ble_gone");
+        self.gone(now);
     }
 
     pub fn next_deadline(&self) -> Option<u64> {

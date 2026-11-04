@@ -510,6 +510,8 @@ pub struct Stack {
     rules_gen: u32,
     /// An IPv6 address for the reply being made (doc/26 §4).
     reply_addr: Option<[u8; 16]>,
+    /// Clients whose UDP_WAIT is unanswered (doc/49 §18).
+    udp_waiting: [bool; CLIENTS],
 }
 
 impl Stack {
@@ -1032,6 +1034,13 @@ impl Stack {
                     Err(_) => Err(status::UNREACHABLE),
                 }
             }
+            op::UDP_WAIT => {
+                if self.udp_ready(client) {
+                    return Ok((1, 0));
+                }
+                self.udp_waiting[client] = true;
+                Err(DEFERRED)
+            }
             op::UDP_RECV => {
                 self.primary(client, sock, Kind::Udp)?;
                 let slot = self.slots[sock as usize].unwrap();
@@ -1267,7 +1276,27 @@ impl Stack {
     }
 
     /// A client left: abort its sockets.
+    /// Whether a datagram waits on one of `client`'s UDP sockets.
+    fn udp_ready(&mut self, client: usize) -> bool {
+        for i in 0..SOCKETS {
+            let Some(slot) = self.slots[i] else { continue };
+            if slot.owner != Some(client) || slot.kind != Kind::Udp {
+                continue;
+            }
+            for k in 0..IFACES {
+                if let Some(sk) = slot.socks[k]
+                    && let Some(set) = self.set(k)
+                    && set.get::<udp::Socket>(sk.handle).can_recv()
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn drop_client(&mut self, client: usize) {
+        self.udp_waiting[client] = false;
         for i in 0..SOCKETS {
             if let Some(s) = self.slots[i]
                 && s.owner == Some(client)
@@ -1313,6 +1342,9 @@ fn control(staging: &mut rules::Staging, m: &[u8]) -> [u8; proto::REPLY_SIZE] {
         _ => reply(status::BAD_REQUEST, 0, 0),
     }
 }
+
+/// `handle`'s answer for a request answered later (UDP_WAIT).
+const DEFERRED: u32 = u32::MAX;
 
 fn reply(status: u32, v0: u32, v1: u32) -> [u8; proto::REPLY_SIZE] {
     let mut r = [0u8; proto::REPLY_SIZE];
@@ -1377,6 +1409,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         relay: None,
         rules_gen: 0,
         reply_addr: None,
+        udp_waiting: [false; CLIENTS],
     };
     let has_host = stack.dev.host.is_some();
     stack.iface.update_ip_addrs(|a| {
@@ -1423,6 +1456,16 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             stack.eth[WLAN - 1] = open_wifi();
         }
         stack.poll();
+        // UDP_WAITs whose datagram has come.
+        for (i, c) in clients.iter().enumerate() {
+            if let Some(c) = c
+                && stack.udp_waiting[i]
+                && stack.udp_ready(i)
+            {
+                stack.udp_waiting[i] = false;
+                let _ = c.send(&reply(status::OK, 1, 0));
+            }
+        }
         // The listeners, the links (frames arriving), the control client,
         // the clients.
         let mut hs = [0u32; 6 + CLIENTS];
@@ -1525,9 +1568,16 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         let mem = &mut pool[i * proto::SLICE..(i + 1) * proto::SLICE];
         let c = clients[i].as_ref().unwrap();
         while let Ok(len) = c.0.read(&mut msg) {
+            // An unanswered UDP_WAIT is answered first (0), keeping the
+            // replies in order.
+            if stack.udp_waiting[i] {
+                stack.udp_waiting[i] = false;
+                let _ = c.send(&reply(status::OK, 0, 0));
+            }
             stack.reply_addr = None;
             let (st, v0, v1) = match stack.handle(i, mem, &msg[..len]) {
                 Ok((v0, v1)) => (status::OK, v0, v1),
+                Err(DEFERRED) => continue,
                 Err(s) => (s, 0, 0),
             };
             // Let the stack act on the request before answering (a send

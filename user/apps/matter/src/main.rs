@@ -41,7 +41,7 @@ use simple_matter::discovery::onboarding;
 use simple_matter::transport::net::PeerAddr;
 use t5_rt::net::{iface, link};
 use t5_rt::log::FmtBuf;
-use t5_rt::{Channel, Error, FsError, Listener, Net, event, matter, sleep_ms, time_ns};
+use t5_rt::{Channel, Error, FsError, Handle, Listener, Net, chan, event, matter, sleep_ms, time_ns, wait};
 
 t5_rt::entry!(main);
 
@@ -60,8 +60,9 @@ const DISCRIMINATOR: u16 = 3840;
 /// The test vendor and product (simple-matter's test DAC).
 const VENDOR: u16 = 0xFFF1;
 const PRODUCT: u16 = 0x8001;
-/// The loop's longest sleep: UDP has no readiness event yet (doc/49).
-const TICK_MS: u64 = 20;
+/// The loop's longest sleep: it waits for `net` (UDP_WAIT, doc/49 §18),
+/// the clients and `ble`, and the stacks' timers.
+const IDLE_MS: u64 = 1000;
 /// How often the addresses are read again.
 const ADDRS_MS: u64 = 5000;
 const PKT: usize = 1280;
@@ -360,7 +361,18 @@ fn outcome(c: &Channel, o: Outcome) {
 }
 
 fn run(test: bool) -> Result<(), u32> {
-    let mut net = Net::connect().map_err(|_| 1u32)?;
+    // `net` may be starting too (at boot, or after it was restarted).
+    let mut tries = 0;
+    let mut net = loop {
+        match Net::connect() {
+            Ok(n) => break n,
+            Err(_) if tries < 50 => {
+                tries += 1;
+                sleep_ms(200);
+            }
+            Err(_) => return Err(1),
+        }
+    };
     // The Wi-Fi link's MAC is known once the link is up.
     let addrs = if test {
         Addrs { mac: [0x02, 0, 0, 0, 0, 0x01], ipv4: Some([127, 0, 0, 1]), ipv6_ll: None }
@@ -532,7 +544,42 @@ fn run(test: bool) -> Result<(), u32> {
                 .unwrap_or(u64::MAX)
                 .min(ctrl.next_deadline(now).unwrap_or(u64::MAX))
                 .min(ble.next_deadline().unwrap_or(u64::MAX));
-            ble.idle(deadline.saturating_sub(now).clamp(1, TICK_MS), now);
+            let deadline = if test { deadline } else { deadline.min(next_addrs) };
+            let ms = deadline.saturating_sub(now).clamp(1, IDLE_MS);
+            if net.udp_arm().is_err() {
+                sleep_ms(ms);
+                continue;
+            }
+            // `net` (a datagram), a new client or its request, `ble`.
+            let mut hs: [&Handle; 4] = [net.handle(); 4];
+            let mut n = 1;
+            hs[n] = &listener.0;
+            n += 1;
+            let client_at = match client.as_ref() {
+                Some(cl) if !cl.waiting => {
+                    hs[n] = &cl.chan.0;
+                    n += 1;
+                    n - 1
+                }
+                _ => usize::MAX,
+            };
+            let ble_at = match ble.handle() {
+                Some(h) => {
+                    hs[n] = h;
+                    n += 1;
+                    n - 1
+                }
+                None => usize::MAX,
+            };
+            if let Ok(ev) = wait(&hs[..n], ms * 1_000_000)
+                && ev.kind == chan::PEER_CLOSED
+            {
+                if ev.index == client_at {
+                    client = None;
+                } else if ev.index == ble_at {
+                    ble.closed(now);
+                }
+            }
         }
     }
 }

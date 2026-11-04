@@ -664,6 +664,8 @@ pub struct Net {
     chan: Channel,
     _shm: Shm,
     pub slice: &'static mut [u8],
+    /// A UDP_WAIT is out: its reply comes before the next one.
+    armed: core::cell::Cell<bool>,
 }
 
 /// A failed network request: the service's `net::status`, or IPC.
@@ -691,7 +693,7 @@ impl Net {
         }
         let shm = chan.take_shm().map_err(NetError::Ipc)?;
         let slice = shm.map().map_err(NetError::Ipc)?;
-        Ok(Net { chan, _shm: shm, slice })
+        Ok(Net { chan, _shm: shm, slice, armed: core::cell::Cell::new(false) })
     }
 
     fn call(&self, op: u8, sock: u16, a: u32, b: u32) -> Result<(u32, u32), NetError> {
@@ -707,6 +709,10 @@ impl Net {
         };
         sent.map_err(NetError::Ipc)?;
         let mut r = [0u8; chan::MSG_MAX];
+        if self.armed.replace(false) {
+            // UDP_WAIT's reply (now, or from earlier).
+            self.chan.recv(&mut r).map_err(NetError::Ipc)?;
+        }
         let k = self.chan.recv(&mut r).map_err(NetError::Ipc)?;
         if k < net::REPLY_SIZE {
             return Err(NetError::Ipc(Error::Size));
@@ -717,6 +723,23 @@ impl Net {
             net::status::OK => Ok((u(4), u(8), v6)),
             s => Err(NetError::Status(s)),
         }
+    }
+
+    /// Asks the service to answer once a datagram waits on one of this
+    /// client's UDP sockets (UDP_WAIT, doc/49 §18); then `wait` on
+    /// `handle()` (with any other handles) wakes when one does. The next
+    /// call takes the answer. Once until then.
+    pub fn udp_arm(&self) -> Result<(), NetError> {
+        if !self.armed.get() {
+            self.chan.send(&net::request(net::op::UDP_WAIT, 0, 0, 0)).map_err(NetError::Ipc)?;
+            self.armed.set(true);
+        }
+        Ok(())
+    }
+
+    /// The channel to the service, to `wait` on after `udp_arm`.
+    pub fn handle(&self) -> &Handle {
+        &self.chan.0
     }
 
     /// TCP_CONNECT to an address of either family.
