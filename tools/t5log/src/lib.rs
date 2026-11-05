@@ -7,6 +7,7 @@
 //!   bytes that are not frames (the bootloader's text) come out as text.
 //! - [`Event::to_json`] / [`Event::to_pretty`] render one record.
 
+pub mod capture;
 pub mod ctl;
 #[cfg(feature = "rtt")]
 pub mod rtt;
@@ -465,6 +466,8 @@ pub enum Item {
     Text(String),
     /// A frame that failed to decode.
     Bad { bytes: Vec<u8>, error: String },
+    /// A screen capture frame (doc/54), decoded from COBS.
+    Capture(Vec<u8>),
 }
 
 /// Splits a byte stream at 0x00 and decodes each frame.
@@ -506,6 +509,13 @@ fn decode_frame(frame: &[u8]) -> Item {
     // output before the kernel's first frame).
     let printable = frame.iter().filter(|&&b| b == b'\n' || b == b'\r' || (0x20..0x7F).contains(&b)).count();
     let mut rec = vec![0u8; frame.len()];
+    if let Some(n) = wire::cobs_decode(frame, &mut rec)
+        && n >= 2
+        && rec[0] == t5_abi::capture::FRAME
+    {
+        rec.truncate(n);
+        return Item::Capture(rec);
+    }
     let decoded = wire::cobs_decode(frame, &mut rec)
         .ok_or_else(|| "bad COBS".to_string())
         .and_then(|n| decode_record(&rec[..n]));

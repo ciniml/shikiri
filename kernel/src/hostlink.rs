@@ -8,6 +8,11 @@
 //! The service opens `netdev:host`: `read` takes one received packet,
 //! `write` sends one. Received packets wait in a small fixed queue; the
 //! line is read from the scheduler loop (`poll`).
+//!
+//! Other frames are control commands (doc/54), as on the RTT down-channel
+//! (doc/14 §3): the PC can control the kernel with the USB cable alone.
+//! The line is read for them whether or not the link is open; while
+//! commands wait, it is not read, so the PC's writes wait in USB.
 
 use t5_abi::log as wire;
 use t5_abi::{Error, event};
@@ -18,6 +23,8 @@ use crate::platform::{Current, Platform};
 pub const PACKET: u8 = 0xFF;
 pub const MTU: usize = 1500;
 const QUEUE: usize = 8;
+/// Command frames waiting for the service loop.
+const COMMANDS: usize = 4;
 /// A whole encoded frame: marker, packet, COBS overhead, terminator.
 const FRAME_MAX: usize = MTU + 1 + MTU / 254 + 2;
 
@@ -37,6 +44,12 @@ struct Link {
     /// Bytes read from the line, and frames that were not packets.
     bytes: u32,
     other: u32,
+    commands: [[u8; t5_abi::ctl::MAX_COMMAND]; COMMANDS],
+    command_lens: [usize; COMMANDS],
+    command_head: usize,
+    command_count: usize,
+    /// Packets that came while the link was closed.
+    closed: u32,
     /// Scratch for decoding and encoding (static: the kernel stack is small).
     decoded: [u8; MTU + 1],
     plain: [u8; MTU + 1],
@@ -56,6 +69,11 @@ static mut LINK: Link = Link {
     dropped: 0,
     bytes: 0,
     other: 0,
+    commands: [[0; t5_abi::ctl::MAX_COMMAND]; COMMANDS],
+    command_lens: [0; COMMANDS],
+    command_head: 0,
+    command_count: 0,
+    closed: 0,
     decoded: [0; MTU + 1],
     plain: [0; MTU + 1],
     out: [0; FRAME_MAX],
@@ -71,21 +89,21 @@ pub fn pending() -> bool {
     link().open && Current::console_pending()
 }
 
-/// Reads what the line has (from the scheduler loop). Only while the
-/// service has the link open: otherwise the bytes are left to the hardware.
+/// Reads what the line has (from the scheduler loop).
 pub fn poll() {
     let l = link();
-    if !l.open {
-        return;
-    }
     let mut buf = [0u8; 64];
-    // A bounded amount per call, so a flood cannot stall the loop.
+    // A bounded amount per call, so a flood cannot stall the loop; nothing
+    // while commands wait (one USB packet holds at most a few).
     for _ in 0..32 {
+        if l.command_count > 0 {
+            break;
+        }
         let n = Current::console_read(&mut buf);
         if n == 0 {
             break;
         }
-        if l.bytes == 0 {
+        if l.bytes == 0 && l.open {
             event!(Info, "hostlink.first_bytes", n = n as u32, b0 = buf[0]);
         }
         l.bytes = l.bytes.wrapping_add(n as u32);
@@ -114,9 +132,27 @@ fn frame_in(l: &mut Link) {
         l.dropped += 1;
         return;
     };
-    if n < 2 || l.decoded[0] != PACKET {
-        // Not ours (nothing else is sent to the Tab5 on this line yet).
+    if n == 0 {
+        return;
+    }
+    if l.decoded[0] != PACKET {
+        if l.command_count == COMMANDS || n > t5_abi::ctl::MAX_COMMAND {
+            l.other += 1;
+            event!(Warn, "ctl.console_dropped", len = n as u32);
+            return;
+        }
+        let i = (l.command_head + l.command_count) % COMMANDS;
+        l.commands[i][..n].copy_from_slice(&l.decoded[..n]);
+        l.command_lens[i] = n;
+        l.command_count += 1;
+        return;
+    }
+    if n < 2 {
         l.other += 1;
+        return;
+    }
+    if !l.open {
+        l.closed += 1;
         return;
     }
     let decoded = &l.decoded;
@@ -132,6 +168,19 @@ fn frame_in(l: &mut Link) {
     if l.received == 1 {
         event!(Info, "hostlink.first_packet", len = (n - 1) as u32);
     }
+}
+
+/// The next command frame from the line, decoded from COBS into `out`.
+pub fn read_command(out: &mut [u8; t5_abi::ctl::MAX_COMMAND]) -> Option<usize> {
+    let l = link();
+    if l.command_count == 0 {
+        return None;
+    }
+    let n = l.command_lens[l.command_head];
+    out[..n].copy_from_slice(&l.commands[l.command_head][..n]);
+    l.command_head = (l.command_head + 1) % COMMANDS;
+    l.command_count -= 1;
+    Some(n)
 }
 
 /// The handle on `netdev:host`; one at a time.

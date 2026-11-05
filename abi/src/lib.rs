@@ -5,6 +5,7 @@
 #![no_std]
 
 pub mod ctl;
+pub mod capture;
 pub mod cfg;
 pub mod fs;
 pub mod log;

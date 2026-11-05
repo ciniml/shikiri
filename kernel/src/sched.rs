@@ -221,6 +221,7 @@ pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mu
         Current::display_service();
         crate::hostlink::poll();
         crate::wlan::poll();
+        crate::capture::poll();
         let now = Current::now();
         // Borrowed until the process runs or the core sleeps.
         let s = unsafe { &mut *this };
@@ -257,7 +258,7 @@ pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mu
             if limit.is_some() && s.slots.iter().flatten().all(|p| p.exit().is_some()) {
                 break;
             }
-            if crate::hostlink::pending() || crate::wlan::pending() {
+            if crate::hostlink::pending() || crate::wlan::pending() || crate::capture::pending() {
                 continue;
             }
             // Everyone is asleep (or nothing runs). Wake at least every

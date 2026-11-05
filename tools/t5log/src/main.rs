@@ -11,6 +11,13 @@
 //!                                   `kill PID`, `install FILE.t5a`, `remove NAME`,
 //!                                   `flashtest`) from --cmd and from stdin go to
 //!                                   the kernel's control channel (doc/14 §3).
+//!   t5log serial --port SERIAL [--elf E]... [--schemas F]... [--json]
+//!             [--cmd COMMAND]... [--capture-dir DIR] [--until-done]
+//!                                   the same commands on the console line (USB
+//!                                   Serial/JTAG, doc/54), no probe needed;
+//!                                   also `capture` (the screen, saved as PNG in
+//!                                   DIR), `tap X Y [MS]` and `swipe X0 Y0 X1 Y1
+//!                                   [MS]` (a finger, the user's coordinates).
 //!   t5log decode [--schemas F]... [--elf E]... [--pretty] [--tcp HOST:PORT | INPUT]
 //!                                   decode a log stream to JSON Lines (default)
 //!                                   or one line per event (--pretty). INPUT is a
@@ -36,7 +43,9 @@ const USAGE: &str = "usage:
   t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]
   t5log status --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML]
   t5log read --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML] ADDR LEN -o OUT
-  t5log hostlink --port SERIAL --tun NAME [--schemas FILE]... [--elf ELF]...";
+  t5log hostlink --port SERIAL --tun NAME [--schemas FILE]... [--elf ELF]...
+  t5log serial --port SERIAL [--elf ELF]... [--schemas FILE]... [--json] [--cmd COMMAND]... \
+            [--capture-dir DIR] [--until-done]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +54,7 @@ fn main() -> ExitCode {
         Some("check") => cmd_check(&args[1..]),
         Some("decode") => cmd_decode(&args[1..]),
         Some("hostlink") => cmd_hostlink(&args[1..]),
+        Some("serial") => cmd_serial(&args[1..]),
         Some("rtt") => cmd_rtt(&args[1..]),
         Some("status") => cmd_status(&args[1..]),
         Some("read") => cmd_read(&args[1..]),
@@ -205,6 +215,189 @@ fn cmd_hostlink(args: &[String]) -> Result<(), String> {
         }
         out.flush().map_err(|e| e.to_string())?;
     }
+}
+
+/// `t5log serial` (doc/54): control commands and the log on the console
+/// line, and the screen captures it carries. A command goes out when the
+/// one before it was answered (and, for `capture`, its screen has come).
+fn cmd_serial(args: &[String]) -> Result<(), String> {
+    let mut t = SchemaTable::new();
+    let mut port = None;
+    let mut pretty = true;
+    let mut cmds: Vec<String> = Vec::new();
+    let mut dir = std::path::PathBuf::from(".");
+    let mut until_done = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--port" => port = Some(val()?),
+            "--elf" => {
+                t.add_elf(&val()?)?;
+            }
+            "--schemas" => {
+                t.add_file(&val()?)?;
+            }
+            "--json" => pretty = false,
+            "--cmd" => {
+                let v = val()?;
+                t5log::ctl::check_line(&v).map_err(|e| format!("--cmd {v}: {e}"))?;
+                cmds.push(v);
+            }
+            "--capture-dir" => dir = val()?.into(),
+            "--until-done" => until_done = true,
+            s => return Err(format!("unknown argument {s}\n{USAGE}")),
+        }
+    }
+    let port = port.ok_or(USAGE)?;
+    if t.is_empty() {
+        eprintln!("t5log: no schemas given (--schemas/--elf); events will show as ids");
+    }
+    let serial = hostlink::open_serial(&port)?;
+    let mut writer = serial.try_clone().map_err(|e| e.to_string())?;
+    // The line is read in a thread so the loop can time out.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
+    {
+        let mut serial = serial;
+        let port = port.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                let r = match serial.read(&mut buf) {
+                    Ok(0) => Err(format!("{port}: closed")),
+                    Ok(n) => Ok(buf[..n].to_vec()),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => Err(format!("{port}: {e}")),
+                };
+                let end = r.is_err();
+                if tx.send(r).is_err() || end {
+                    break;
+                }
+            }
+        });
+    }
+    let (ltx, lines) = std::sync::mpsc::channel::<String>();
+    for c in &cmds {
+        ltx.send(c.clone()).unwrap();
+    }
+    if !until_done {
+        let interactive = ltx.clone();
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lines().map_while(Result::ok) {
+                let line = line.trim().to_string();
+                if !line.is_empty() && interactive.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(ltx);
+
+    let mut d = StreamDecoder::new();
+    let mut ctx = BootContext::new();
+    let mut out = std::io::stdout().lock();
+    let mut asm = t5log::capture::Assembler::new();
+    let mut next_id = 1u32;
+    let mut pending = std::collections::BTreeSet::new();
+    // A capture asked for and not finished (its id, once answered).
+    let mut capturing: Option<Option<u32>> = None;
+    let mut capture_request = 0u32;
+    let mut failed = false;
+    let mut sent = 0usize;
+    let mut done_at: Option<std::time::Instant> = None;
+    let mut last_activity = std::time::Instant::now();
+    loop {
+        if pending.is_empty() && capturing.is_none() {
+            match lines.try_recv() {
+                Ok(line) => {
+                    let first = next_id;
+                    match t5log::ctl::frames(&line, &mut next_id) {
+                        Ok(f) => {
+                            writer.write_all(&f.bytes).map_err(|e| format!("{port}: {e}"))?;
+                            eprintln!("t5log: -> #{first} {line}");
+                            pending.extend(f.answered);
+                            if line.split_whitespace().next() == Some("capture") {
+                                capturing = Some(None);
+                                capture_request = first;
+                            }
+                        }
+                        Err(e) => eprintln!("t5log: {line}: {e}"),
+                    }
+                    sent += 1;
+                    last_activity = std::time::Instant::now();
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) if until_done || sent >= cmds.len() => {
+                    if until_done {
+                        let t = *done_at.get_or_insert_with(std::time::Instant::now);
+                        if t.elapsed() > std::time::Duration::from_millis(500) {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if !pending.is_empty() && last_activity.elapsed() > STALL {
+            return Err(format!("no answer to request(s) {pending:?} and no log for {} s", STALL.as_secs()));
+        }
+        let bytes = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(r) => r?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        last_activity = std::time::Instant::now();
+        for item in d.push(&bytes) {
+            match &item {
+                Item::Capture(f) => match asm.push(f) {
+                    Some(Ok(shot)) => {
+                        let path = dir.join(format!(
+                            "capture-{}-{}.png",
+                            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+                            shot.id
+                        ));
+                        std::fs::write(&path, shot.png()).map_err(|e| format!("{}: {e}", path.display()))?;
+                        let (w, h, _) = shot.user_view();
+                        eprintln!("t5log: capture {} ({w} x {h}) -> {}", shot.id, path.display());
+                        if capturing == Some(Some(shot.id)) {
+                            capturing = None;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("t5log: {e}");
+                        failed = true;
+                        capturing = None;
+                    }
+                    None => {}
+                },
+                Item::Event(e) => match e.name(&t) {
+                    Some("ctl.done" | "ctl.failed") => {
+                        if let Some(t5log::Value::U(id)) = e.field(&t, "request_id") {
+                            let id = *id as u32;
+                            pending.remove(&id);
+                            if id == capture_request && capturing.is_some() {
+                                let ok = e.name(&t) == Some("ctl.done");
+                                capturing = match e.field(&t, "value") {
+                                    Some(t5log::Value::U(v)) if ok => Some(Some(*v as u32)),
+                                    _ => None,
+                                };
+                                failed |= !ok;
+                            }
+                        }
+                    }
+                    Some("capture.failed") => {
+                        failed = true;
+                        capturing = None;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            print_item(&mut out, &t, &mut ctx, &item, pretty)?;
+        }
+        out.flush().map_err(|e| e.to_string())?;
+    }
+    if failed { Err("a capture failed".into()) } else { Ok(()) }
 }
 
 #[cfg(not(feature = "rtt"))]
@@ -503,6 +696,7 @@ fn print_item(
             j.push('}');
             j
         }
+        (Item::Capture(_), _) => return Ok(()),
         (Item::Bad { bytes, error }, _) => {
             eprintln!("t5log: undecodable frame ({error}, {} bytes)", bytes.len());
             return Ok(());

@@ -34,6 +34,9 @@ pub struct Usj {
     /// The frame being written (until its 0x00).
     frame: Vec<u8>,
     pub packets_out: std::collections::VecDeque<Vec<u8>>,
+    /// Screen capture frames (doc/54), decoded; kept out of `output` like
+    /// the packets (they do not go to RTT).
+    pub captures: Vec<Vec<u8>>,
     input: std::collections::VecDeque<u8>,
     int_raw: u32,
     int_ena: u32,
@@ -76,6 +79,7 @@ impl Usj {
         let mut decoded = vec![0u8; self.frame.len()];
         match t5_abi::log::cobs_decode(&self.frame, &mut decoded) {
             Some(n) if n >= 2 && decoded[0] == PACKET => self.packets_out.push_back(decoded[1..n].to_vec()),
+            Some(n) if n >= 2 && decoded[0] == t5_abi::capture::FRAME => self.captures.push(decoded[..n].to_vec()),
             _ => {
                 self.output.extend_from_slice(&self.frame);
                 self.output.push(0);

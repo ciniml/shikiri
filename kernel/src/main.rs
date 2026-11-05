@@ -13,6 +13,7 @@
 #![no_main]
 
 mod arch;
+mod capture;
 mod channel;
 mod flash;
 mod handle;
@@ -255,8 +256,8 @@ fn next_pid() -> u32 {
 const FRAMES_PER_POLL: usize = 4;
 
 /// Runs apps for good: starts the autostart apps, then starts and stops
-/// apps on commands from the host (RTT down-channel, doc/14 §3). Results
-/// are log events.
+/// apps on commands from the host (RTT down-channel, doc/14 §3, and the
+/// console line, doc/54). Results are log events.
 fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
     let mut s = sched::Scheduler::new();
     let mut touch_log = TouchLog::default();
@@ -283,6 +284,11 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
             let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND];
             for _ in 0..FRAMES_PER_POLL {
                 let Some(n) = log::read_command(&mut frame) else { break };
+                handle(s, store, kup, &mut touch_log, &frame[..n]);
+            }
+            // And from the console line (doc/54).
+            for _ in 0..FRAMES_PER_POLL {
+                let Some(n) = hostlink::read_command(&mut frame) else { break };
                 handle(s, store, kup, &mut touch_log, &frame[..n]);
             }
         });
@@ -567,6 +573,8 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::I2cScan => Current::i2c_scan(),
         Command::Display => Current::display_stats(),
         Command::Rotate { degrees } => screen::set_orientation(degrees),
+        Command::Capture => capture::start(),
+        Command::TouchInject { x0, y0, x1, y1, ms } => screen::inject(x0, y0, x1, y1, ms),
         Command::SdInfo => Current::sd_info(),
         Command::SdRead { lba } => Current::sd_dump(lba),
         Command::SdTest => Current::sd_test(),

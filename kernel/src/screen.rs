@@ -1,6 +1,7 @@
 //! The screen as apps see it (M6c, doc/17 §6): the orientation, the touch
-//! points (read by the kernel while someone has `touch` open) and who owns
-//! the display. The hardware behind it is the platform's.
+//! points (read by the kernel while someone has `touch` open, or given by
+//! the host with `tap`/`swipe`, doc/54) and who owns the display. The
+//! hardware behind it is the platform's.
 
 use t5_abi::{Error, event};
 
@@ -50,7 +51,23 @@ struct Touch {
     n: usize,
     points: [TouchPoint; t5_abi::touch::MAX_POINTS],
     errors: u32,
+    /// A finger from the host (doc/54): it replaces the controller's
+    /// points until it is lifted.
+    inject: Option<Inject>,
 }
+
+/// A finger down at `from` at `start`, at `to` at `end`, then up; the
+/// user's coordinates.
+#[derive(Clone, Copy)]
+struct Inject {
+    from: (u16, u16),
+    to: (u16, u16),
+    start: u64,
+    end: u64,
+}
+
+/// The size of an injected finger (as the controller reports it).
+const INJECT_SIZE: u16 = 30;
 
 static mut TOUCH: Touch = Touch {
     users: 0,
@@ -59,6 +76,7 @@ static mut TOUCH: Touch = Touch {
     n: 0,
     points: [TouchPoint { x: 0, y: 0, id: 0, size: 0 }; t5_abi::touch::MAX_POINTS],
     errors: 0,
+    inject: None,
 };
 
 fn touch() -> &'static mut Touch {
@@ -76,6 +94,24 @@ pub fn poll() {
         return;
     }
     t.next_poll = now + time::ms_to_ticks(TOUCH_POLL_MS);
+    if let Some(i) = t.inject {
+        let (n, p) = if now < i.end {
+            let span = (i.end - i.start).max(1) as i64;
+            let at = (now - i.start).min(i.end - i.start) as i64;
+            let lerp = |a: u16, b: u16| (a as i64 + (b as i64 - a as i64) * at / span) as u16;
+            (1, TouchPoint { x: lerp(i.from.0, i.to.0), y: lerp(i.from.1, i.to.1), id: 0, size: INJECT_SIZE })
+        } else {
+            t.inject = None;
+            event!(Info, "touch.injected", x = i.to.0, y = i.to.1);
+            (0, TouchPoint::default())
+        };
+        if n != t.n || (n == 1 && t.points[0] != p) {
+            t.n = n;
+            t.points[0] = p;
+            t.seq = t.seq.wrapping_add(1);
+        }
+        return;
+    }
     let mut raw = [TouchPoint::default(); 5];
     let n = match Current::touch_read(&mut raw) {
         Ok(n) => n,
@@ -97,6 +133,36 @@ pub fn poll() {
         t.points = pts;
         t.seq = t.seq.wrapping_add(1);
     }
+}
+
+/// The `tap` and `swipe` commands (doc/54): a finger from (x0, y0) to
+/// (x1, y1) over `ms`, the user's coordinates. Only while someone has
+/// `touch` open (no one would see it otherwise).
+pub fn inject(x0: u32, y0: u32, x1: u32, y1: u32, ms: u32) -> Result<u32, &'static str> {
+    let t = touch();
+    if t.users == 0 {
+        return Err("touch is not open");
+    }
+    if t.inject.is_some() {
+        return Err("a touch is being injected");
+    }
+    let (w, h) = Current::display_size().ok_or("no display")?;
+    let (w, h) = if orientation() % 2 == 1 { (h as u32, w as u32) } else { (w as u32, h as u32) };
+    if x0.max(x1) >= w || y0.max(y1) >= h {
+        return Err("outside the screen");
+    }
+    // Down for at least two reads.
+    let ms = ms.clamp(2 * TOUCH_POLL_MS as u32, 10_000);
+    let now = Current::now();
+    t.inject = Some(Inject {
+        from: (x0 as u16, y0 as u16),
+        to: (x1 as u16, y1 as u16),
+        start: now,
+        end: now + time::ms_to_ticks(ms as u64),
+    });
+    // Read at once rather than at the next poll.
+    t.next_poll = now;
+    Ok(ms)
 }
 
 /// A handle on `touch`.
@@ -141,7 +207,11 @@ impl TouchHandle {
 
 impl Drop for TouchHandle {
     fn drop(&mut self) {
-        touch().users -= 1;
+        let t = touch();
+        t.users -= 1;
+        if t.users == 0 {
+            t.inject = None;
+        }
     }
 }
 

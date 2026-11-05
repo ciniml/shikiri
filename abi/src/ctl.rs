@@ -83,6 +83,14 @@ pub mod cmd {
     /// firmware the Tab5 ran before (doc/51 §2.2). Nothing of tab5-os
     /// uses it.
     pub const NVS_ERASE: u8 = 31;
+    /// Sends the screen on the console line (doc/54, `t5_abi::capture`).
+    /// The result is the capture's id.
+    pub const CAPTURE: u8 = 32;
+    /// `u32 x0 | u32 y0 | u32 x1 | u32 y1 | u32 ms`: a finger down at
+    /// (x0, y0), moving to (x1, y1) over `ms`, then up; the user's
+    /// coordinates (doc/54). Apps with `touch` open see it in place of the
+    /// controller's points.
+    pub const TOUCH_INJECT: u8 = 33;
 }
 
 /// `Command::Prof` operations.
@@ -91,6 +99,10 @@ pub mod prof {
     pub const STOP: u32 = 2;
     pub const DUMP: u32 = 3;
 }
+
+/// How long `tap` and `swipe` hold the finger down unless given.
+pub const TAP_MS: u32 = 100;
+pub const SWIPE_MS: u32 = 300;
 
 /// Data bytes per `install_data` frame: one flash page.
 pub const INSTALL_CHUNK: usize = 256;
@@ -131,6 +143,9 @@ pub enum Command<'a> {
     RngDump { raw: bool, us: u32 },
     Entropy { on: bool },
     NvsErase,
+    Capture,
+    /// `tap X Y [MS]` (x1 = x0, y1 = y0) and `swipe X0 Y0 X1 Y1 [MS]`.
+    TouchInject { x0: u32, y0: u32, x1: u32, y1: u32, ms: u32 },
 }
 
 impl Command<'_> {
@@ -167,6 +182,8 @@ impl Command<'_> {
             Command::RngDump { .. } => "rngdump",
             Command::Entropy { .. } => "entropy",
             Command::NvsErase => "nvserase",
+            Command::Capture => "capture",
+            Command::TouchInject { .. } => "touch_inject",
         }
     }
 }
@@ -190,6 +207,14 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::INSTALL_END if args.is_empty() => Command::InstallEnd,
         cmd::FLASH_TEST if args.is_empty() => Command::FlashTest,
         cmd::NVS_ERASE if args.is_empty() => Command::NvsErase,
+        cmd::CAPTURE if args.is_empty() => Command::Capture,
+        cmd::TOUCH_INJECT if args.len() == 20 => Command::TouchInject {
+            x0: u32_at(args, 0)?,
+            y0: u32_at(args, 4)?,
+            x1: u32_at(args, 8)?,
+            y1: u32_at(args, 12)?,
+            ms: u32_at(args, 16)?,
+        },
         cmd::PSRAM if args.is_empty() => Command::Psram,
         cmd::KUPDATE_BEGIN if args.len() == 4 => Command::KupdateBegin { length: u32_at(args, 0)? },
         cmd::REBOOT if args.is_empty() => Command::Reboot,
@@ -271,6 +296,8 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::RngDump { .. } => put(&[cmd::RNG_DUMP])?,
         Command::Entropy { .. } => put(&[cmd::ENTROPY])?,
         Command::NvsErase => put(&[cmd::NVS_ERASE])?,
+        Command::Capture => put(&[cmd::CAPTURE])?,
+        Command::TouchInject { .. } => put(&[cmd::TOUCH_INJECT])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -285,6 +312,11 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::RngDump { raw, us } => {
             put(&(*raw as u32).to_le_bytes())?;
             put(&us.to_le_bytes())?;
+        }
+        Command::TouchInject { x0, y0, x1, y1, ms } => {
+            for v in [x0, y0, x1, y1, ms] {
+                put(&v.to_le_bytes())?;
+            }
         }
         Command::Prof { op, a, b } => {
             put(&op.to_le_bytes())?;
@@ -368,6 +400,21 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("sdread") => Command::SdRead { lba: num(Some(w.next().ok_or("sdread LBA")?))? },
         Some("rotate") => Command::Rotate { degrees: num(Some(w.next().ok_or("rotate 0|90|180|270")?))? },
         Some("ppabench") => Command::PpaBench,
+        Some("capture") => Command::Capture,
+        Some("tap") => {
+            let x = num(Some(w.next().ok_or("tap X Y [MS]")?))?;
+            let y = num(Some(w.next().ok_or("tap X Y [MS]")?))?;
+            let ms = w.next().map_or(Ok(TAP_MS), |m| num(Some(m)))?;
+            Command::TouchInject { x0: x, y0: y, x1: x, y1: y, ms }
+        }
+        Some("swipe") => {
+            let mut v = [0u32; 4];
+            for o in &mut v {
+                *o = num(Some(w.next().ok_or("swipe X0 Y0 X1 Y1 [MS]")?))?;
+            }
+            let ms = w.next().map_or(Ok(SWIPE_MS), |m| num(Some(m)))?;
+            Command::TouchInject { x0: v[0], y0: v[1], x1: v[2], y1: v[3], ms }
+        }
         Some("membench") => match w.next() {
             None => Command::Membench { pause: false },
             Some("pause") => Command::Membench { pause: true },
@@ -394,7 +441,8 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         },
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
-                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench | rngdump [raw [US]] | entropy on|off");
+                 flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench | rngdump [raw [US]] | entropy on|off | \
+                 capture | tap X Y [MS] | swipe X0 Y0 X1 Y1 [MS]");
         }
     };
     if w.next().is_some() {
@@ -423,13 +471,15 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "nvserase", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "nvserase", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3", "capture", "tap 10 20", "swipe 1 2 3 4 500"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();
             assert_eq!(decode(&b[..n]), Some((42, c)), "{line}");
         }
         assert_eq!(parse_line("run ticker 1 30").unwrap(), Command::Run { name: "ticker", arg0: 1, arg1: 30 });
+        assert_eq!(parse_line("tap 10 20").unwrap(), Command::TouchInject { x0: 10, y0: 20, x1: 10, y1: 20, ms: TAP_MS });
+        assert!(parse_line("swipe 1 2 3").is_err());
         assert!(parse_line("kill").is_err());
         assert!(decode(&[cmd::KILL, 0, 0, 0, 0, 1]).is_none());
         assert!(decode(&[99, 0, 0, 0, 0]).is_none());

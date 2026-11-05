@@ -429,6 +429,16 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	    --expect-event display.panel --expect-event i2c.found --expect-event touch.point \
 	    --expect-event display.ready --expect-event display.stats --expect-event paint.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# Debugging over the console line (doc/54): a tap and a screen capture
+	@# sent as commands on USB Serial/JTAG. paint draws a square where the
+	@# tap was (as well as at the modelled GT911's fixed point); the
+	@# capture, turned to the user's view, has it there, the white corner
+	@# top left and the background elsewhere.
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run paint 0 8" --ctl "wait-ms 1500" --ctl "serial tap 600 400" --ctl "wait-ms 500" --ctl "serial capture" \
+	    --capture-out $(BUILD)/emu-capture.png --expect-pixel 600,400,fa8a --expect-pixel 20,20,ffff --expect-pixel 300,600,18c4 \
+	    --expect-event paint.ready --expect-event touch.injected --expect-event capture.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 	@# Network service (N1, doc/research/net-stack.md §4): over 127.0.0.1,
 	@# 100 UDP round trips and 1 MiB of TCP with matching hashes.
 	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \

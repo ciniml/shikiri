@@ -26,6 +26,9 @@ use t5emu::periph;
 /// catch what follows (e.g. a started app's output). A `wait-ms N` among
 /// the commands holds the ones after it until everything before it was
 /// answered and N more milliseconds have run (an app ending, a timeout).
+/// A command written `serial COMMAND` goes over the console line instead
+/// (USB Serial/JTAG, doc/54); the run does not end while a `capture` is
+/// still being sent.
 struct Monitor<'a> {
     schemas: &'a t5log::SchemaTable,
     decoder: t5log::StreamDecoder,
@@ -53,6 +56,9 @@ struct Monitor<'a> {
     /// logged and ends the run when it has finished.
     peer: Option<HostPeer>,
     peer_start: String,
+    /// `capture` commands sent, and captures finished or failed.
+    captures_asked: usize,
+    captures_ended: usize,
 }
 
 impl Monitor<'_> {
@@ -75,6 +81,7 @@ impl Monitor<'_> {
                     }
                 }
                 "ctl.ready" => self.ready = true,
+                "capture.done" | "capture.failed" => self.captures_ended += 1,
                 "ctl.done" | "ctl.failed" => {
                     if let Some(t5log::Value::U(id)) = e.field(self.schemas, "request_id") {
                         self.pending.remove(&(*id as u32));
@@ -118,6 +125,13 @@ impl Monitor<'_> {
                 if self.wait_until.is_some() {
                     break;
                 }
+            } else if let Some(cmd) = line.strip_prefix("serial ") {
+                let f = t5log::ctl::frames(cmd, &mut self.next_id).expect("checked in parse_args");
+                for packet in f.bytes.chunks(64) {
+                    m.bus.periph.usj.send(packet);
+                }
+                self.pending.extend(f.answered);
+                self.captures_asked += (cmd.split_whitespace().next() == Some("capture")) as usize;
             } else {
                 let f = t5log::ctl::frames(line, &mut self.next_id).expect("checked in parse_args");
                 m.rtt_down_pending.extend(&f.bytes);
@@ -126,7 +140,7 @@ impl Monitor<'_> {
             self.sent += 1;
             self.injected = self.sent == self.commands.len();
         }
-        if self.injected && self.pending.is_empty() && self.stop_at.is_none() {
+        if self.injected && self.pending.is_empty() && self.captures_ended >= self.captures_asked && self.stop_at.is_none() {
             self.stop_at = Some(m.bus.cycles + self.linger_cycles);
         }
         self.stop_at.is_none_or(|t| m.bus.cycles < t)
@@ -193,6 +207,10 @@ struct Opts {
     host_peer_start: String,
     /// The passive host peer must have been pinged from this address.
     host_peer_pinged_by: Option<std::net::Ipv4Addr>,
+    /// Where to write the last screen captured (PNG, the user's view).
+    capture_out: Option<String>,
+    /// Pixels the last capture must have: (x, y, RGB565), the user's view.
+    expect_pixels: Vec<(usize, usize, u16)>,
     elf: String,
 }
 
@@ -223,6 +241,8 @@ fn parse_args() -> Result<Opts, String> {
         host_peer_target: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 55, 0, 2)),
         host_peer_start: "nettest.listening".into(),
         host_peer_pinged_by: None,
+        capture_out: None,
+        expect_pixels: Vec::new(),
         elf: String::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -255,7 +275,7 @@ fn parse_args() -> Result<Opts, String> {
             "--ctl" => {
                 let v = val()?;
                 if wait_ms(&v).is_none() && keys(&v).is_none() {
-                    t5log::ctl::frames(&v, &mut 0).map_err(|e| format!("--ctl {v}: {e}"))?;
+                    t5log::ctl::frames(v.strip_prefix("serial ").unwrap_or(&v), &mut 0).map_err(|e| format!("--ctl {v}: {e}"))?;
                 }
                 o.ctl.push(v);
             }
@@ -264,6 +284,18 @@ fn parse_args() -> Result<Opts, String> {
             "--host-peer-target" => o.host_peer_target = val()?.parse().map_err(|e| format!("--host-peer-target: {e}"))?,
             "--host-peer-start" => o.host_peer_start = val()?,
             "--host-peer-pinged-by" => o.host_peer_pinged_by = Some(val()?.parse().map_err(|e| format!("--host-peer-pinged-by: {e}"))?),
+            "--capture-out" => o.capture_out = Some(val()?),
+            "--expect-pixel" => {
+                let v = val()?;
+                let p: Vec<&str> = v.split(',').collect();
+                let bad = || format!("--expect-pixel X,Y,RGB565HEX: {v}");
+                let [x, y, c] = p[..] else { return Err(bad()) };
+                o.expect_pixels.push((
+                    x.parse().map_err(|_| bad())?,
+                    y.parse().map_err(|_| bad())?,
+                    u16::from_str_radix(c, 16).map_err(|_| bad())?,
+                ));
+            }
             "--linger-ms" => o.linger_ms = val()?.parse().map_err(|e| format!("--linger-ms: {e}"))?,
             "--flash" => {
                 let v = val()?;
@@ -365,6 +397,8 @@ fn main() -> ExitCode {
         seen: Default::default(),
         peer: o.host_peer.map(|b| HostPeer::new(b, o.host_peer_target.into())),
         peer_start: o.host_peer_start.clone(),
+        captures_asked: 0,
+        captures_ended: 0,
     };
     let stop = loop {
         let stop = m.run(limit, &mut |m| mon.tick(m));
@@ -533,7 +567,8 @@ fn main() -> ExitCode {
             false
         }
     };
-    let all_ok = passed && rtt_ok && board_ok && missing.is_empty() && mon.pending.is_empty() && peer_ok;
+    let capture_ok = check_captures(&m.bus.periph.usj.captures, &o);
+    let all_ok = passed && rtt_ok && board_ok && missing.is_empty() && mon.pending.is_empty() && peer_ok && capture_ok;
     match stop {
         // A reset is an end like any other once everything expected was
         // seen (`reboot`, doc/16 §3.6).
@@ -542,6 +577,47 @@ fn main() -> ExitCode {
         Stop::TimeLimit => ExitCode::from(3),
         _ => ExitCode::from(2),
     }
+}
+
+/// Puts the screen captures together (doc/54); writes the last one and
+/// checks its pixels as asked.
+fn check_captures(frames: &[Vec<u8>], o: &Opts) -> bool {
+    if frames.is_empty() && o.capture_out.is_none() && o.expect_pixels.is_empty() {
+        return true;
+    }
+    let mut asm = t5log::capture::Assembler::new();
+    let mut last = None;
+    let mut ok = true;
+    for f in frames {
+        match asm.push(f) {
+            Some(Ok(shot)) => last = Some(shot),
+            Some(Err(e)) => {
+                eprintln!("t5emu: {e}");
+                ok = false;
+            }
+            None => {}
+        }
+    }
+    let Some(shot) = last else {
+        eprintln!("t5emu: no screen capture came ({} frames)", frames.len());
+        return false;
+    };
+    let (w, h, px) = shot.user_view();
+    eprintln!("t5emu: capture {}: {w} x {h} ({} frames)", shot.id, frames.len());
+    if let Some(path) = &o.capture_out
+        && let Err(e) = std::fs::write(path, shot.png())
+    {
+        eprintln!("t5emu: {path}: {e}");
+        ok = false;
+    }
+    for &(x, y, want) in &o.expect_pixels {
+        let got = (x < w && y < h).then(|| px[y * w + x]);
+        if got != Some(want) {
+            eprintln!("t5emu: capture pixel ({x}, {y}) is {got:04x?}, expected {want:04x}");
+            ok = false;
+        }
+    }
+    ok
 }
 
 fn describe(s: &Stop) -> String {
