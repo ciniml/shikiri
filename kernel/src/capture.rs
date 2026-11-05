@@ -23,6 +23,7 @@ struct Capture {
     bytes: u32,
     since: u64,
     /// Scratch (static: the kernel stack is small).
+    chunk: [u16; wire::CHUNK],
     plain: [u8; wire::DATA_MAX],
     out: [u8; wire::DATA_MAX + wire::DATA_MAX / 254 + 2],
 }
@@ -37,6 +38,7 @@ static mut CAP: Capture = Capture {
     crc: 0,
     bytes: 0,
     since: 0,
+    chunk: [0; wire::CHUNK],
     plain: [0; wire::DATA_MAX],
     out: [0; wire::DATA_MAX + wire::DATA_MAX / 254 + 2],
 };
@@ -94,8 +96,11 @@ pub fn poll() {
         } else if c.next < pixels {
             let k = wire::CHUNK.min(pixels - c.next);
             // The framebuffer is in PSRAM, written by the processes and the
-            // 2D DMA (which leaves the caches in agreement, doc/44).
-            let px = unsafe { core::slice::from_raw_parts((c.fb as *const u16).add(c.next), k) };
+            // 2D DMA (which leaves the caches in agreement, doc/44). Read
+            // once: the CRC and the runs must be of the same pixels.
+            let fb = unsafe { core::slice::from_raw_parts((c.fb as *const u16).add(c.next), k) };
+            c.chunk[..k].copy_from_slice(fb);
+            let px = &c.chunk[..k];
             let raw = unsafe { core::slice::from_raw_parts(px.as_ptr().cast::<u8>(), 2 * k) };
             c.crc = wire::crc32(c.crc, raw);
             c.plain[1] = wire::DATA;
