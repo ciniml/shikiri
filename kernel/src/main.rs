@@ -217,7 +217,7 @@ pub extern "C" fn kmain() -> ! {
     let (pool, slot_size) = (pool(), slot(0).1);
     event!(Info, "boot.pool", base = Addr(pool.start as u32), size = (pool.end - pool.start) as u32, slot_size = slot_size as u32);
     let failures = match store.as_ref().map(Apps::from_store) {
-        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps) + selftest_m4b(&apps) + selftest_m5c(&apps) + selftest_m6c(&apps),
+        Some(Some(apps)) => selftest_m3a(&apps) + selftest_m1(&apps) + selftest_m2(&apps) + selftest_m3d(&apps) + selftest_m4b(&apps) + selftest_m5c(&apps) + selftest_m6c(&apps) + selftest_partitions(&apps),
         Some(None) => 1,
         None => {
             event!(Error, "selftest.no_flash");
@@ -506,7 +506,8 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
                     state = state,
                     handles = p.handles.count() as u32,
                     cpu_ms = (time::ticks_to_ns(p.cpu) / 1_000_000) as u32,
-                    cpu_pm = pm(used)
+                    cpu_pm = pm(used),
+                    partition = t5_abi::cpu::NAMES[p.partition]
                 );
                 n += 1;
             }
@@ -540,6 +541,14 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
                 lockwait1_ms = (smp::lock_wait_cycles()[1] / 360_000) as u32,
                 idle_total_ms = (time::ticks_to_ns(s.stats.idle_ticks[0] + s.stats.idle_ticks[1]) / 1_000_000) as u32
             );
+            // The partitions (doc/57): their use since the last `ps`, per
+            // mille of all cores, and their shares.
+            let u = &mut s.usage;
+            for (i, name) in t5_abi::cpu::NAMES.iter().enumerate() {
+                let used = u.total[i] - u.total_mark[i];
+                u.total_mark[i] = u.total[i];
+                event!(Info, "kernel.partition", name = *name, used_pm = all(used), budget_pm = t5_abi::cpu::BUDGET_PM[i]);
+            }
             let (size, used) = rv::stack_usage();
             event!(Info, "kernel.stack", size = size, used = used);
             Ok(n)
@@ -602,6 +611,23 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::Clock { mhz } => Current::set_cpu_mhz(mhz),
         Command::Pvt { on } => Current::set_pvt(on),
         Command::Entropy { on } => Current::set_entropy(on),
+        Command::Partitions { on } => {
+            sched::set_partitions(on);
+            event!(Info, "sched.partitions", on = on);
+            Ok(on as u32)
+        }
+        Command::Partition { pid, partition } => match (
+            t5_abi::cpu::NAMES.get(partition as usize),
+            s.slots.iter_mut().flatten().find(|p| p.pid == pid && p.exit().is_none()),
+        ) {
+            (None, _) => Err("no such partition"),
+            (_, None) => Err("no such process"),
+            (Some(name), Some(p)) => {
+                p.partition = partition as usize;
+                event!(Info, "sched.partition", pid = pid, name = p.name, partition = *name);
+                Ok(pid)
+            }
+        },
         Command::Touch { seconds } => touch_log.start(seconds),
         Command::I2cScan => Current::i2c_scan(),
         Command::Display => Current::display_stats(),
@@ -918,6 +944,49 @@ fn selftest_m2(apps: &Apps) -> u32 {
         }
     }
     failures
+}
+
+/// CPU partitions (doc/57): five spinners of 600 ms on the cores, one of
+/// them put in `net` (40 %) and four in `apps` (30 %), once in plain round
+/// robin and once with the partitions. Round robin gives each about 2/5 of
+/// a core; with the partitions the `net` one must get at least 0.6 of a
+/// core over its 600 ms (more than round robin gave it).
+fn selftest_partitions(apps: &Apps) -> u32 {
+    const SPIN_MS: u64 = 600;
+    let mut failures = 0;
+    let mut got = [0u32; 2];
+    for (k, on) in [false, true].into_iter().enumerate() {
+        sched::set_partitions(on);
+        let mut s = sched::Scheduler::new();
+        s.slots = [const { None }; sched::MAX_PROCS];
+        for i in 0..5 {
+            let Some(mut p) = load("spin", apps.spin, i, 0x20 + i, SPIN_MS as usize) else {
+                sched::set_partitions(true);
+                return 1;
+            };
+            p.partition = if i == 0 { t5_abi::cpu::NET } else { t5_abi::cpu::APPS };
+            s.slots[i] = Some(p);
+        }
+        sched::run(&mut s, Some(3000), &mut |_| {});
+        for p in s.slots.iter().flatten() {
+            let exit = p.exit().unwrap();
+            // Not preempted for long (2) is fine here: the `net` one may
+            // run slice after slice.
+            let ok = matches!(exit, Exit::Code(0) | Exit::Code(2));
+            if !ok {
+                log_case(p, &exit, ok);
+                failures += 1;
+            }
+            if p.partition == t5_abi::cpu::NET {
+                got[k] = (time::ticks_to_ns(p.cpu) / (SPIN_MS * 1000)) as u32;
+            }
+        }
+    }
+    sched::set_partitions(true);
+    // Per mille of one core over the `net` spinner's 600 ms.
+    let ok = got[1] >= 600 && got[1] > got[0];
+    event!(Info, "selftest.partitions", round_robin_pm = got[0], partitions_pm = got[1], ok = ok);
+    failures + !ok as u32
 }
 
 /// Two processes wait on timers of different periods while a third keeps

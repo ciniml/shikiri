@@ -515,6 +515,35 @@ pub mod spawn {
     pub const RESTARTS: u32 = 4;
 }
 
+/// CPU partitions (doc/57, after QNX's adaptive partitioning): each
+/// process is in one, and under contention each partition gets at least
+/// its share of all cores over `WINDOW_MS`; time a partition leaves unused
+/// goes to the others. An image names its partition with the permission
+/// `cpu:NAME` (system key only); otherwise it is in `system` (system key)
+/// or `apps` (app key).
+pub mod cpu {
+    pub const PREFIX: &str = "cpu:";
+    pub const SYSTEM: usize = 0;
+    pub const NET: usize = 1;
+    pub const APPS: usize = 2;
+    pub const PARTITIONS: usize = 3;
+    pub const NAMES: [&str; PARTITIONS] = ["system", "net", "apps"];
+    /// Shares, per mille of all cores: the network's path (the packet
+    /// forwarding of a router) first.
+    pub const BUDGET_PM: [u32; PARTITIONS] = [300, 400, 300];
+    pub const WINDOW_MS: u64 = 100;
+
+    /// The partition of an image with these (NUL-separated) permissions.
+    pub fn of(permissions: &[u8], system: bool) -> usize {
+        let named = permissions.split(|&b| b == 0).find_map(|p| p.strip_prefix(PREFIX.as_bytes()));
+        match named.and_then(|n| NAMES.iter().position(|&m| m.as_bytes() == n)) {
+            Some(i) => i,
+            None if system => SYSTEM,
+            None => APPS,
+        }
+    }
+}
+
 /// The processes, the store's apps, and stopping a process (doc/40).
 /// Each needs its name in the Permissions TLV.
 ///

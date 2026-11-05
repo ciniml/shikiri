@@ -15,6 +15,9 @@ default = []
 # Exactly one platform must be selected.
 platform-virt = []
 platform-esp32p4v1 = []
+# The board under platform-esp32p4v1 (doc/58 §3.1): the Tab5 unless this
+# is set (the ESP32-P4-Function-EV-Board v1.5.x).
+board-p4evb = []
 # L3 test: lock the core up after the self-test (doc/12 §7). Never ship.
 test-lockup = []
 # M5a rollback tests (doc/16 §3.6): a kernel that panics right after it

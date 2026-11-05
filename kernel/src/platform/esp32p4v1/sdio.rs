@@ -1,8 +1,9 @@
 //! The ESP32-C6 Wi-Fi chip on SDMMC slot 1 (N2b, doc/22): power, reset and
-//! the SDIO card's identification. Pins through the GPIO matrix: CLK 12,
-//! CMD 13, D0-D3 11/10/9/8; CHIP_EN = GPIO15 (doc/research/net-stack.md
-//! §1.1). The host is shared with the SD card (`sd.rs`); everything here
-//! uses slot 1's divider and card number only.
+//! the SDIO card's identification. Pins through the GPIO matrix, the
+//! board's (`board::SDIO`, doc/58 §3.1): on the Tab5 CLK 12, CMD 13, D0-D3
+//! 11/10/9/8, CHIP_EN = GPIO15 (doc/research/net-stack.md §1.1). The host
+//! is shared with the SD card (`sd.rs`); everything here uses slot 1's
+//! divider and card number only.
 //!
 //! The C6's firmware (esp_hosted, as M5Stack or TCC left it) is not
 //! changed (user, 2026-10-31).
@@ -12,13 +13,22 @@ use t5_abi::event;
 use super::i2c::{func_in_sel, func_out_sel, io_mux_reg};
 use super::psram::delay_us;
 use super::sd::{self, Data};
-use super::{Esp32p4v1, Platform, rd, tab5, wr};
+use super::{Esp32p4v1, Platform, board, rd, wr};
 
 const SLOT: u32 = 1;
-const CLK_PIN: usize = 12;
-const CMD_PIN: usize = 13;
-const DATA_PINS: [usize; 4] = [11, 10, 9, 8];
-const CHIP_EN: usize = 15;
+
+/// Where the board wires the C6.
+pub struct Pins {
+    pub clk: usize,
+    pub cmd: usize,
+    pub data: [usize; 4],
+    pub chip_en: usize,
+}
+
+const CLK_PIN: usize = board::SDIO.clk;
+const CMD_PIN: usize = board::SDIO.cmd;
+const DATA_PINS: [usize; 4] = board::SDIO.data;
+const CHIP_EN: usize = board::SDIO.chip_en;
 
 // GPIO matrix signals of SDMMC slot 1 (gpio_sig_map.h: SD_CARD_*_2_PAD).
 const SIG_CCLK: u32 = 0;
@@ -36,7 +46,12 @@ const IO_MUX_MATRIX: u32 = (1 << 12) | (3 << 10) | (1 << 9) | (1 << 8);
 const GPIO_OUT_W1TS: usize = 0x500E_0008;
 const GPIO_OUT_W1TC: usize = 0x500E_000C;
 const GPIO_ENABLE_W1TS: usize = 0x500E_0024;
+/// GPIO32 and up (gpio_reg.h, the same in hw_ver1 and hw_ver3).
+const GPIO_OUT1_W1TS: usize = 0x500E_0014;
+const GPIO_OUT1_W1TC: usize = 0x500E_0018;
+const GPIO_ENABLE1_W1TS: usize = 0x500E_0030;
 const GPIO_IN: usize = 0x500E_003C;
+const GPIO_IN1: usize = 0x500E_0040;
 /// DAT1, which the card pulls low to interrupt (4-bit mode).
 const D1_PIN: usize = DATA_PINS[1];
 /// Without an interrupt, the C6 is still asked this often (a missed
@@ -247,11 +262,17 @@ fn pins() {
 }
 
 fn chip_en(high: bool) {
+    // GPIO54 on the EVB: the second bank.
+    let (w1ts, w1tc, enable, bit) = if CHIP_EN < 32 {
+        (GPIO_OUT_W1TS, GPIO_OUT_W1TC, GPIO_ENABLE_W1TS, CHIP_EN)
+    } else {
+        (GPIO_OUT1_W1TS, GPIO_OUT1_W1TC, GPIO_ENABLE1_W1TS, CHIP_EN - 32)
+    };
     unsafe {
         wr(io_mux_reg(CHIP_EN), (1 << 12) | (1 << 9));
         wr(func_out_sel(CHIP_EN), SIG_GPIO_OUT);
-        wr(if high { GPIO_OUT_W1TS } else { GPIO_OUT_W1TC }, 1 << CHIP_EN);
-        wr(GPIO_ENABLE_W1TS, 1 << CHIP_EN);
+        wr(if high { w1ts } else { w1tc }, 1 << bit);
+        wr(enable, 1 << bit);
     }
 }
 
@@ -325,7 +346,7 @@ fn link() -> &'static mut Link {
 pub fn up() -> Result<u32, &'static str> {
     let l = link();
     l.up = false;
-    let was_on = tab5::wlan_power_on()?;
+    let was_on = board::wlan_power_on()?;
     // A reset pulse on CHIP_EN, as the esp_hosted host does; then the time
     // TCC gives the C6 to boot (wifi_setup.cpp:117-121).
     chip_en(false);
@@ -414,7 +435,8 @@ pub fn up() -> Result<u32, &'static str> {
 }
 
 fn d1_low() -> bool {
-    unsafe { rd(GPIO_IN) & (1 << D1_PIN) == 0 }
+    let (reg, bit) = if D1_PIN < 32 { (GPIO_IN, D1_PIN) } else { (GPIO_IN1, D1_PIN - 32) };
+    unsafe { rd(reg) & (1 << bit) == 0 }
 }
 
 /// From the interrupt handler: the card interrupt came. It stays masked

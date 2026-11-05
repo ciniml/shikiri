@@ -256,6 +256,17 @@ fn gt_read(addr: u8, out: &mut [TouchPoint; MAX_POINTS]) -> Result<usize, &'stat
     Ok(n)
 }
 
+pub const NAME: &str = "tab5";
+/// The internal I2C bus (GPIO31/32) and the keyboard port (ExtPort1, INT
+/// GPIO50).
+pub const I2C: bool = true;
+pub const KBD: bool = true;
+/// The ESP32-C6 (doc/research/net-stack.md §1.1).
+pub const SDIO: super::sdio::Pins = super::sdio::Pins { clk: 12, cmd: 13, data: [11, 10, 9, 8], chip_en: 15 };
+
+/// The card's power is the SoC's 3.3 V rail (`sd.rs`).
+pub fn sd_power_on() {}
+
 /// IO expander #2's bit0 (WLAN_PWR_EN) powers the ESP32-C6. Turns it on
 /// with one read-modify-write per register that changes bit0 only; bit4
 /// powers the Tab5 off and is never changed (doc/22 §2, approved by the

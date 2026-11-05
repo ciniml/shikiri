@@ -36,6 +36,8 @@ pub struct Process {
     /// included, and the total at the last `ps` (doc/31).
     pub cpu: u64,
     pub cpu_mark: u64,
+    /// Its CPU partition (`t5_abi::cpu`, doc/57).
+    pub partition: usize,
 }
 
 impl Drop for Process {
@@ -106,6 +108,7 @@ impl Process {
             ring_mapped: None,
             cpu: 0,
             cpu_mark: 0,
+            partition: t5_abi::cpu::of(loaded.permissions, loaded.system),
         }
     }
 

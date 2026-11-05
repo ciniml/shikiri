@@ -18,10 +18,10 @@ PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --per
 PERMIT_paint  := --permit display --permit touch
 PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
-PERMIT_net    := --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
+PERMIT_net    := --permit cpu:net --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
 PERMIT_nettest := --permit svc:net/udp:any --permit svc:net/tcp-listen:any --permit svc:net/tcp-connect \
                   --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --stack 32768
-PERMIT_wifi   := --permit wlan:ctl --permit listen:wifi --permit svc:net/link --permit svc:cfg/r:wifi. \
+PERMIT_wifi   := --permit cpu:net --permit wlan:ctl --permit listen:wifi --permit svc:net/link --permit svc:cfg/r:wifi. \
                  --permit svc:cfg/w:wifi. --permit svc:cfg/secret:wifi. --permit ready:bt --stack 16384
 PERMIT_netctl := --permit svc:netctl --permit svc:fs/rw:T5OS/NET.RUL --stack 32768
 PERMIT_init   := --permit proc:spawn --permit svc:fs/rw:T5OS/START.CFG --stack 16384
@@ -73,7 +73,7 @@ QEMU_FLAGS := -M virt -smp 2 -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios no
 QEMU_STORE := -device loader,file=$(BUILD)/store/appmeta.bin,addr=0x84410000,force-raw=on \
               -device loader,file=$(BUILD)/store/apps.bin,addr=0x84420000,force-raw=on
 
-.PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 boot run-virt test-virt \
+.PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 kernel-p4evb image-p4evb boot run-virt test-virt \
         schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 flash-store monitor \
         probe-rs rtt clean kupdate-test-kernels flash-kernel-p4 kupdate install-apps
 
@@ -200,6 +200,19 @@ kernel-p4: apps
 	mkdir -p $(BUILD) && cp kernel/target/esp32p4v1/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-esp32p4v1.elf
 	tools/check-ram-text.sh $(BUILD)/t5-kernel-esp32p4v1.elf
 
+# The same kernel for the ESP32-P4-Function-EV-Board v1.5.x (doc/58 §3.1):
+# chip v1.x, no display, touch or keyboard, the C6 on its own pins.
+kernel-p4evb: apps
+	cd kernel && cargo build --release \
+	    --features "platform-esp32p4v1 board-p4evb" --target-dir target/p4evb
+	mkdir -p $(BUILD) && cp kernel/target/p4evb/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-p4evb.elf
+	tools/check-ram-text.sh $(BUILD)/t5-kernel-p4evb.elf
+
+image-p4evb: kernel-p4evb
+	espflash save-image --chip esp32p4 --min-chip-rev 1.0 --flash-size 16mb \
+	    $(BUILD)/t5-kernel-p4evb.elf $(BUILD)/t5-kernel-p4evb.bin
+	$(ELF2T5A) kernel $(BUILD)/t5-kernel-p4evb.bin $(BUILD)/t5-kernel-p4evb.t5k --key $(DEV_KEY)
+
 # ESP app image for the 2nd stage bootloader (rev v1.x only), and the same
 # image signed as a kernel update package (T5K, doc/16 §2).
 KERNEL_T5K := $(BUILD)/t5-kernel-esp32p4v1.t5k
@@ -323,8 +336,13 @@ test-emu:
 # The app store goes into the emulated flash at its partition offsets.
 EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.bin@420000
 
-test-p4emu: emu schemas-p4 kupdate-test-kernels
+test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	$(T5EMU) $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) $(BUILD)/t5-kernel-esp32p4v1.elf
+	@# The EVB's kernel (doc/58 §3.1) passes the same self-test; it touches
+	@# no I2C (0 transfers: the emulated Tab5's devices stay unused).
+	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --expect-event board.name --expect-event selftest.result \
+	    $(BUILD)/t5-kernel-p4evb.elf
 	@# Control commands after the self-test (doc/14 §3): start two apps, stop
 	@# one, and check the events.
 	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \

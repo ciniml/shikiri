@@ -123,7 +123,8 @@ impl Error {
     }
 }
 
-/// The internal bus.
+/// The internal bus (the Tab5's; not on the EVB, doc/58 §3.1).
+#[cfg_attr(feature = "board-p4evb", allow(dead_code))]
 pub fn init() {
     init_on(&INTERNAL);
 }

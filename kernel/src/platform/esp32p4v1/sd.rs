@@ -698,6 +698,7 @@ pub fn init() -> Result<Card, &'static str> {
     if let Some(c) = card() {
         return Ok(c);
     }
+    super::board::sd_power_on();
     slot0_up()?;
     delay_us(1000);
     command(CMD0, 0, Data::None)?;

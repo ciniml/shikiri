@@ -15,7 +15,15 @@ mod ppa;
 mod psram;
 mod sd;
 mod sdio;
+// The board (doc/58 §3.1): what is wired to the chip.
+#[cfg(feature = "board-p4evb")]
+mod p4evb;
+#[cfg(feature = "board-p4evb")]
+use p4evb as board;
+#[cfg(not(feature = "board-p4evb"))]
 mod tab5;
+#[cfg(not(feature = "board-p4evb"))]
+use tab5 as board;
 
 // USB Serial/JTAG (doc/06 §3.1): usb_serial_jtag_reg.h
 /// The RNG (`LP_SYSTEM_REG_RNG_DATA_REG`); random with the entropy source
@@ -994,15 +1002,21 @@ impl Platform for Esp32p4v1 {
     }
 
     fn board_init() -> super::Panel {
-        tab5::init()
+        t5_abi::event!(Info, "board.name", name = board::NAME);
+        board::init()
     }
 
     fn kbd_poll(sink: &mut dyn FnMut(u8, u8)) -> Result<(), &'static str> {
+        // Not on the EVB: its GPIO50 (the keyboard's INT on the Tab5) is
+        // the Ethernet's REF_CLK.
+        if !board::KBD {
+            return Err("no keyboard port on this board");
+        }
         kbd::poll(sink)
     }
 
     fn touch_read(out: &mut [super::TouchPoint; 5]) -> Result<usize, &'static str> {
-        tab5::touch_read(out)
+        board::touch_read(out)
     }
 
     fn display_init(panel: super::Panel, fb: usize) -> Result<usize, &'static str> {
@@ -1115,6 +1129,9 @@ impl Platform for Esp32p4v1 {
     }
 
     fn i2c_scan() -> Result<u32, &'static str> {
+        if !board::I2C {
+            return Err("no I2C bus on this board");
+        }
         let mut n = 0;
         for addr in 0x08..0x78u8 {
             if i2c::probe(addr) {

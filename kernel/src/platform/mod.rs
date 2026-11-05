@@ -312,7 +312,7 @@ pub trait Platform {
 }
 
 /// The display panel (Tab5 lots, doc/06 §7).
-#[cfg_attr(not(feature = "platform-esp32p4v1"), allow(dead_code))]
+#[cfg_attr(any(not(feature = "platform-esp32p4v1"), feature = "board-p4evb"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
     /// No board support, or the IO expander did not answer.

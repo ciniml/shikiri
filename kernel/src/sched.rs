@@ -12,15 +12,15 @@
 //! (`on_core`). The scheduler is reached through a raw pointer and borrowed
 //! only while the lock is held, never across `run_user` or a sleep.
 
-use t5_abi::event;
 use t5_abi::log::Addr;
+use t5_abi::{cpu, event};
 
 use crate::arch::riscv32::csr::{cause, mstatus};
 use crate::arch::riscv32::fpu::{self, FpState};
 use crate::arch::riscv32::pmp;
 use crate::arch::riscv32::trap::{self, Trap};
 use crate::platform::{Current, Platform};
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use crate::process::{Exit, Next, Process, State};
 use crate::prof;
@@ -44,6 +44,62 @@ const SECONDARY_IDLE_MS: u64 = 1000;
 /// (doc/33 §12). Counted in cycles because reading the SYSTIMER takes
 /// about 2 µs on the P4 (doc/34).
 const KICK_CHECK_CYCLES: u32 = 360_000;
+
+/// Whether `pick` keeps the partitions' shares (the `partitions` command,
+/// doc/57); off is plain round robin.
+static PARTITIONS_ON: AtomicBool = AtomicBool::new(true);
+
+pub fn set_partitions(on: bool) {
+    PARTITIONS_ON.store(on, Ordering::Relaxed);
+}
+
+/// The window is kept as `BUCKETS` buckets: a slice's time goes into the
+/// bucket of when it ended.
+const BUCKETS: usize = 10;
+
+/// Each partition's time in the last `cpu::WINDOW_MS` (doc/57).
+pub struct Usage {
+    ticks: [[u64; BUCKETS]; cpu::PARTITIONS],
+    /// The bucket number (time / bucket length) each bucket holds.
+    seq: [u64; BUCKETS],
+    /// Since boot, for `ps`.
+    pub total: [u64; cpu::PARTITIONS],
+    pub total_mark: [u64; cpu::PARTITIONS],
+}
+
+impl Usage {
+    const fn new() -> Usage {
+        Usage { ticks: [[0; BUCKETS]; cpu::PARTITIONS], seq: [u64::MAX; BUCKETS], total: [0; cpu::PARTITIONS], total_mark: [0; cpu::PARTITIONS] }
+    }
+
+    fn bucket_ticks() -> u64 {
+        time::ms_to_ticks(cpu::WINDOW_MS) / BUCKETS as u64
+    }
+
+    fn add(&mut self, part: usize, now: u64, ticks: u64) {
+        let seq = now / Self::bucket_ticks();
+        let b = (seq % BUCKETS as u64) as usize;
+        if self.seq[b] != seq {
+            self.seq[b] = seq;
+            for p in self.ticks.iter_mut() {
+                p[b] = 0;
+            }
+        }
+        self.ticks[part][b] += ticks;
+        self.total[part] += ticks;
+    }
+
+    /// Whether `part` used less than its share in the window up to `now`.
+    fn under_budget(&self, part: usize, now: u64) -> bool {
+        let seq = now / Self::bucket_ticks();
+        let used: u64 = (0..BUCKETS)
+            .filter(|&b| self.seq[b] != u64::MAX && seq.wrapping_sub(self.seq[b]) < BUCKETS as u64)
+            .map(|b| self.ticks[part][b])
+            .sum();
+        let capacity = time::ms_to_ticks(cpu::WINDOW_MS) * if crate::smp::two_cores() { CORES as u64 } else { 1 };
+        used * 1000 < capacity * cpu::BUDGET_PM[part] as u64
+    }
+}
 
 /// Counters the self-test checks to see that each path was exercised.
 #[derive(Clone, Copy, Debug, Default)]
@@ -96,6 +152,8 @@ pub struct Scheduler {
     /// Per core: when its sleep began, or 0 while it is awake. `ps` counts
     /// a sleep in progress up to now, so a window gets only its own part.
     pub asleep_since: [u64; CORES],
+    /// The partitions' time (doc/57).
+    pub usage: Usage,
 }
 
 /// The scheduler core 0 is running, for core 1 (null: none).
@@ -117,6 +175,7 @@ impl Scheduler {
             cpu_mark: (Current::now(), [0; CORES]),
             asleep_since: [0; CORES],
             kick_check_at: [0; CORES],
+            usage: Usage::new(),
         }
     }
 
@@ -190,10 +249,23 @@ impl Scheduler {
         self.on_core.iter().any(|&c| c != NONE)
     }
 
-    /// The next ready process no core runs, round robin from `next`.
+    /// The next ready process no core runs, round robin from `next`:
+    /// first one whose partition is under its share (doc/57), else any
+    /// (time left unused by a partition goes to the others).
     fn pick(&self) -> Option<usize> {
         let ready = |i: usize| self.on_core[i] == NONE && self.slots[i].as_ref().is_some_and(|p| p.state == State::Ready);
-        (0..MAX_PROCS).map(|k| (self.next + k) % MAX_PROCS).find(|&i| ready(i))
+        let order = (0..MAX_PROCS).map(|k| (self.next + k) % MAX_PROCS);
+        if PARTITIONS_ON.load(Ordering::Relaxed) {
+            let now = Current::now();
+            let mut under = [false; cpu::PARTITIONS];
+            for (p, u) in under.iter_mut().enumerate() {
+                *u = self.usage.under_budget(p, now);
+            }
+            if let Some(i) = order.clone().find(|&i| ready(i) && under[self.slots[i].as_ref().unwrap().partition]) {
+                return Some(i);
+            }
+        }
+        order.clone().find(|&i| ready(i))
     }
 
     /// Wakes processes whose sleep or wait is over (no core runs them);
@@ -331,7 +403,9 @@ fn run_one(this: *mut Scheduler, i: usize, deadline: u64) {
     run_slice(this, p, i, core, deadline);
     let s = unsafe { &mut *this };
     let p = unsafe { &mut *p };
-    p.cpu += Current::now() - start;
+    let now = Current::now();
+    p.cpu += now - start;
+    s.usage.add(p.partition, now, now - start);
     Current::clear_alarm();
     // Give the FPU up, saved if written, so the process can go on anywhere.
     let f = &mut s.fpu[core];
