@@ -23,7 +23,9 @@
 //! - 9: the router set (doc/58 R3, scenario B): `eth0` a LAN of its own
 //!   (192.168.60.1/24, DHCP server) masqueraded behind Wi-Fi; only the PC
 //!   and the LAN may start traffic to the board, only the LAN and the PC
-//!   may start traffic through it.
+//!   may start traffic through it;
+//! - 10: the same router set on the PC's test network 192.168.10.0/24 (the
+//!   board 192.168.10.254, the PC's USB Ethernet keeps its fixed .1).
 //!
 //! At boot (autostart, doc/30) it runs with mode 0, maybe before `net` and
 //! `fs` are up: it waits up to 10 s for each.
@@ -93,6 +95,21 @@ masquerade on wlan0 from 192.168.60.0/24
 masquerade on wlan0 from 10.55.0.0/24
 ";
 
+const ROUTER_SET_PC: &str = "\
+policy in drop
+policy forward drop
+pass in on host
+pass in on eth0
+pass in state established,related
+pass forward on eth0 out wlan0
+pass forward on host
+pass forward state established,related
+address on eth0 192.168.10.254/24
+dhcp-server on eth0 range 192.168.10.100-192.168.10.149
+masquerade on wlan0 from 192.168.10.0/24
+masquerade on wlan0 from 10.55.0.0/24
+";
+
 fn main(mode: usize, _: usize) -> usize {
     let r = match mode {
         0 => from_file(),
@@ -105,6 +122,7 @@ fn main(mode: usize, _: usize) -> usize {
         7 => write_file(GUARD_SET),
         8 => load(ETH_NAT_SET),
         9 => load(ROUTER_SET),
+        10 => load(ROUTER_SET_PC),
         _ => Err(1),
     };
     match r {

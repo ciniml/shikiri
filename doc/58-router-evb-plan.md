@@ -249,6 +249,20 @@
     4. `http://1.1.1.1/` の応答（301）が 27 ms で届いた。DNS の中継で `one.one.one.one` も引けた。
     5. その間、Wi-Fi の送信の数（`wlan.stats sta_tx`）は変わらず、外へは `eth0` から出た。`net.fwd forwarded=15`。
     6. 再起動の後、`netctl.done mode=0 rules=6`（守りの規則）に戻ったことを確かめた。
+- **R3b: 有線の LAN に本物の端末（2026-11-06）**:
+  - **つなぎ方**: 利用者が、EVB の Ethernet を PC の USB Ethernet（`enx0090feb4eff8`）につないだ。
+    - PC 側は NetworkManager の固定アドレス 192.168.10.1/24（DHCP なし）で、PC の設定は変えない（判断）。
+    - そこで `netctl` にモード 10 を足した。モード 9 と同じルーターの規則を、PC の網の 192.168.10.0/24 で行う。EVB は 192.168.10.254、DHCP は .100〜.149。
+  - **結果**:
+    - `net.addr_fixed link=eth0`（192.168.10.254/24）。PC の USB Ethernet から EVB への ping は 10 回中 10 回、0.3〜0.7 ms。
+    - PC の ARP は EVB の MAC `30:ed:a0:e2:78:79`（工場の MAC + 3）を引いた。
+    - **転送**: 利用者が root で 1.1.1.1 への経路（/32）だけを足し、`curl http://1.1.1.1/` を実行して経路を消した。EVB で次のことを確かめた。
+      - `pass forward on eth0 out wlan0` が 6 回、戻りの `pass forward state established,related` が 4 回。
+      - `net.nat mapped=1`（Wi-Fi の陰に masquerade）。
+      - PC の USB Ethernet の送信が 10、受信が 8 増えた。
+    - **DHCP**: `udhcpc` の要求は EVB に届かなかった（`pass in on eth0` の数が変わらない）。PC の側で要求が出ていないとみられる（出力は未確認）。EVB の DHCP サーバは、R3a の試験用 LAN で貸し出しを確かめた同じもの。
+  - 試験の間、EVB は `netctl 10`（守りの規則つき）。再起動で SD の規則（守りの組）に戻る。
+  - **残り**: 本物の端末への DHCP の貸し出し、スマホなどの端末での確かめ。
 - **R1b（チップ v3、v1.6.0）の調べ**（ESP-IDF の hw_ver1 と hw_ver3 のヘッダを全部突き合わせた）:
   - **レジスタの配置はほぼ同じ**。違うのは次のとおり。
     - 乱数（v3 は LP_TRNG の 0x5012_6004 と有効化）
