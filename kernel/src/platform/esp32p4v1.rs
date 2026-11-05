@@ -1124,6 +1124,10 @@ impl Platform for Esp32p4v1 {
         if board::ETH { emac::stats() } else { (0, 0, 0, 0) }
     }
 
+    fn eth_ring_area() -> Option<usize> {
+        (board::ETH && unsafe { PSRAM_SIZE } != 0).then_some(emac::RINGS)
+    }
+
     fn eth_rx_errors() -> [u32; 5] {
         if board::ETH { emac::rx_errors() } else { [0; 5] }
     }

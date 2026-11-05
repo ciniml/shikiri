@@ -110,8 +110,8 @@ const CLIC_CTRL: u32 = (0x3F << 24) | (1 << 8);
 /// 100 Mbit/s) overran 12 while `net` read them, and smoltcp keeps no
 /// segment after a gap (doc/58 R5).
 const AREA: usize = 0x4FF8_D000;
-const RX_N: usize = 32;
-const TX_N: usize = 8;
+const RX_N: usize = 12;
+const TX_N: usize = 4;
 const DESC: usize = 64;
 const BUF: usize = 1536;
 const RX_DESC: usize = AREA;
@@ -119,7 +119,10 @@ const TX_DESC: usize = RX_DESC + RX_N * DESC;
 const RX_BUF: usize = TX_DESC + TX_N * DESC;
 const TX_BUF: usize = RX_BUF + RX_N * BUF;
 const AREA_END: usize = TX_BUF + TX_N * BUF;
-const _: () = assert!(AREA >= 0x4FF8_0000 + t5_abi::netdev::ring::SIZE && AREA_END <= 0x4FFA_0000);
+const _: () = assert!(AREA >= 0x4FF8_0000 + t5_abi::netdev::ring::SIZE && RINGS + t5_abi::netdev::ring::SIZE <= 0x4FFA_0000);
+/// `netdev:eth0`'s frame rings (doc/58 R5), after the DMA's buffers, in the
+/// same internal SRAM.
+pub const RINGS: usize = AREA_END.div_ceil(128) * 128;
 
 const OWN: u32 = 1 << 31;
 // TDES0.

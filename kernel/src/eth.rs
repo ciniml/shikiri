@@ -3,11 +3,19 @@
 //! object reads and writes them whole and reports the PHY's link. The
 //! first open starts the MAC; the scheduler loop (`poll`) reads the link
 //! every `LINK_POLL_MS` while the device is open.
+//!
+//! With frame rings mapped (`MAP_RING`, doc/35 §5, doc/58 R5) the scheduler
+//! loop copies received frames into them and sends what the process put in
+//! them: no `read`/`write` per frame. Their memory is internal SRAM after
+//! the EMAC's buffers (`eth_ring_area`): in PSRAM they were slower than no
+//! rings at all (13.7 against 15.6 Mbps, doc/58 R5).
 
+use t5_abi::netdev::ring;
 use t5_abi::{Error, event, netdev};
 
 use crate::platform::{Current, Platform};
 use crate::time;
+use crate::wlan::KRings;
 
 const LINK_POLL_MS: u64 = 500;
 
@@ -24,21 +32,29 @@ struct Eth {
     tx_busy: u32,
     stats_tick: u32,
     moved_logged: u32,
+    rings: Option<KRings>,
+    /// The rings' memory (the platform's, at the first `MAP_RING`).
+    ring_area: Option<usize>,
 }
 
-static mut ETH: Eth = Eth { up: false, open: false, mac: 0, link: 0, changed: false, next_link_poll: 0, rx: 0, tx: 0, tx_busy: 0, stats_tick: 0, moved_logged: 0 };
+static mut ETH: Eth = Eth { up: false, open: false, mac: 0, link: 0, changed: false, next_link_poll: 0, rx: 0, tx: 0, tx_busy: 0, stats_tick: 0, moved_logged: 0, rings: None, ring_area: None };
+
+/// One frame on its way from the EMAC into the rings.
+static mut FRAME: [u8; netdev::ETH_FRAME] = [0; netdev::ETH_FRAME];
 
 fn e() -> &'static mut Eth {
     // Under the kernel lock.
     unsafe { &mut *core::ptr::addr_of_mut!(ETH) }
 }
 
-/// From the scheduler loop: the link, while the device is open.
+/// From the scheduler loop: frames between the EMAC and the rings, and the
+/// link, while the device is open.
 pub fn poll() {
     let e = e();
     if !e.open {
         return;
     }
+    move_frames(e);
     let now = Current::now();
     if now < e.next_link_poll {
         return;
@@ -73,6 +89,42 @@ pub fn poll() {
         e.link = link;
         e.changed = true;
     }
+}
+
+/// Received frames into the rings while they have room, then the frames
+/// to send while the EMAC takes them.
+fn move_frames(e: &mut Eth) {
+    let Some(r) = e.rings.as_mut() else { return };
+    let frame = unsafe { &mut *core::ptr::addr_of_mut!(FRAME) };
+    while r.rx_waiting() < ring::SLOTS as usize {
+        let Some(n) = Current::eth_recv(frame) else { break };
+        e.rx += 1;
+        r.rx_push(&frame[..n]);
+    }
+    while let Some(f) = r.tx_front() {
+        if f.len() < 14 || f.len() > netdev::ETH_FRAME {
+            r.tx_drop_front();
+            continue;
+        }
+        match Current::eth_send(f) {
+            Ok(()) => {
+                e.tx += 1;
+                r.tx_drop_front();
+            }
+            Err(_) => {
+                e.tx_busy += 1;
+                break;
+            }
+        }
+    }
+}
+
+/// Whether the scheduler loop has frames to move into the rings (it does
+/// not sleep then). Only with room in them: frames the process has not
+/// taken are no work for the loop (doc/58 R5).
+pub fn pending() -> bool {
+    let e = e();
+    e.open && e.rings.as_ref().is_some_and(|r| r.rx_waiting() < ring::SLOTS as usize) && Current::eth_pending()
 }
 
 pub struct EthDev;
@@ -141,6 +193,25 @@ impl EthDev {
                 e.changed = false;
                 Ok(e.link)
             }
+            netdev::MAP_RING => {
+                let base = match e.ring_area {
+                    Some(b) => b,
+                    None => {
+                        let b = Current::eth_ring_area().ok_or(Error::NoSupport)?;
+                        e.ring_area = Some(b);
+                        b
+                    }
+                };
+                if e.rings.is_none() {
+                    e.rings = Some(KRings::new(base));
+                    event!(Info, "eth.rings_mapped", base = t5_abi::log::Addr(base as u32));
+                }
+                Ok(base)
+            }
+            netdev::KICK => {
+                move_frames(e);
+                Ok(0)
+            }
             _ => Err(Error::NoSupport),
         }
     }
@@ -148,11 +219,14 @@ impl EthDev {
     pub fn poll(&self) -> Option<(usize, usize)> {
         let e = e();
         if e.changed {
-            Some((netdev::LINK_CHANGED, e.link))
-        } else if Current::eth_pending() {
-            Some((netdev::READABLE, 1))
-        } else {
-            None
+            return Some((netdev::LINK_CHANGED, e.link));
+        }
+        match e.rings.as_ref() {
+            Some(r) => {
+                let n = r.rx_waiting();
+                (n > 0).then_some((netdev::READABLE, n))
+            }
+            None => Current::eth_pending().then_some((netdev::READABLE, 1)),
         }
     }
 }
@@ -161,6 +235,7 @@ impl Drop for EthDev {
     fn drop(&mut self) {
         let e = e();
         e.open = false;
+        e.rings = None;
         event!(Info, "eth.closed", rx = e.rx, tx = e.tx, tx_busy = e.tx_busy);
     }
 }

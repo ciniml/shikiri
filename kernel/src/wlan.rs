@@ -97,17 +97,24 @@ impl<const N: usize, const S: usize> Queue<N, S> {
 /// (`RX_TAIL`, `TX_HEAD`) and the lengths it writes are read once and
 /// checked. Only station frames are copied in: the chip's other packets
 /// (the Wi-Fi service's) never reach the shared memory.
-struct KRings {
+pub(crate) struct KRings {
     at: Rings,
     rx_head: u32,
     tx_tail: u32,
-    rx_dropped: u32,
+    pub(crate) rx_dropped: u32,
 }
 
 impl KRings {
+    /// Rings at `base` (`ring::SIZE` bytes), cleared: nothing an earlier
+    /// owner left may show. Also the wired Ethernet's (doc/58 R5).
+    pub(crate) fn new(base: usize) -> KRings {
+        unsafe { core::ptr::write_bytes(base as *mut u8, 0, ring::SIZE) };
+        KRings { at: Rings(base), rx_head: 0, tx_tail: 0, rx_dropped: 0 }
+    }
+
     /// Copies a received frame into the next free slot; false if none is
     /// (or the process's counter makes no sense).
-    fn rx_push(&mut self, f: &[u8]) -> bool {
+    pub(crate) fn rx_push(&mut self, f: &[u8]) -> bool {
         let tail = self.at.word(ring::RX_TAIL).load(Ordering::Acquire);
         if f.len() > ring::SLOT || self.rx_head.wrapping_sub(tail) >= ring::SLOTS {
             self.rx_dropped += 1;
@@ -122,14 +129,14 @@ impl KRings {
     }
 
     /// Received frames the process has not taken.
-    fn rx_waiting(&self) -> usize {
+    pub(crate) fn rx_waiting(&self) -> usize {
         let n = self.rx_head.wrapping_sub(self.at.word(ring::RX_TAIL).load(Ordering::Acquire));
         n.min(ring::SLOTS) as usize
     }
 
     /// The oldest frame to send, left in place. The process may change
     /// the slot meanwhile; that garbles only its own frame.
-    fn tx_front(&self) -> Option<&[u8]> {
+    pub(crate) fn tx_front(&self) -> Option<&[u8]> {
         let head = self.at.word(ring::TX_HEAD).load(Ordering::Acquire);
         let n = head.wrapping_sub(self.tx_tail);
         if n == 0 || n > ring::SLOTS {
@@ -139,7 +146,7 @@ impl KRings {
         Some(unsafe { core::slice::from_raw_parts(self.at.slot(ring::TX_DATA, self.tx_tail), len.min(ring::SLOT)) })
     }
 
-    fn tx_drop_front(&mut self) {
+    pub(crate) fn tx_drop_front(&mut self) {
         self.tx_tail = self.tx_tail.wrapping_add(1);
         self.at.word(ring::TX_TAIL).store(self.tx_tail, Ordering::Release);
     }
@@ -488,9 +495,7 @@ impl WlanDev {
             netdev::MAP_RING => {
                 let base = unsafe { RING_AREA }.ok_or(Error::NoSupport)?;
                 if w.rings.is_none() {
-                    // Nothing an earlier owner left may show.
-                    unsafe { core::ptr::write_bytes(base as *mut u8, 0, ring::SIZE) };
-                    w.rings = Some(KRings { at: Rings(base), rx_head: 0, tx_tail: 0, rx_dropped: 0 });
+                    w.rings = Some(KRings::new(base));
                     event!(Info, "wlan.rings_mapped", base = t5_abi::log::Addr(base as u32));
                 }
                 Ok(base)

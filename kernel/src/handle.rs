@@ -367,6 +367,12 @@ impl Table {
     }
 
     /// Whether `h` is `netdev:wlan0`.
+    pub fn is_eth_dev(&self, h: usize) -> bool {
+        h.checked_sub(1)
+            .and_then(|i| self.slots.get(i))
+            .is_some_and(|s| matches!(s, Some(Handle { object: Object::EthDev(_), .. })))
+    }
+
     pub fn is_wlan_dev(&self, h: usize) -> bool {
         h.checked_sub(1)
             .and_then(|i| self.slots.get(i))

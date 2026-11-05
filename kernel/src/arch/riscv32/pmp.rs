@@ -24,6 +24,9 @@
 //! |       |                  | doc/35 §5) |
 //! | 11    | shm[1].start     | OFF (bottom) |
 //! | 12    | shm[1].end       | TOR, RW- (a second mapped window, doc/49 §3) |
+//! | 13    | rings[1].start   | OFF (bottom) |
+//! | 14    | rings[1].end     | TOR, RW- (a second netdev's rings: Wi-Fi and |
+//! |       |                  | the wired Ethernet, doc/58 R5) |
 
 use super::csr::{read_csr, write_csr};
 
@@ -99,8 +102,8 @@ pub struct Region {
     pub shared: Option<core::ops::Range<usize>>,
     /// Mapped shared memory (RW-): two windows (doc/49 §3).
     pub shm: [Option<core::ops::Range<usize>>; 2],
-    /// A netdev's frame rings (RW-).
-    pub rings: Option<core::ops::Range<usize>>,
+    /// Up to two netdevs' frame rings (RW-).
+    pub rings: [Option<core::ops::Range<usize>>; 2],
 }
 
 /// Grants U-mode R-X on `text` and RW- on `data`.
@@ -138,7 +141,7 @@ pub fn set_process(r: &Region) {
         }
         None => 0,
     };
-    let rings = match &r.rings {
+    let rings = match &r.rings[0] {
         Some(s) => {
             write_csr!("pmpaddr9", s.start >> 2);
             write_csr!("pmpaddr10", s.end >> 2);
@@ -146,8 +149,16 @@ pub fn set_process(r: &Region) {
         }
         None => 0,
     };
+    let rings1 = match &r.rings[1] {
+        Some(s) => {
+            write_csr!("pmpaddr13", s.start >> 2);
+            write_csr!("pmpaddr14", s.end >> 2);
+            A_TOR | R | W
+        }
+        None => 0,
+    };
     write_csr!("pmpcfg2", u32::from_le_bytes([shm, 0, rings, 0]) as usize);
-    write_csr!("pmpcfg3", u32::from_le_bytes([shm1, 0, 0, 0]) as usize);
+    write_csr!("pmpcfg3", u32::from_le_bytes([shm1, 0, rings1, 0]) as usize);
     let cfg0 = u32::from_le_bytes([0, 0, A_TOR | R | X, 0]);
     let cfg1 = u32::from_le_bytes([A_TOR | R | W, 0, shared, 0]);
     write_csr!("pmpcfg0", cfg0 as usize);

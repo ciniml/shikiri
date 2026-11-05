@@ -196,7 +196,7 @@ pub unsafe fn load(bytes: &'static [u8], slot: &Slot) -> Result<Loaded, LoadErro
 
     Ok(Loaded {
         name: info.name,
-        region: Region { text: text..text + text_size, data: data..data_end, shared: None, shm: [None, None], rings: None },
+        region: Region { text: text..text + text_size, data: data..data_end, shared: None, shm: [None, None], rings: [None, None] },
         entry: text + h.entry as usize,
         stack_top: text + data_link_end + stack_size,
         build_id: info.build_id,

@@ -284,6 +284,11 @@ pub trait Platform {
     fn eth_stats() -> (u32, u32, u32, u32) {
         (0, 0, 0, 0)
     }
+    /// Memory for `netdev:eth0`'s frame rings (`netdev::ring::SIZE`
+    /// bytes, internal SRAM), where there is.
+    fn eth_ring_area() -> Option<usize> {
+        None
+    }
     /// Received frames dropped for their status: (all, CRC errors, receive
     /// errors, split over buffers, the last bad status).
     fn eth_rx_errors() -> [u32; 5] {

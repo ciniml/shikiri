@@ -31,7 +31,8 @@ pub struct Process {
     /// The `shm` handles mapped (two windows, doc/49 §3).
     shm_mapped: [Option<usize>; 2],
     /// The `netdev` handle whose frame rings are mapped, if any.
-    ring_mapped: Option<usize>,
+    /// Up to two (Wi-Fi's and the wired Ethernet's, doc/58 R5).
+    ring_mapped: [Option<usize>; 2],
     /// Time (ticks) in its slices, the kernel's work on its system calls
     /// included, and the total at the last `ps` (doc/31).
     pub cpu: u64,
@@ -105,7 +106,7 @@ impl Process {
             xip_extents: None,
             pending: None,
             shm_mapped: [None; 2],
-            ring_mapped: None,
+            ring_mapped: [None; 2],
             cpu: 0,
             cpu_mark: 0,
             partition: t5_abi::cpu::of(loaded.permissions, loaded.system),
@@ -180,9 +181,9 @@ impl Process {
                     self.region.shm[i] = None;
                     pmp::set_process(&self.region);
                 }
-                if self.ring_mapped == Some(a0) {
-                    self.ring_mapped = None;
-                    self.region.rings = None;
+                if let Some(i) = self.ring_mapped.iter().position(|&m| m == Some(a0)) {
+                    self.ring_mapped[i] = None;
+                    self.region.rings[i] = None;
                     pmp::set_process(&self.region);
                 }
                 let r = self.handles.close(a0);
@@ -205,15 +206,20 @@ impl Process {
                 self.handles.take_shm(a0).map(|h| [h, 0, 0])
             }
             sys::CTL if a1 == t5_abi::shm::MAP && self.handles.is_shm(a0) => self.map_shm(a0).map(|v| [v, 0, 0]),
-            sys::CTL if a1 == t5_abi::netdev::MAP_RING && self.handles.is_wlan_dev(a0) => {
-                self.handles.ctl(a0, a1, 0).map(|base| {
-                    // The rings are the process's until it closes the
-                    // handle (doc/35 §5).
-                    self.region.rings = Some(base..base + t5_abi::netdev::ring::SIZE);
-                    self.ring_mapped = Some(a0);
-                    pmp::set_process(&self.region);
-                    [base, 0, 0]
-                })
+            sys::CTL if a1 == t5_abi::netdev::MAP_RING && (self.handles.is_wlan_dev(a0) || self.handles.is_eth_dev(a0)) => {
+                // This handle's slot, or a free one.
+                let i = self.ring_mapped.iter().position(|&m| m == Some(a0)).or_else(|| self.ring_mapped.iter().position(Option::is_none));
+                match i {
+                    None => Err(Error::NoMem),
+                    Some(i) => self.handles.ctl(a0, a1, 0).map(|base| {
+                        // The rings are the process's until it closes the
+                        // handle (doc/35 §5).
+                        self.region.rings[i] = Some(base..base + t5_abi::netdev::ring::SIZE);
+                        self.ring_mapped[i] = Some(a0);
+                        pmp::set_process(&self.region);
+                        [base, 0, 0]
+                    }),
+                }
             }
             sys::CTL => {
                 let r = self.handles.ctl(a0, a1, ((a3 as u64) << 32) | a2 as u64);
