@@ -1120,8 +1120,12 @@ impl Platform for Esp32p4v1 {
         if board::ETH { emac::link() } else { 0 }
     }
 
-    fn eth_stats() -> (u32, u32) {
-        if board::ETH { emac::stats() } else { (0, 0) }
+    fn eth_stats() -> (u32, u32, u32, u32) {
+        if board::ETH { emac::stats() } else { (0, 0, 0, 0) }
+    }
+
+    fn eth_rx_errors() -> [u32; 5] {
+        if board::ETH { emac::rx_errors() } else { [0; 5] }
     }
 
     fn wlan_probe() -> Result<u32, &'static str> {

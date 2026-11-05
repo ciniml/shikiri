@@ -48,8 +48,24 @@ pub fn poll() {
     e.stats_tick += 1;
     if e.stats_tick % 20 == 0 && e.rx + e.tx != e.moved_logged {
         e.moved_logged = e.rx + e.tx;
-        let (irqs, status) = Current::eth_stats();
-        event!(Debug, "eth.stats", irqs = irqs, rx = e.rx, tx = e.tx, tx_busy = e.tx_busy, dma_status = status);
+        let (irqs, status, missed, overflowed) = Current::eth_stats();
+        let [bad, crc, rx_err, split, last] = Current::eth_rx_errors();
+        event!(
+            Debug,
+            "eth.stats",
+            irqs = irqs,
+            rx = e.rx,
+            tx = e.tx,
+            tx_busy = e.tx_busy,
+            dma_status = status,
+            missed = missed,
+            overflowed = overflowed,
+            rx_bad = bad,
+            crc = crc,
+            rx_err = rx_err,
+            split = split,
+            bad_status = last
+        );
     }
     let link = Current::eth_link();
     if link != e.link {
@@ -57,11 +73,6 @@ pub fn poll() {
         e.link = link;
         e.changed = true;
     }
-}
-
-/// Whether frames wait for the open device (the scheduler does not sleep).
-pub fn pending() -> bool {
-    e().open && Current::eth_pending()
 }
 
 pub struct EthDev;

@@ -279,9 +279,15 @@ pub trait Platform {
     fn eth_link() -> usize {
         0
     }
-    /// (interrupts taken, DMA status) for `eth.stats`.
-    fn eth_stats() -> (u32, u32) {
-        (0, 0)
+    /// (interrupts taken, DMA status, frames missed for want of a
+    /// descriptor, frames lost to the receive FIFO) for `eth.stats`.
+    fn eth_stats() -> (u32, u32, u32, u32) {
+        (0, 0, 0, 0)
+    }
+    /// Received frames dropped for their status: (all, CRC errors, receive
+    /// errors, split over buffers, the last bad status).
+    fn eth_rx_errors() -> [u32; 5] {
+        [0; 5]
     }
     /// Initialises the SD card if needed and logs what is on it (M7a).
     fn sd_info() -> Result<u32, &'static str> {

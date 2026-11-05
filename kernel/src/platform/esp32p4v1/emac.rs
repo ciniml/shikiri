@@ -40,6 +40,11 @@ const DMA_TX_LIST: usize = DMA + 0x10;
 const DMA_STATUS: usize = DMA + 0x14;
 const DMA_OP_MODE: usize = DMA + 0x18;
 const DMA_INT_EN: usize = DMA + 0x1C;
+/// Frames the DMA dropped: no free receive descriptor [15:0], the receive
+/// FIFO overflowed [27:17]; cleared by reading.
+const DMA_MISSED: usize = DMA + 0x20;
+/// The receive descriptor the DMA is at.
+const DMA_CUR_RX_DESC: usize = DMA + 0x4C;
 
 // MAC configuration bits.
 const CFG_RE: u32 = 1 << 2;
@@ -99,19 +104,22 @@ const CLIC_CTRL_BASE: usize = 0x2080_1000;
 const CLIC_CTRL: u32 = (0x3F << 24) | (1 << 8);
 
 // ---- descriptors and buffers --------------------------------------------
-/// Internal SRAM the apps' pool left free once PSRAM runs them (after the
-/// Wi-Fi frame rings, doc/35 §5): 0x4FF9_0000..0x4FF9_8000.
-const AREA: usize = 0x4FF9_0000;
-const RX_N: usize = 12;
-const TX_N: usize = 6;
+/// Internal SRAM the apps' pool left free once PSRAM runs them, after the
+/// Wi-Fi frame rings (0x4FF8_0000 + 49408, doc/35 §5) and below the pool's
+/// end. 32 receive buffers: a TCP window from the PC (about 11 segments at
+/// 100 Mbit/s) overran 12 while `net` read them, and smoltcp keeps no
+/// segment after a gap (doc/58 R5).
+const AREA: usize = 0x4FF8_D000;
+const RX_N: usize = 32;
+const TX_N: usize = 8;
 const DESC: usize = 64;
 const BUF: usize = 1536;
 const RX_DESC: usize = AREA;
-const TX_DESC: usize = AREA + 0x400;
-const RX_BUF: usize = AREA + 0x800;
+const TX_DESC: usize = RX_DESC + RX_N * DESC;
+const RX_BUF: usize = TX_DESC + TX_N * DESC;
 const TX_BUF: usize = RX_BUF + RX_N * BUF;
 const AREA_END: usize = TX_BUF + TX_N * BUF;
-const _: () = assert!(AREA_END <= 0x4FF9_8000);
+const _: () = assert!(AREA >= 0x4FF8_0000 + t5_abi::netdev::ring::SIZE && AREA_END <= 0x4FFA_0000);
 
 const OWN: u32 = 1 << 31;
 // TDES0.
@@ -391,13 +399,34 @@ pub fn on_irq() {
     }
 }
 
-/// (interrupts taken, the DMA status now) for `eth.stats`.
-pub fn stats() -> (u32, u32) {
-    (IRQS.load(core::sync::atomic::Ordering::Relaxed), unsafe { rd(DMA_STATUS) })
+static MISSED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static OVERFLOWED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// (interrupts taken, the DMA status now, frames dropped for want of a
+/// descriptor, frames dropped by the receive FIFO) for `eth.stats`.
+pub fn stats() -> (u32, u32, u32, u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let m = unsafe { rd(DMA_MISSED) };
+    MISSED.fetch_add(m & 0xFFFF, Relaxed);
+    OVERFLOWED.fetch_add((m >> 17) & 0x7FF, Relaxed);
+    (IRQS.load(Relaxed), unsafe { rd(DMA_STATUS) }, MISSED.load(Relaxed), OVERFLOWED.load(Relaxed) | BEHIND.load(Relaxed) << 16)
 }
 
 fn rx_desc() -> usize {
     RX_DESC + s().rx_next * DESC
+}
+
+static BEHIND: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Received frames dropped for their status (doc/58 R5): all, and those
+/// with a CRC error (RDES0 bit 1), a receive error from the PHY (bit 3),
+/// split over descriptors (no FS or LS); the last bad status.
+static RX_BAD: [core::sync::atomic::AtomicU32; 4] = [const { core::sync::atomic::AtomicU32::new(0) }; 4];
+static RX_BAD_LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// (frames dropped, CRC errors, receive errors, split, last bad RDES0).
+pub fn rx_errors() -> [u32; 5] {
+    use core::sync::atomic::Ordering::Relaxed;
+    [RX_BAD[0].load(Relaxed), RX_BAD[1].load(Relaxed), RX_BAD[2].load(Relaxed), RX_BAD[3].load(Relaxed), RX_BAD_LAST.load(Relaxed)]
 }
 
 pub fn pending() -> bool {
@@ -406,7 +435,13 @@ pub fn pending() -> bool {
     }
     let d = rx_desc();
     cache_invalidate(d, DESC, false);
-    word(d) & OWN == 0
+    let ready = word(d) & OWN == 0;
+    // Diagnosis (doc/58 R5): the DMA past this descriptor while it reads
+    // as the DMA's here means a stale copy or a ring out of step.
+    if !ready && unsafe { rd(DMA_CUR_RX_DESC) } as usize != d {
+        BEHIND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    ready
 }
 
 /// The next good frame into `out`; frames with errors (or split over
@@ -425,6 +460,14 @@ pub fn recv(out: &mut [u8]) -> Option<usize> {
         }
         let len = ((status >> 16) & 0x3FFF) as usize;
         let good = status & RX_ES == 0 && status & (RX_FS | RX_LS) == RX_FS | RX_LS && len > 4;
+        if !good {
+            use core::sync::atomic::Ordering::Relaxed;
+            RX_BAD[0].fetch_add(1, Relaxed);
+            RX_BAD[1].fetch_add((status >> 1) & 1, Relaxed);
+            RX_BAD[2].fetch_add((status >> 3) & 1, Relaxed);
+            RX_BAD[3].fetch_add((status & (RX_FS | RX_LS) != RX_FS | RX_LS) as u32, Relaxed);
+            RX_BAD_LAST.store(status, Relaxed);
+        }
         let n = len.saturating_sub(4).min(out.len());
         if good {
             let buf = RX_BUF + st.rx_next * BUF;
