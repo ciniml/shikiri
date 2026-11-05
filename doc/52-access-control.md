@@ -51,7 +51,7 @@
 | `wifi` | `status`、`join`（`JOIN`、`SAVE`、`REVERT`） | `matter` `status`、`join` |
 | `ble` | `scan`、`central`、`peripheral` | `matter` `scan`、`central`、`peripheral`。`blescan` `scan`。`blegatt` `central`。`bleecho` `peripheral` |
 | `cfg` | `r:PREFIX`、`w:PREFIX`、`secret:PREFIX`（秘密の値を読む） | `wifi` `r:wifi.`、`w:wifi.`、`secret:wifi.`。`shell` `r:`、`w:`（秘密は書けるが読めない）。`cfgctl` `r:`、`w:test.`、`w:wifi.`（消すため）。**`svc:cfgsec` は要らなくなる** |
-| `matter` | `read`（status、nodes、read、sub）、`control`（on/off/toggle、invoke、write）、`admin`（pair*、ocw、revoke、forget、netcred） | `shell` 全部、`mtreq` 全部（試験） |
+| `matter` | `read`（status、nodes、read、sub、eps）、`control`（on/off/toggle、invoke、write）、`endpoint`（アプリのエンドポイント、doc/53）、`admin`（pair*、ocw、revoke、forget、netcred、epdel） | `shell` read・control・admin、`mtreq` read・control・admin（試験）、`mtep` endpoint、`mtpanel` endpoint・read |
 | `netctl` | 今のまま（`svc:netctl` そのものが管理の口） | `netctl` |
 | `font`、`tty` | 今のまま | `term`、`shell` |
 

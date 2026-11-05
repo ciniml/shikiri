@@ -468,15 +468,23 @@ pub mod cfgflash {
 /// messages, then `END`. One request at a time.
 ///
 /// A client's grants (doc/52 §3.3): `svc:matter/read` (status, nodes,
-/// read, sub), `control` (on, off, toggle, invoke, write), `admin` (the
-/// rest: pairing, windows, credentials). Others answer `denied` and `END`
-/// not ok.
+/// read, sub, eps), `control` (on, off, toggle, invoke, write), `endpoint`
+/// (`endpoint`), `admin` (the rest: pairing, windows, credentials,
+/// epdel). Others answer `denied` and `END` not ok.
+///
+/// An app's endpoint (doc/53): the request `endpoint KIND [LABEL]` (KIND
+/// `light`, `plug`, `contact`, `temp`, `humidity`) answers `endpoint N
+/// KIND` and `END` ok, and the connection stays: the app sends `set VALUE`
+/// (decimal or `null`), and gets `[STATE, text]` (`on 0` / `on 1` for the
+/// On/Off kinds, when it connects and when a controller changes it).
 pub mod matter {
     pub const SVC: &str = "matter";
     /// `[LINE, text…]`: a line of the answer.
     pub const LINE: u8 = 1;
     /// `[END, ok]`: the end of the answer.
     pub const END: u8 = 2;
+    /// `[STATE, text…]`: an endpoint's state, to its app.
+    pub const STATE: u8 = 3;
 }
 
 /// Starting apps (doc/38): `write` of `[arg0: u32 LE][arg1: u32 LE][name]`

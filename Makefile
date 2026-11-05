@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq cfg cfgctl
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel cfg cfgctl
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -32,6 +32,8 @@ PERMIT_blegatt := --permit svc:ble/central
 PERMIT_bleecho := --permit svc:ble/peripheral
 PERMIT_mtbench := --permit random --permit svc:fs/rw:T5OS/MATTER --stack 32768
 PERMIT_mtreq  := --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin
+PERMIT_mtep   := --permit svc:matter/endpoint
+PERMIT_mtpanel := --permit display --permit touch --permit svc:matter/endpoint --permit svc:matter/read
 PERMIT_cfg    := --permit listen:cfg --permit flash:cfg --permit random --permit svc:fs/rw:T5OS/CONFIG.A \
                  --permit svc:fs/rw:T5OS/CONFIG.B --stack 16384
 PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w:wifi.
@@ -500,15 +502,22 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels
 	@# its own controller over 127.0.0.1: commissioning, a subscription to
 	@# OnOff and to its StateChange event (doc/49 §22), a toggle (the
 	@# device's event, the report and the event report), a read of a number
-	@# and of a string.
-	$(T5EMU) --quiet --max-ms 140000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	@# and of a string. The apps' endpoints (doc/53): `mtep` brings a
+	@# temperature sensor (endpoint 2) and a plug (3); the controller reads
+	@# PartsList and the temperature and toggles the plug (`mtep.state`).
+	$(T5EMU) --quiet --max-ms 180000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run net" --ctl "wait-ms 3000" --ctl "run matter 1" --ctl "wait-ms 3000" \
 	    --ctl "run mtreq 14 1" --ctl "wait-ms 25000" --ctl "run mtreq 13 1" --ctl "wait-ms 5000" \
 	    --ctl "run mtreq 17 1" --ctl "wait-ms 5000" \
 	    --ctl "run mtreq 5 1" --ctl "wait-ms 5000" --ctl "run mtreq 6 1" --ctl "wait-ms 3000" \
 	    --ctl "run mtreq 18 1" --ctl "wait-ms 3000" \
+	    --ctl "run mtep 3 30" --ctl "wait-ms 1000" --ctl "run mtep 1 30" --ctl "wait-ms 4000" \
+	    --ctl "run mtreq 19 1" --ctl "wait-ms 2000" --ctl "run mtreq 22 1" --ctl "wait-ms 3000" \
+	    --ctl "run mtreq 20 1" --ctl "wait-ms 3000" --ctl "run mtreq 21 1" --ctl "wait-ms 4000" \
 	    --expect-event matter.ready --expect-event matter.commissioned --expect-event matter.onoff \
 	    --expect-event matter.report --expect-event matter.event \
+	    --expect-event matter.ep_attached --expect-event mtep.set --expect-event matter.ep_onoff \
+	    --expect-event mtep.state \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

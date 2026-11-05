@@ -23,6 +23,7 @@
 mod blelink;
 mod controller;
 mod device;
+mod endpoints;
 mod store;
 mod wifilink;
 
@@ -34,6 +35,7 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use blelink::BleLink;
 use controller::{ARGS, Controller, Op, Outcome, Val};
 use device::{Change, Device, Identity};
+use endpoints::{FIRST, Kind, LABEL_MAX, OWNER_MAX, SLOTS};
 use mtport::{FileKvs, KernelRng};
 use store::{MemKvs, Store};
 use wifilink::WifiLink;
@@ -132,6 +134,80 @@ fn log_change(c: Change) {
         Change::Commissioned(n) => event!(Info, "matter.commissioned", fabrics = n as u32),
         Change::FabricRemoved(n) => event!(Info, "matter.fabric_removed", fabrics = n as u32),
         Change::Window(open) => event!(Info, "matter.window", open = open),
+        Change::EpOnOff(ep, on) => event!(Info, "matter.ep_onoff", ep = ep as u32, on = on),
+    }
+}
+
+/// An app's endpoint connection (doc/53).
+struct EpSession {
+    chan: Channel,
+    ep: u16,
+}
+
+fn state(c: &Channel, text: &str) {
+    let mut m = [0u8; 64];
+    let n = text.len().min(m.len() - 1);
+    m[0] = matter::STATE;
+    m[1..1 + n].copy_from_slice(&text.as_bytes()[..n]);
+    let _ = c.send(&m[..1 + n]);
+}
+
+fn tell_on(c: &Channel, on: bool) {
+    state(c, if on { "on 1" } else { "on 0" });
+}
+
+/// `endpoint KIND [LABEL]`: the endpoint, or why not (answered).
+fn ep_request(line: &str, c: &Channel, dev: &mut Device) -> Option<u16> {
+    let mut w = line.split_ascii_whitespace().skip(1);
+    let kind = w.next().and_then(Kind::parse);
+    let label = w.next().unwrap_or("0");
+    let r = match kind {
+        None => Err("endpoint light|plug|contact|temp|humidity [LABEL]"),
+        Some(_) if label.len() > LABEL_MAX || w.next().is_some() => Err("endpoint KIND [LABEL]: a label of 8 bytes at most"),
+        Some(kind) => {
+            let mut name = [0u8; t5_rt::t5a::MAX_NAME];
+            let n = c.peer_name(&mut name);
+            let mut owner = [0u8; OWNER_MAX];
+            owner[..n].copy_from_slice(&name[..n]);
+            owner[n] = b'/';
+            owner[n + 1..n + 1 + label.len()].copy_from_slice(label.as_bytes());
+            let owner = &owner[..n + 1 + label.len()];
+            dev.ep_attach(owner, kind).inspect(|&ep| {
+                event!(Info, "matter.ep_attached", ep = ep as u32, kind = kind.name(), owner = core::str::from_utf8(owner).unwrap_or("?"));
+            })
+        }
+    };
+    match r {
+        Ok(ep) => {
+            let mut t = FmtBuf::<40>::new();
+            let _ = write!(t, "endpoint {ep} {}", kind.map_or("", Kind::name));
+            reply(c, t.as_str());
+            end(c, true);
+            if let Some(on) = dev.ep(ep).and_then(|s| s.on()) {
+                tell_on(c, on);
+            }
+            Some(ep)
+        }
+        Err(e) => {
+            event!(Warn, "matter.ep_refused", why = e);
+            reply(c, e);
+            end(c, false);
+            None
+        }
+    }
+}
+
+/// `set VALUE` from an endpoint's app.
+fn ep_message(m: &[u8], ep: u16, dev: &mut Device) {
+    let line = core::str::from_utf8(m).unwrap_or("");
+    let mut w = line.split_ascii_whitespace();
+    let r = match (w.next(), w.next()) {
+        (Some("set"), Some("null")) => dev.ep_set(ep, None),
+        (Some("set"), Some(v)) => v.parse::<i32>().map_err(|_| "set VALUE: decimal or null").and_then(|v| dev.ep_set(ep, Some(v))),
+        _ => Err("set VALUE"),
+    };
+    if let Err(e) = r {
+        event!(Warn, "matter.ep_bad", ep = ep as u32, why = e);
     }
 }
 
@@ -173,14 +249,15 @@ fn num(s: Option<&str>) -> Option<u64> {
 /// windows, credentials).
 fn grant_for(cmd: &str) -> &'static str {
     match cmd {
-        "status" | "nodes" | "read" | "sub" | "subev" | "help" | "" => "read",
+        "status" | "nodes" | "read" | "sub" | "subev" | "eps" | "help" | "" => "read",
         "on" | "off" | "toggle" | "invoke" | "write" => "control",
+        "endpoint" => "endpoint",
         _ => "admin",
     }
 }
 
 /// One request; true if the answer comes later (from the controller).
-fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &mut BleLink, now: u64) -> bool {
+fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, ble: &mut BleLink, now: u64) -> bool {
     let mut w = line.split_ascii_whitespace();
     let cmd = w.next().unwrap_or("");
     let mut text = FmtBuf::<120>::new();
@@ -189,6 +266,35 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             let _ = write!(text, "device: fabrics {}, on {}; controller: nodes {}", dev.fabrics(), dev.on(), ctrl.nodes().count());
             reply(c, text.as_str());
             end(c, true);
+            return false;
+        }
+        "eps" => {
+            for ep in FIRST..FIRST + SLOTS as u16 {
+                if let Some(s) = dev.ep(ep) {
+                    let mut t = FmtBuf::<120>::new();
+                    let _ = write!(t, "endpoint {ep} {} of {}: ", s.kind.name(), core::str::from_utf8(s.owner()).unwrap_or("?"));
+                    let _ = match s.value() {
+                        Some(v) => write!(t, "{v}"),
+                        None => write!(t, "null"),
+                    };
+                    reply(c, t.as_str());
+                }
+            }
+            end(c, true);
+            return false;
+        }
+        "epdel" => {
+            let r = num(w.next()).ok_or("epdel N").and_then(|ep| dev.ep_remove(ep as u16).inspect(|_| event!(Info, "matter.ep_removed", ep = ep as u32)));
+            match r {
+                Ok(()) => {
+                    reply(c, "removed");
+                    end(c, true);
+                }
+                Err(e) => {
+                    reply(c, e);
+                    end(c, false);
+                }
+            }
             return false;
         }
         "nodes" => {
@@ -330,7 +436,7 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE | eps | epdel N | endpoint KIND [LABEL]"),
     };
     match started {
         Ok(()) => true,
@@ -472,6 +578,7 @@ fn run(test: bool) -> Result<(), u32> {
     event!(Info, "matter.ready", fabrics = dev.fabrics() as u32, discriminator = DISCRIMINATOR as u32, mac = &addrs.mac[..], on = dev.on(), test = test);
 
     let mut client: Option<Client> = None;
+    let mut eps: [Option<EpSession>; SLOTS] = Default::default();
     let mut ble = BleLink::new();
     let mut wifi = WifiLink::new();
     let mut rx = [0u8; PKT];
@@ -501,21 +608,46 @@ fn run(test: bool) -> Result<(), u32> {
                     busy = true;
                     let line = core::str::from_utf8(&m[..n]).unwrap_or("");
                     let need = grant_for(line.split_ascii_whitespace().next().unwrap_or(""));
-                    cl.waiting = if cl.chan.peer_grants().has(need.as_bytes()) {
-                        request(line, &cl.chan, dev, ctrl, &mut ble, now_ms())
-                    } else {
+                    if !cl.chan.peer_grants().has(need.as_bytes()) {
                         event!(Warn, "matter.denied", need = need);
                         reply(&cl.chan, "denied: this app may not ask that");
                         end(&cl.chan, false);
-                        false
-                    };
-                    if !cl.waiting {
+                    } else if need == "endpoint" {
+                        // The connection becomes the endpoint's (a newer
+                        // one for the same endpoint replaces it).
+                        if let Some(ep) = ep_request(line, &cl.chan, dev) {
+                            let chan = client.take().map(|c| c.chan);
+                            eps[(ep - FIRST) as usize] = chan.map(|chan| EpSession { chan, ep });
+                        }
+                    } else {
+                        cl.waiting = request(line, &cl.chan, dev, ctrl, &mut ble, now_ms());
+                    }
+                    if !client.as_ref().is_some_and(|c| c.waiting) {
                         client = None;
                     }
                 }
                 Ok(_) | Err(Error::Busy) => {}
                 // The client left.
                 Err(_) => client = None,
+            }
+        }
+        // The apps' endpoints: their values.
+        for slot in eps.iter_mut() {
+            let Some(s) = slot.as_ref() else { continue };
+            let mut m = [0u8; 64];
+            loop {
+                match s.chan.0.read(&mut m) {
+                    Ok(n) => {
+                        busy = true;
+                        ep_message(&m[..n], s.ep, dev);
+                    }
+                    Err(Error::Busy) => break,
+                    Err(_) => {
+                        event!(Info, "matter.ep_detached", ep = s.ep as u32);
+                        *slot = None;
+                        break;
+                    }
+                }
             }
         }
         // Matter's datagrams: the device's and the controller's sockets.
@@ -545,7 +677,14 @@ fn run(test: bool) -> Result<(), u32> {
         // BLE: a commissioner's messages over BTP.
         busy |= ble.rx(dev, ctrl, now_ms(), &mut tx);
         let now = now_ms();
-        dev.housekeep(now, log_change);
+        dev.housekeep(now, |c| {
+            if let Change::EpOnOff(ep, on) = c
+                && let Some(s) = eps.iter().flatten().find(|s| s.ep == ep)
+            {
+                tell_on(&s.chan, on);
+            }
+            log_change(c);
+        });
         // Retransmissions, acknowledgements, reports; announcements.
         while let Some(d) = dev.poll(now_ms(), &mut tx) {
             match d.addr {
@@ -634,7 +773,7 @@ fn run(test: bool) -> Result<(), u32> {
                 continue;
             }
             // `net` (a datagram), a new client or its request, `ble`.
-            let mut hs: [&Handle; 5] = [net.handle(); 5];
+            let mut hs: [&Handle; 5 + SLOTS] = [net.handle(); 5 + SLOTS];
             let mut n = 1;
             hs[n] = &listener.0;
             n += 1;
@@ -662,6 +801,12 @@ fn run(test: bool) -> Result<(), u32> {
                 }
                 None => usize::MAX,
             };
+            // The apps' endpoints: a value, or the app left.
+            let eps_at = n;
+            for s in eps.iter().flatten() {
+                hs[n] = &s.chan.0;
+                n += 1;
+            }
             if let Ok(ev) = wait(&hs[..n], ms * 1_000_000)
                 && ev.kind == chan::PEER_CLOSED
             {
@@ -671,6 +816,11 @@ fn run(test: bool) -> Result<(), u32> {
                     ble.closed(now);
                 } else if ev.index == wifi_at {
                     wifi.closed(now);
+                } else if ev.index >= eps_at
+                    && let Some(slot) = eps.iter_mut().filter(|s| s.is_some()).nth(ev.index - eps_at)
+                {
+                    event!(Info, "matter.ep_detached", ep = slot.as_ref().map_or(0, |s| s.ep) as u32);
+                    *slot = None;
                 }
             }
         }

@@ -2,7 +2,7 @@
 //! On/Off light, as `simple-matter-cffi` does it (its `Light`, `Owned`,
 //! `Shim::housekeep`), without composition, custom clusters, BLE or
 //! Thread; BLE commissioning is `blelink`'s. Endpoint 0 has the node's clusters, endpoint 1 Identify,
-//! Groups, On/Off and Descriptor.
+//! Groups, On/Off and Descriptor; endpoints 2 to 5 are the apps' (`endpoints`, doc/53).
 
 use core::cell::RefCell;
 use core::mem::MaybeUninit;
@@ -12,6 +12,7 @@ use core::ptr::addr_of_mut;
 
 use mtport::KernelRng;
 
+use crate::endpoints::{self, FIRST, Kind, SLOTS, Slot};
 use crate::store::Store;
 use crate::wifilink::TabWifi;
 use simple_matter::kvs::Kvs as _;
@@ -66,11 +67,8 @@ static EP1_SERVERS: &[ClusterId] = &[ClusterId(0x0003), ClusterId(0x0004), Clust
 /// Root node; On/Off light.
 static EP0_DT: &[DeviceType] = &[DeviceType::new(0x0016, 1)];
 static EP1_DT: &[DeviceType] = &[DeviceType::new(0x0100, 3)];
-static EP0_PARTS: &[EndpointId] = &[EndpointId(1)];
-static ENDPOINTS: &[EndpointMeta] = &[
-    EndpointMeta { id: EndpointId(0), device_types: EP0_DT, clusters: EP0_SERVERS },
-    EndpointMeta { id: EndpointId(1), device_types: EP1_DT, clusters: EP1_SERVERS },
-];
+const EP0: EndpointMeta = EndpointMeta { id: EndpointId(0), device_types: EP0_DT, clusters: EP0_SERVERS };
+const EP1: EndpointMeta = EndpointMeta { id: EndpointId(1), device_types: EP1_DT, clusters: EP1_SERVERS };
 
 pub struct Light {
     acl: &'static RefCell<AclTable<NACL>>,
@@ -87,6 +85,10 @@ pub struct Light {
     groups_cl: GroupsCluster<'static, 6, 8, 8>,
     onoff: OnOffCluster,
     desc1: DescriptorCluster,
+    /// The apps' endpoints (doc/53), and the endpoints as the core sees them.
+    slots: [Option<Slot>; SLOTS],
+    metas: [EndpointMeta; 2 + SLOTS],
+    nmeta: usize,
     groups: &'static RefCell<DefaultGroupStore>,
     removed_fabric: Option<NonZeroU8>,
     /// CommissioningComplete, or the fail-safe ended without it (doc/50
@@ -95,13 +97,37 @@ pub struct Light {
     commissioning: Option<bool>,
 }
 
+impl Light {
+    /// After the slots changed: the endpoint list and endpoint 0's PartsList.
+    fn rebuild_endpoints(&mut self) {
+        self.metas[0] = EP0;
+        self.metas[1] = EP1;
+        self.nmeta = 2;
+        for (i, s) in self.slots.iter().enumerate() {
+            if let Some(s) = s {
+                self.metas[self.nmeta] = EndpointMeta { id: EndpointId(FIRST + i as u16), device_types: s.kind.device_types(), clusters: s.kind.servers() };
+                self.nmeta += 1;
+            }
+        }
+        self.desc0 = DescriptorCluster::new(EndpointId(0), EP0_DT, EP0_SERVERS, &[], endpoints::parts(&self.slots));
+    }
+
+    fn slot(&self, ep: u16) -> Option<&Slot> {
+        self.slots.get(ep.checked_sub(FIRST)? as usize)?.as_ref()
+    }
+
+    fn slot_mut(&mut self, ep: u16) -> Option<&mut Slot> {
+        self.slots.get_mut(ep.checked_sub(FIRST)? as usize)?.as_mut()
+    }
+}
+
 impl DataModel for Light {
     fn endpoints(&self) -> &[EndpointMeta] {
-        ENDPOINTS
+        &self.metas[..self.nmeta]
     }
 
     fn clusters_on(&self, ep: EndpointId) -> &[ClusterId] {
-        ENDPOINTS.iter().find(|m| m.id == ep).map_or(&[], |m| m.clusters)
+        self.metas[..self.nmeta].iter().find(|m| m.id == ep).map_or(&[], |m| m.clusters)
     }
 
     fn cluster(&self, ep: EndpointId, cl: ClusterId) -> Option<&dyn ServerCluster> {
@@ -118,7 +144,7 @@ impl DataModel for Light {
             (1, 0x0004) => &self.groups_cl,
             (1, 0x0006) => &self.onoff,
             (1, 0x001D) => &self.desc1,
-            _ => return None,
+            (ep, cl) => return self.slot(ep)?.cluster(cl),
         })
     }
 
@@ -136,7 +162,7 @@ impl DataModel for Light {
             (1, 0x0004) => &mut self.groups_cl,
             (1, 0x0006) => &mut self.onoff,
             (1, 0x001D) => &mut self.desc1,
-            _ => return None,
+            (ep, cl) => return self.slot_mut(ep)?.cluster_mut(cl),
         })
     }
 
@@ -151,6 +177,9 @@ impl DataModel for Light {
         let next = tick_clusters(self, now_ms);
         let identifying = self.identify.is_identifying();
         self.groups_cl.set_identifying(identifying);
+        for s in self.slots.iter_mut().flatten() {
+            s.tick();
+        }
         next
     }
 
@@ -210,6 +239,8 @@ pub enum Change {
     Commissioned(usize),
     FabricRemoved(usize),
     Window(bool),
+    /// An app's On/Off endpoint (doc/53): endpoint and state.
+    EpOnOff(u16, bool),
 }
 
 /// The device: the stack, the mDNS responder, and what must be saved or
@@ -266,7 +297,7 @@ impl Device {
             })
         };
         let dac = TestDacProvider::new(&o.crypto).map_err(|_| "test DAC")?;
-        let light = Light {
+        let mut light = Light {
             acl: &o.acl,
             access_control: AccessControlCluster::new(&o.acl),
             basic: BasicInformationCluster::new(&o.basic),
@@ -275,15 +306,19 @@ impl Device {
             admin: AdminCommissioningCluster::new(&o.window),
             opcreds: OpCredsCluster::new_shared(&o.fabrics, RustCrypto::new(KernelRng), dac),
             gkm: GroupKeyManagementCluster::new_shared(&o.groups, &o.fabrics, RustCrypto::new(KernelRng)),
-            desc0: DescriptorCluster::new(EndpointId(0), EP0_DT, EP0_SERVERS, &[], EP0_PARTS),
+            desc0: DescriptorCluster::new(EndpointId(0), EP0_DT, EP0_SERVERS, &[], &[]),
             identify: IdentifyCluster::new(),
             groups_cl: GroupsCluster::new_shared(&o.groups, 1),
             onoff: OnOffCluster::new(),
             desc1: DescriptorCluster::new(EndpointId(1), EP1_DT, EP1_SERVERS, &[], &[]),
+            slots: endpoints::load(kvs, &o.groups),
+            metas: [EP0; 2 + SLOTS],
+            nmeta: 0,
             groups: &o.groups,
             removed_fabric: None,
             commissioning: None,
         };
+        light.rebuild_endpoints();
         // The development passcode's verifier (20202021), precomputed.
         let pase = simple_matter::dev_pase::dev_pase_config();
         let creds = SharedFabricCreds::new(&o.fabrics, &o.crypto, 0);
@@ -390,6 +425,80 @@ impl Device {
 
     pub fn on(&self) -> bool {
         self.stack.device().onoff.is_on()
+    }
+
+    /// An app's endpoint (doc/53): the one `owner` has, or a free slot.
+    /// Its number, or why not.
+    pub fn ep_attach(&mut self, owner: &[u8], kind: Kind) -> Result<u16, &'static str> {
+        let groups = self.o_groups();
+        let l = self.stack.device_mut();
+        let mine = l.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.owner() == owner));
+        let i = match mine {
+            Some(i) if l.slots[i].as_ref().is_some_and(|s| s.kind == kind) => return Ok(FIRST + i as u16),
+            Some(_) => return Err("this app has that label as another kind (epdel first)"),
+            None => l.slots.iter().position(Option::is_none).ok_or("no free endpoint")?,
+        };
+        let ep = FIRST + i as u16;
+        l.slots[i] = Some(Slot::new(kind, ep, owner, groups));
+        l.rebuild_endpoints();
+        self.save_slots();
+        Ok(ep)
+    }
+
+    /// Frees an endpoint.
+    pub fn ep_remove(&mut self, ep: u16) -> Result<(), &'static str> {
+        let l = self.stack.device_mut();
+        let s = l.slots.get_mut(ep.checked_sub(FIRST).ok_or("no such endpoint")? as usize).ok_or("no such endpoint")?;
+        s.take().ok_or("no such endpoint")?;
+        l.rebuild_endpoints();
+        self.save_slots();
+        Ok(())
+    }
+
+    /// An app's value for its endpoint.
+    pub fn ep_set(&mut self, ep: u16, v: Option<i32>) -> Result<(), &'static str> {
+        self.stack.device_mut().slot_mut(ep).ok_or("no such endpoint")?.set(v)
+    }
+
+    pub fn ep(&self, ep: u16) -> Option<&Slot> {
+        self.stack.device().slot(ep)
+    }
+
+    fn o_groups(&self) -> &'static RefCell<DefaultGroupStore> {
+        &self.o.groups
+    }
+
+    fn save_slots(&mut self) {
+        if !endpoints::save(self.kvs, &self.stack.device().slots) {
+            event!(Warn, "matter.save_failed", what = "endpoints");
+        }
+    }
+
+    /// The apps' endpoints: On/Off and contact changes become events (and
+    /// On/Off changes are told to the app).
+    fn ep_housekeep(&mut self, now: u64, changed: &mut impl FnMut(Change)) {
+        for i in 0..SLOTS {
+            let ep = FIRST + i as u16;
+            let Some(s) = self.stack.device_mut().slots[i].as_mut() else { continue };
+            let on = s.on().filter(|&on| on != s.last_on);
+            let contact = s.take_state_change();
+            if let Some(on) = on {
+                s.last_on = on;
+                let _ = self.stack.post_event(EndpointId(ep), ClusterId(0x0006), EventId(0), PRIORITY_INFO, now, |w, tag| {
+                    w.start_struct(tag)?;
+                    w.write_bool(&TlvTag::ContextSpecific(0), on)?;
+                    w.end_container()
+                });
+                changed(Change::EpOnOff(ep, on));
+            }
+            if let Some(state) = contact {
+                let _ = self.stack.post_event(EndpointId(ep), ClusterId(0x0045), EventId(0), PRIORITY_INFO, now, |w, tag| {
+                    w.start_struct(tag)?;
+                    w.write_bool(&TlvTag::ContextSpecific(0), state)?;
+                    w.end_container()
+                });
+            }
+        }
     }
 
     /// A Matter datagram from `peer`; the reply, if any.
@@ -515,6 +624,7 @@ impl Device {
             });
             changed(Change::OnOff(on));
         }
+        self.ep_housekeep(now, &mut changed);
 
         let generation = self.o.fabrics.borrow().generation();
         if generation != self.last_fabric_gen {
