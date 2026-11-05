@@ -63,12 +63,19 @@ const RESP_OFFSET: u32 = 256;
 const EVENT_ESP_INIT: u32 = 769;
 const EVENT_HEARTBEAT: u32 = 770;
 const EVENT_NO_ARGS: u32 = 773;
+const EVENT_AP_STA_CONNECTED: u32 = 771;
+const EVENT_AP_STA_DISCONNECTED: u32 = 772;
 const EVENT_STA_CONNECTED: u32 = 775;
 const EVENT_STA_DISCONNECTED: u32 = 776;
 
 const MODE_STA: u64 = 1;
+/// wifi_mode_t WIFI_MODE_APSTA: the station and the soft-AP (doc/58 R4).
+const MODE_APSTA: u64 = 3;
+/// The soft-AP takes this many stations.
+const AP_MAX_STATIONS: u64 = 4;
 /// wifi_interface_t (esp_wifi_types_generic.h).
 const WIFI_IF_STA: u64 = 0;
+const WIFI_IF_AP: u64 = 1;
 /// wifi_event_t (esp_wifi_types_generic.h).
 const WIFI_EVENT_STA_START: i32 = 2;
 /// wifi_auth_mode_t (esp_wifi_types_generic.h).
@@ -98,9 +105,10 @@ const EP_REQUEST: &[u8] = b"RPCRsp";
 /// `arg0` bit 0: also start the Bluetooth controller on the chip (doc/48);
 /// bit 1: leave the chip's modem sleep on (BLE gets more of the radio,
 /// Wi-Fi answers later; doc/48 §9); bit 2: no Wi-Fi at all, only Bluetooth
-/// (to compare BLE without Wi-Fi sharing the radio, doc/48 §9).
+/// (to compare BLE without Wi-Fi sharing the radio, doc/48 §9); bit 3: also
+/// the soft-AP from the build-time file (doc/58 R4), for `netdev:ap0`.
 fn main(arg0: usize, _: usize) -> usize {
-    match run(arg0 & 1 != 0, arg0 & 2 != 0, arg0 & 4 != 0) {
+    match run(arg0 & 1 != 0, arg0 & 2 != 0, arg0 & 4 != 0, arg0 & 8 != 0) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "wifi.failed", step = step);
@@ -372,6 +380,9 @@ impl Rpc {
                 );
                 return Some(true);
             }
+            // A station on the soft-AP (doc/58 R4): its MAC, no more.
+            EVENT_AP_STA_CONNECTED => event!(Info, "wifi.ap_joined", mac = bytes(p, 2), aid = uint(p, 3) as u32),
+            EVENT_AP_STA_DISCONNECTED => event!(Info, "wifi.ap_left", mac = bytes(p, 2), aid = uint(p, 3) as u32, reason = uint(p, 5) as u32),
             EVENT_STA_DISCONNECTED => {
                 let d = bytes(p, 2);
                 self.connected = false;
@@ -385,7 +396,8 @@ impl Rpc {
     }
 }
 
-fn run(bluetooth: bool, modem_sleep: bool, no_wifi: bool) -> Result<(), u32> {
+fn run(bluetooth: bool, modem_sleep: bool, no_wifi: bool, soft_ap: bool) -> Result<(), u32> {
+    let soft_ap = soft_ap && !AP_SSID.is_empty() && AP_PSK.len() >= 8;
     let ctl = Handle::open(wlan::CTL, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).map_err(|_| 1u32)?;
     let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX], ssid: [0; wifi::SSID_MAX], ssid_len: 0, connected: false, reason: 0, last: [0; wifi::SSID_MAX], last_len: usize::MAX, last_err: 0 };
     // The settings' network, else the built-in one.
@@ -428,7 +440,7 @@ fn run(bluetooth: bool, modem_sleep: bool, no_wifi: bool) -> Result<(), u32> {
         event!(Info, "wifi.chip_nvs_cleared", ok = restored, noted = noted);
     }
     wifi_init(&mut rpc, 0)?;
-    rpc.call(REQ_SET_MODE, 1, |p| p.uint(1, MODE_STA))?;
+    rpc.call(REQ_SET_MODE, 1, |p| p.uint(1, if soft_ap { MODE_APSTA } else { MODE_STA }))?;
     // The MAC address is known once Wi-Fi is initialised
     // (ESP_ERR_WIFI_NOT_INIT before, seen on the Tab5).
     // The field is a wifi_interface_t (the chip passes it to
@@ -445,6 +457,9 @@ fn run(bluetooth: bool, modem_sleep: bool, no_wifi: bool) -> Result<(), u32> {
     }
     event!(Info, "wifi.mac", mac = mac);
     rpc.ctl.ctl(wlan::SET_MAC, word).map_err(|_| 3u32)?;
+    if soft_ap {
+        start_ap(&mut rpc)?;
+    }
 
     if home.ssid_len == 0 {
         event!(Warn, "wifi.no_credentials");
@@ -523,6 +538,36 @@ fn wifi_init(rpc: &mut Rpc, nvs: u64) -> Result<(), u32> {
         })
     })
     .map(|_| ())
+}
+
+/// The soft-AP (doc/58 R4): the build-time SSID and passphrase (sent to the
+/// chip only), WPA2-PSK, up to `AP_MAX_STATIONS`; the channel follows the
+/// station's. Tells the kernel its MAC for `netdev:ap0`.
+fn start_ap(rpc: &mut Rpc) -> Result<(), u32> {
+    rpc.call(REQ_WIFI_SET_CONFIG, 1, |p| {
+        p.uint(1, WIFI_IF_AP);
+        p.msg(2, |cfg| {
+            cfg.msg(1, |ap| {
+                ap.bytes(1, AP_SSID);
+                ap.bytes(2, AP_PSK);
+                ap.uint(3, AP_SSID.len() as u64);
+                ap.uint(5, AUTH_WPA2_PSK);
+                ap.uint(7, AP_MAX_STATIONS);
+                ap.uint(8, 100);
+                // wifi_pmf_config: capable.
+                ap.msg(11, |pmf| pmf.uint(1, 1));
+            })
+        })
+    })?;
+    let m = rpc.call(REQ_GET_MAC, 2, |p| p.uint(1, WIFI_IF_AP))?;
+    let mac = bytes(rpc.payload(&m), 1);
+    if mac.len() != 6 {
+        return Err(12);
+    }
+    let word = mac.iter().enumerate().fold(0u64, |w, (i, &b)| w | (b as u64) << (8 * i));
+    event!(Info, "wifi.ap", ssid = core::str::from_utf8(AP_SSID).unwrap_or("?"), mac = mac, max_stations = AP_MAX_STATIONS as u32);
+    rpc.ctl.ctl(wlan::SET_AP_MAC, word).map_err(|_| 13u32)?;
+    Ok(())
 }
 
 /// The station's access point (sent to the chip only).

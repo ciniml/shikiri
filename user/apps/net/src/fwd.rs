@@ -20,10 +20,12 @@ pub const WLAN: usize = 1;
 pub const TEST: usize = 2;
 /// The wired Ethernet (doc/58 R2), where the board has one.
 pub const ETH: usize = 3;
+/// The soft-AP (doc/58 R4).
+pub const AP: usize = 4;
 /// The links that may lead out (doc/58 R3): `Stack::uplink`.
 pub const UPLINKS: [usize; 2] = [ETH, WLAN];
-pub const IFACES: usize = 4;
-pub const LINK_NAMES: [&str; IFACES] = ["host", "wlan0", "test0", "eth0"];
+pub const IFACES: usize = 5;
+pub const LINK_NAMES: [&str; IFACES] = ["host", "wlan0", "test0", "eth0", "ap0"];
 
 const INBOX: usize = 8;
 const REJECTS: usize = 4;

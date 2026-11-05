@@ -40,7 +40,7 @@ use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet
 use t5_rt::net::{self as proto, iface, op, state, status};
 use t5_rt::{Channel, Error, Grants, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
 
-use fwd::{ETH, Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
+use fwd::{AP, ETH, Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
 use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, Port};
 
 t5_rt::entry!(main);
@@ -480,6 +480,18 @@ fn open_eth() -> Option<EthLink> {
     let mut l = EthLink::new(ETH, Port::open(h), [b[0], b[1], b[2], b[3], b[4], b[5]], true);
     l.dhcp = Some(l.sockets.add(dhcpv4::Socket::new()));
     event!(Info, "net.link", link = "eth0", addr = "dhcp", mtu = netdev::MTU as u32);
+    Some(l)
+}
+
+/// Opens `netdev:ap0` once the Wi-Fi service has started the soft-AP
+/// (doc/58 R4): no DHCP client, its address comes from the rules
+/// (`address on ap0 …`).
+fn open_ap() -> Option<EthLink> {
+    let h = Handle::open(netdev::AP0, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).ok()?;
+    let (lo, hi) = (h.ctl(netdev::MAC_LO, 0).ok()?, h.ctl(netdev::MAC_HI, 0).ok()?);
+    let b = (lo as u64 | (hi as u64) << 32).to_le_bytes();
+    let l = EthLink::new(AP, Port::open(h), [b[0], b[1], b[2], b[3], b[4], b[5]], true);
+    event!(Info, "net.link", link = "ap0", addr = "rules", mtu = netdev::MTU as u32);
     Some(l)
 }
 
@@ -936,6 +948,7 @@ impl Stack {
             proto::link::WLAN0 if present(WLAN) => t[WLAN] = Some(None),
             proto::link::TEST0 if present(TEST) => t[TEST] = Some(None),
             proto::link::ETH0 if present(ETH) => t[ETH] = Some(None),
+            proto::link::AP0 if present(AP) => t[AP] = Some(None),
             _ => return Err(status::NO_ADDRESS),
         }
         Ok(t)
@@ -1556,10 +1569,20 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     // Without Wi-Fi (started before the Wi-Fi service had the chip up, at
     // boot), try again every second.
     let mut wifi_retry_at = clock_ns() + 1_000_000_000;
+    let mut ap_retry_at = clock_ns();
     loop {
         if stack.eth[WLAN - 1].is_none() && static_addr == 0 && clock_ns() >= wifi_retry_at {
             wifi_retry_at = clock_ns() + 1_000_000_000;
             stack.eth[WLAN - 1] = open_wifi();
+        }
+        // The soft-AP comes when the Wi-Fi service starts it (doc/58 R4);
+        // the rules apply to it once it is there (its address).
+        if stack.eth[AP - 1].is_none() && clock_ns() >= ap_retry_at {
+            ap_retry_at = clock_ns() + 1_000_000_000;
+            stack.eth[AP - 1] = open_ap();
+            if stack.eth[AP - 1].is_some() {
+                stack.rules_gen = stack.rules_gen.wrapping_sub(1);
+            }
         }
         stack.poll();
         // UDP_WAITs whose datagram has come.
@@ -1574,8 +1597,8 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         }
         // The listeners, the links (frames arriving), the control client,
         // the clients.
-        let mut hs = [0u32; 6 + CLIENTS];
-        let mut who = [usize::MAX; 6 + CLIENTS];
+        let mut hs = [0u32; 7 + CLIENTS];
+        let mut who = [usize::MAX; 7 + CLIENTS];
         hs[0] = l.0.raw();
         let mut n = 1;
         let mut ctl_at = (usize::MAX, usize::MAX);
@@ -1590,7 +1613,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             n += 1;
         }
         let first_link = n;
-        let (mut host_at, mut wifi_at, mut eth_at) = (usize::MAX, usize::MAX, usize::MAX);
+        let (mut host_at, mut wifi_at, mut eth_at, mut ap_at) = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
         if let Some(h) = &stack.dev.host {
             (hs[n], host_at) = (h.raw(), n);
             n += 1;
@@ -1601,6 +1624,10 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         }
         if let Some(h) = stack.eth[ETH - 1].as_ref().and_then(|w| w.dev.port.handle()) {
             (hs[n], eth_at) = (h.raw(), n);
+            n += 1;
+        }
+        if let Some(h) = stack.eth[AP - 1].as_ref().and_then(|w| w.dev.port.handle()) {
+            (hs[n], ap_at) = (h.raw(), n);
             n += 1;
         }
         let links = n;
@@ -1636,6 +1663,11 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             && let Some(w) = stack.eth[WLAN - 1].as_mut()
         {
             w.dev.queued = true;
+        }
+        if ev.index == ap_at
+            && let Some(a) = stack.eth[AP - 1].as_mut()
+        {
+            a.dev.queued = true;
         }
         if ev.index == eth_at
             && let Some(e) = stack.eth[ETH - 1].as_mut()

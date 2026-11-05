@@ -263,6 +263,25 @@
     - **DHCP**: `udhcpc` の要求は EVB に届かなかった（`pass in on eth0` の数が変わらない）。PC の側で要求が出ていないとみられる（出力は未確認）。EVB の DHCP サーバは、R3a の試験用 LAN で貸し出しを確かめた同じもの。
   - 試験の間、EVB は `netctl 10`（守りの規則つき）。再起動で SD の規則（守りの組）に戻る。
   - **残り**: 本物の端末への DHCP の貸し出し、スマホなどの端末での確かめ。
+- **R4: C6 の soft-AP（2026-11-06、実装と起動まで）**:
+  - **カーネル**: `netdev:ap0`（`wlan.rs` の `ApDev`）。
+    - esp_hosted の if_type 2（ESP_AP_IF）のフレームを、別の受信の列（4）で受ける。
+    - 送るのは STA と同じく Core0（送信の列 4、`flush_tx`）。
+    - `wlan:ctl` の `SET_AP_MAC` で、`wifi` が AP の MAC を教える（0 = AP なし）。
+  - **`wifi`**: `run wifi` の引数の bit 3 で、AP と STA の両方（`WIFI_MODE_APSTA`）。
+    - AP の設定（`Req_WifiSetConfig` の iface 1）: SSID とパスフレーズ、WPA2-PSK、子機は 4 台まで、PMF capable。チャネルは STA に従う。
+    - AP の MAC を `Req_GetMacAddress` の iface 1 で読む。
+    - 子機の出入り（イベント 771/772）を `wifi.ap_joined`/`wifi.ap_left`（MAC と aid）でログに出す。
+    - SSID とパスフレーズは、ビルドのときにリポジトリの外のファイル（`$T5_WIFI_AP_FILE`、既定 `~/.config/tab5-os/wifi-ap.txt`）から読む。STA と同じ扱い。パスフレーズは乱数で作り、ログにも doc にも出さない。
+  - **`net`**: リンク `ap0`（5 つ目のインタフェース、`proto::link::AP0`）。
+    - `wifi` が AP を始めた後に開く（1 秒ごとに試す）。DHCP のクライアントはない。
+    - 開いたら規則を当て直す（`address on ap0 …`）。
+    - 許可 `netdev:ap0`。
+  - **`netctl` 11**: AP のルーター。`ap0` を 192.168.70.1/24 の LAN にして DHCP サーバを置き、Wi-Fi の STA か有線の陰に masquerade。守りの規則つき。
+  - **実機（v1.5.2）**:
+    - `run wifi 9`（BT と AP）で `wifi.ap ssid=t5evb-ap mac=b4:3a:45:99:be:11`（STA の MAC + 1）。STA は `iotap`（チャネル 11）につながったまま。
+    - `net.link link=ap0`、`netctl 11` で `net.addr_fixed link=ap0`（192.168.70.1/24、`rules=7`）。
+    - PC からの Wi-Fi の探索は NetworkManager が許さず（not authorized）、電波で見えるかはまだ確かめていない。子機（スマホなど）をつないで確かめる。
 - **R1b（チップ v3、v1.6.0）の調べ**（ESP-IDF の hw_ver1 と hw_ver3 のヘッダを全部突き合わせた）:
   - **レジスタの配置はほぼ同じ**。違うのは次のとおり。
     - 乱数（v3 は LP_TRNG の 0x5012_6004 と有効化）

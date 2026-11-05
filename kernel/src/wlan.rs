@@ -17,6 +17,8 @@ use crate::platform::{Current, Platform};
 
 /// esp_hosted interface types (esp_hosted_interface.h:14-23).
 const IF_STA: u8 = 1;
+/// The soft-AP (ESP_AP_IF, doc/58 R4).
+const IF_AP: u8 = 2;
 const IF_SERIAL: u8 = 3;
 const IF_HCI: u8 = 4;
 
@@ -24,6 +26,7 @@ const IF_HCI: u8 = 4;
 const CTL_QUEUE: usize = 3;
 const STA_QUEUE: usize = 5;
 const HCI_QUEUE: usize = 6;
+const AP_QUEUE: usize = 4;
 /// Frames written on core 1, waiting for core 0 to send them (doc/34 §11).
 /// QEMU has no Wi-Fi, and less RAM.
 #[cfg(not(feature = "platform-virt"))]
@@ -167,6 +170,14 @@ struct Wlan {
     tx: Queue<TX_QUEUE, { netdev::ETH_FRAME }>,
     /// The station's MAC address (set by the Wi-Fi service), 0 = unknown.
     mac: u64,
+    /// The soft-AP (doc/58 R4): its MAC (0 = no AP), frames received and
+    /// to send, counters.
+    ap_mac: u64,
+    ap_open: bool,
+    ap: Queue<AP_QUEUE, { netdev::ETH_FRAME }>,
+    ap_tx: Queue<AP_QUEUE, { netdev::ETH_FRAME }>,
+    ap_rx_n: u32,
+    ap_tx_n: u32,
     other: u32,
     errors: u32,
     sta_rx: u32,
@@ -192,6 +203,12 @@ static mut WLAN: Wlan = Wlan {
     hci_tx: 0,
     tx: Queue::new(),
     mac: 0,
+    ap_mac: 0,
+    ap_open: false,
+    ap: Queue::new(),
+    ap_tx: Queue::new(),
+    ap_rx_n: 0,
+    ap_tx_n: 0,
     other: 0,
     errors: 0,
     sta_rx: 0,
@@ -210,7 +227,8 @@ fn w() -> &'static mut Wlan {
 /// frames wait to be sent.
 pub fn pending() -> bool {
     let w = w();
-    w.up && (w.ctl_open || w.dev_open || w.hci_open) && (Current::wlan_pending() || w.tx.count > 0 || w.rings.as_ref().is_some_and(|r| r.tx_front().is_some()))
+    w.up && (w.ctl_open || w.dev_open || w.hci_open || w.ap_open)
+        && (Current::wlan_pending() || w.tx.count > 0 || w.ap_tx.count > 0 || w.rings.as_ref().is_some_and(|r| r.tx_front().is_some()))
 }
 
 /// Sends the queued frames, oldest first, while the bus is free: one frame
@@ -231,6 +249,18 @@ pub fn flush_tx() {
         }
         w.tx.drop_front();
     }
+    // The soft-AP's frames (doc/58 R4).
+    while let Some(f) = w.ap_tx.front() {
+        if !Current::wlan_tx_idle() {
+            return;
+        }
+        match send(IF_AP, f) {
+            Ok(_) => w.ap_tx_n += 1,
+            Err(Error::Busy) => return,
+            Err(_) => w.ap_tx.dropped += 1,
+        }
+        w.ap_tx.drop_front();
+    }
     // Then the transmit ring.
     let Some(r) = w.rings.as_mut() else { return };
     while let Some(f) = r.tx_front() {
@@ -250,11 +280,13 @@ pub fn flush_tx() {
 /// Reads what the chip has sent (from the scheduler loop).
 pub fn poll() {
     let w = w();
-    if !w.up || !(w.ctl_open || w.dev_open || w.hci_open) {
+    if !w.up || !(w.ctl_open || w.dev_open || w.hci_open || w.ap_open) {
         return;
     }
     flush_tx();
     let (ctl, sta, dev_open, rings) = (&mut w.ctl, &mut w.sta, w.dev_open, &mut w.rings);
+    let (ap, ap_open) = (&mut w.ap, w.ap_open);
+    let mut ap_rx = 0;
     let (hci, hci_open, hci_seen) = (&mut w.hci, w.hci_open, w.hci_rx);
     let (mut other, mut sta_rx, mut hci_rx) = (0, 0, 0);
     let r = Current::wlan_poll(&mut |if_type, p| match if_type {
@@ -270,6 +302,12 @@ pub fn poll() {
                 sta.push(p);
             }
         }
+        IF_AP => {
+            ap_rx += 1;
+            if ap_open {
+                ap.push(p);
+            }
+        }
         // The payload starts with the packet type (slave_bt.c:41-72).
         IF_HCI => {
             if hci_seen + hci_rx < 4 {
@@ -283,6 +321,7 @@ pub fn poll() {
         _ => other += 1,
     });
     w.other += other;
+    w.ap_rx_n += ap_rx;
     w.hci_rx += hci_rx;
     w.sta_rx += sta_rx;
     let now = Current::now();
@@ -359,6 +398,10 @@ impl WlanCtl {
         match op {
             wlan::SET_MAC => {
                 w().mac = arg & 0xFFFF_FFFF_FFFF;
+                Ok(0)
+            }
+            wlan::SET_AP_MAC => {
+                w().ap_mac = arg & 0xFFFF_FFFF_FFFF;
                 Ok(0)
             }
             _ => Err(Error::NoSupport),
@@ -479,6 +522,76 @@ impl Drop for WlanDev {
         w.tx.clear();
         let ring_dropped = w.rings.take().map_or(0, |r| r.rx_dropped);
         event!(Info, "wlan.dev_closed", rx = w.sta_rx, tx = w.sta_tx, dropped = w.sta.dropped + ring_dropped, tx_dropped = w.tx.dropped);
+    }
+}
+
+/// The handle on `netdev:ap0` (doc/58 R4): the soft-AP's frames, once the
+/// Wi-Fi service has started the AP. Like `netdev:wlan0` without rings.
+pub struct ApDev;
+
+impl ApDev {
+    pub fn open() -> Result<ApDev, Error> {
+        let w = w();
+        if !w.up || w.ap_mac == 0 {
+            return Err(Error::NoDevice);
+        }
+        if w.ap_open {
+            return Err(Error::Busy);
+        }
+        w.ap.clear();
+        w.ap_tx.clear();
+        w.ap_open = true;
+        Ok(ApDev)
+    }
+
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        w().ap.pop(out)
+    }
+
+    /// Queued; core 0 sends it (now, if this is core 0 and the bus is
+    /// free), as `WlanDev::write`.
+    pub fn write(&mut self, frame: &[u8]) -> Result<usize, Error> {
+        let w = w();
+        if frame.len() > netdev::ETH_FRAME || frame.len() < 14 {
+            return Err(Error::Size);
+        }
+        if w.ap_tx.count == AP_QUEUE {
+            flush_tx();
+            if w.ap_tx.count == AP_QUEUE {
+                return Err(Error::Busy);
+            }
+        }
+        let was_empty = w.ap_tx.count == 0;
+        w.ap_tx.push(frame);
+        if !(crate::smp::two_cores() && crate::smp::hartid() & 1 == 1) {
+            flush_tx();
+        } else if was_empty {
+            Current::ipi_send(0);
+        }
+        Ok(frame.len())
+    }
+
+    pub fn ctl(&mut self, op: usize, _arg: u64) -> Result<usize, Error> {
+        let mac = w().ap_mac;
+        match op {
+            netdev::MAC_LO => Ok(mac as u32 as usize),
+            netdev::MAC_HI => Ok((mac >> 32) as usize),
+            _ => Err(Error::NoSupport),
+        }
+    }
+
+    pub fn poll(&self) -> Option<(usize, usize)> {
+        let n = w().ap.count;
+        (n > 0).then_some((netdev::READABLE, n))
+    }
+}
+
+impl Drop for ApDev {
+    fn drop(&mut self) {
+        let w = w();
+        w.ap_open = false;
+        w.ap_tx.clear();
+        event!(Info, "wlan.ap_closed", rx = w.ap_rx_n, tx = w.ap_tx_n, dropped = w.ap.dropped, tx_dropped = w.ap_tx.dropped);
     }
 }
 

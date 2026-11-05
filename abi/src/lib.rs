@@ -182,6 +182,10 @@ pub mod netdev {
     /// `MAC_LO`/`MAC_HI` and `LINK`; no frame rings (`MAP_RING` is
     /// `NoSupport`). `NoDevice` on a board without one.
     pub const ETH0: &str = "netdev:eth0";
+    /// The Wi-Fi chip's soft-AP (doc/58 R4): `read`/`write` whole frames,
+    /// `ctl` `MAC_LO`/`MAC_HI`; no frame rings. `NoDevice` until the Wi-Fi
+    /// service has started the AP (`wlan::SET_AP_MAC`).
+    pub const AP0: &str = "netdev:ap0";
     pub const MTU: usize = 1500;
     /// An Ethernet frame without the FCS.
     pub const ETH_FRAME: usize = MTU + 14;
@@ -294,6 +298,9 @@ pub mod wlan {
     /// `ctl`: the station's MAC address (`arg` = its 6 bytes, little-endian),
     /// for `netdev:wlan0`'s `MAC_LO`/`MAC_HI`.
     pub const SET_MAC: usize = 1;
+    /// `ctl`: the soft-AP's MAC address (doc/58 R4), for `netdev:ap0`; 0
+    /// = no AP.
+    pub const SET_AP_MAC: usize = 2;
 }
 
 /// Bluetooth (doc/48): `bt:hci` carries HCI packets to and from the

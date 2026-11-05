@@ -25,7 +25,11 @@
 //!   and the LAN may start traffic to the board, only the LAN and the PC
 //!   may start traffic through it;
 //! - 10: the same router set on the PC's test network 192.168.10.0/24 (the
-//!   board 192.168.10.254, the PC's USB Ethernet keeps its fixed .1).
+//!   board 192.168.10.254, the PC's USB Ethernet keeps its fixed .1);
+//! - 11: the soft-AP router set (doc/58 R4, scenario A): `ap0` a LAN of its
+//!   own (192.168.70.1/24, DHCP server) masqueraded behind Wi-Fi's station
+//!   or the wired Ethernet, whichever leads out; only the PC and the AP's
+//!   stations may start traffic to the board or through it.
 //!
 //! At boot (autostart, doc/30) it runs with mode 0, maybe before `net` and
 //! `fs` are up: it waits up to 10 s for each.
@@ -110,6 +114,22 @@ masquerade on wlan0 from 192.168.10.0/24
 masquerade on wlan0 from 10.55.0.0/24
 ";
 
+const AP_ROUTER_SET: &str = "\
+policy in drop
+policy forward drop
+pass in on host
+pass in on ap0
+pass in state established,related
+pass forward on ap0 out wlan0
+pass forward on ap0 out eth0
+pass forward on host
+pass forward state established,related
+address on ap0 192.168.70.1/24
+dhcp-server on ap0 range 192.168.70.100-192.168.70.149
+masquerade on wlan0 from 192.168.70.0/24
+masquerade on eth0 from 192.168.70.0/24
+";
+
 fn main(mode: usize, _: usize) -> usize {
     let r = match mode {
         0 => from_file(),
@@ -123,6 +143,7 @@ fn main(mode: usize, _: usize) -> usize {
         8 => load(ETH_NAT_SET),
         9 => load(ROUTER_SET),
         10 => load(ROUTER_SET_PC),
+        11 => load(AP_ROUTER_SET),
         _ => Err(1),
     };
     match r {

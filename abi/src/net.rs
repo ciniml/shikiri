@@ -128,6 +128,8 @@ pub mod link {
     pub const TEST0: u8 = 4;
     /// The wired Ethernet (doc/58 R2).
     pub const ETH0: u8 = 5;
+    /// The Wi-Fi chip's soft-AP (doc/58 R4).
+    pub const AP0: u8 = 6;
 }
 
 /// TCP_STATE values.
