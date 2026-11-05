@@ -178,6 +178,10 @@ pub mod shm {
 pub mod netdev {
     pub const HOST: &str = "netdev:host";
     pub const WLAN0: &str = "netdev:wlan0";
+    /// The wired Ethernet (doc/58 R2): `read`/`write` whole frames, `ctl`
+    /// `MAC_LO`/`MAC_HI` and `LINK`; no frame rings (`MAP_RING` is
+    /// `NoSupport`). `NoDevice` on a board without one.
+    pub const ETH0: &str = "netdev:eth0";
     pub const MTU: usize = 1500;
     /// An Ethernet frame without the FCS.
     pub const ETH_FRAME: usize = MTU + 14;
@@ -194,6 +198,12 @@ pub mod netdev {
     pub const MAP_RING: usize = 3;
     /// `ctl`: frames were added to the transmit ring: send them.
     pub const KICK: usize = 4;
+    /// `ctl` on `netdev:eth0`: the link, 0 while down, else the speed in
+    /// Mbit/s with bit 16 set for full duplex. `wait` gives `LINK_CHANGED`
+    /// (value: the same) when it changes.
+    pub const LINK: usize = 5;
+    pub const LINK_FULL: usize = 1 << 16;
+    pub const LINK_CHANGED: usize = 2;
 
     /// Frame rings shared by the kernel and the process that has the
     /// device (doc/35 §5): frames pass without `read`/`write`. Each ring

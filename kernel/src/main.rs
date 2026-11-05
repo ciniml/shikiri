@@ -15,6 +15,7 @@
 mod arch;
 mod capture;
 mod channel;
+mod eth;
 mod flash;
 mod handle;
 mod hostlink;

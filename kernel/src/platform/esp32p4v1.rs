@@ -7,6 +7,9 @@ use super::Platform;
 
 mod clock;
 mod display;
+// The EMAC (doc/58 R2); only boards with Ethernet use it.
+#[cfg_attr(not(feature = "board-p4evb"), allow(dead_code))]
+mod emac;
 mod entropy;
 mod i2c;
 mod kbd;
@@ -53,6 +56,12 @@ const HP_SYS_CLKRST_SOC_CLK_CTRL0: usize = 0x500E_6014;
 const CORE1_CPU_CLK_EN: u32 = 1 << 4;
 const HP_SYS_CLKRST_HP_RST_EN0: usize = 0x500E_60C0;
 const RST_EN_CORE1_GLOBAL: u32 = 1 << 8;
+/// PMU's software stall of each core (pmu_reg.h: CPU_SW_STALL, core 1's
+/// code in [23:16]; 0x86 stalls, 0xFF releases), and whether core 1 is
+/// stalled (hp_system_reg.h: CPU_CORESTALLED_ST bit 1).
+const PMU_CPU_SW_STALL: usize = 0x5011_5200;
+const CORE1_STALL_S: u32 = 16;
+const HP_SYSTEM_CPU_CORESTALLED_ST: usize = 0x500E_5064;
 const ROM_SET_APPCPU_BOOT_ADDR: usize = 0x4FC0_00A8;
 const SDIO_IRQ: usize = 4 + CLIC_EXT_INTR_NUM_OFFSET;
 /// How long to wait for room in the FIFO before deciding that nobody reads
@@ -503,6 +512,13 @@ impl Platform for Esp32p4v1 {
             // core 1 through the ROM, which then waits for the new one
             // (doc/33 §8).
             set_boot(0);
+            // Released from a software stall first, as ESP-IDF does
+            // (esp_cpu_unstall(1) in start_other_core): on the EVB's chip
+            // v1.3 core 1 did not come up without it (doc/58).
+            let stall = rd(PMU_CPU_SW_STALL);
+            let stalled = rd(HP_SYSTEM_CPU_CORESTALLED_ST);
+            t5_abi::event!(Info, "smp.core1_stall", code = (stall >> CORE1_STALL_S) & 0xFF, stalled = stalled & 2 != 0);
+            wr(PMU_CPU_SW_STALL, (stall & !(0xFF << CORE1_STALL_S)) | (0xFF << CORE1_STALL_S));
             wr(HP_SYS_CLKRST_HP_RST_EN0, rd(HP_SYS_CLKRST_HP_RST_EN0) | RST_EN_CORE1_GLOBAL);
             wr(HP_SYS_CLKRST_SOC_CLK_CTRL0, rd(HP_SYS_CLKRST_SOC_CLK_CTRL0) | CORE1_CPU_CLK_EN);
             wr(HP_SYS_CLKRST_HP_RST_EN0, rd(HP_SYS_CLKRST_HP_RST_EN0) & !RST_EN_CORE1_GLOBAL);
@@ -1073,7 +1089,39 @@ impl Platform for Esp32p4v1 {
             sdio::on_irq();
             return true;
         }
+        if code == emac::IRQ {
+            // A frame came; the scheduler loop reads the ring.
+            emac::on_irq();
+            return true;
+        }
         false
+    }
+
+    fn eth_up() -> Result<u64, &'static str> {
+        if !board::ETH {
+            return Err("no Ethernet on this board");
+        }
+        emac::up(unsafe { PSRAM_SIZE } != 0)
+    }
+
+    fn eth_recv(out: &mut [u8]) -> Option<usize> {
+        if board::ETH { emac::recv(out) } else { None }
+    }
+
+    fn eth_pending() -> bool {
+        board::ETH && emac::pending()
+    }
+
+    fn eth_send(frame: &[u8]) -> Result<(), &'static str> {
+        if board::ETH { emac::send(frame) } else { Err("no Ethernet on this board") }
+    }
+
+    fn eth_link() -> usize {
+        if board::ETH { emac::link() } else { 0 }
+    }
+
+    fn eth_stats() -> (u32, u32) {
+        if board::ETH { emac::stats() } else { (0, 0) }
     }
 
     fn wlan_probe() -> Result<u32, &'static str> {

@@ -25,6 +25,7 @@ pub enum Object {
     NetDev(crate::hostlink::NetDev),
     WlanCtl(crate::wlan::WlanCtl),
     WlanDev(crate::wlan::WlanDev),
+    EthDev(crate::eth::EthDev),
     BtHci(crate::wlan::BtHci),
     Spawn(crate::spawn::SpawnHandle),
     Kbd(crate::kbd::KbdHandle),
@@ -106,6 +107,9 @@ impl Object {
                 Object::WlanDev(crate::wlan::WlanDev::open()?),
                 rights::READ | rights::WRITE | rights::WAIT | rights::CTL,
             )),
+            n if n == netdev::ETH0.as_bytes() => {
+                Ok((Object::EthDev(crate::eth::EthDev::open()?), rights::READ | rights::WRITE | rights::WAIT | rights::CTL))
+            }
             n if n == wlan::CTL.as_bytes() => Ok((
                 Object::WlanCtl(crate::wlan::WlanCtl::open()?),
                 rights::READ | rights::WRITE | rights::WAIT | rights::CTL,
@@ -277,6 +281,7 @@ impl Table {
             },
             Object::WlanCtl(c) => c.ctl(op, arg),
             Object::WlanDev(d) => d.ctl(op, arg),
+            Object::EthDev(d) => d.ctl(op, arg),
             Object::CfgFlash(f) => f.ctl(op, arg),
             Object::Spawn(s) => s.ctl(op, arg),
             Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
@@ -377,6 +382,7 @@ impl Table {
             Object::NetDev(d) => d.write(buf),
             Object::WlanCtl(c) => c.write(buf),
             Object::WlanDev(d) => d.write(buf),
+            Object::EthDev(d) => d.write(buf),
             Object::BtHci(b) => b.write(buf),
             Object::Spawn(s) => s.write(buf),
             Object::Kill(k) => k.write(buf),
@@ -395,6 +401,7 @@ impl Table {
             Object::NetDev(d) => d.read(buf),
             Object::WlanCtl(c) => c.read(buf),
             Object::WlanDev(d) => d.read(buf),
+            Object::EthDev(d) => d.read(buf),
             Object::BtHci(b) => b.read(buf),
             Object::Kbd(k) => k.read(buf),
             Object::List(l) => l.read(buf),
@@ -425,6 +432,7 @@ impl Table {
         let ev = match &handle.object {
             Object::NetDev(d) => d.poll(),
             Object::WlanDev(d) => d.poll(),
+            Object::EthDev(d) => d.poll(),
             Object::WlanCtl(c) => c.poll(),
             Object::BtHci(b) => b.poll(),
             _ => None,
@@ -460,6 +468,7 @@ impl Table {
             Object::NetDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::WlanCtl(c) => c.poll().map(|(ev, v)| (i, ev, v)),
             Object::WlanDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
+            Object::EthDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::BtHci(b) => b.poll().map(|(ev, v)| (i, ev, v)),
             Object::Kbd(k) => k.poll().map(|(ev, v)| (i, ev, v)),
             Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Random => None,

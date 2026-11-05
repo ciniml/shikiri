@@ -126,6 +126,8 @@ pub mod link {
     pub const WLAN0: u8 = 3;
     /// The test LAN inside the service (doc/23 §4).
     pub const TEST0: u8 = 4;
+    /// The wired Ethernet (doc/58 R2).
+    pub const ETH0: u8 = 5;
 }
 
 /// TCP_STATE values.

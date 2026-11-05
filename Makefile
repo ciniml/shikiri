@@ -18,7 +18,7 @@ PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --per
 PERMIT_paint  := --permit display --permit touch
 PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
-PERMIT_net    := --permit cpu:net --permit shm --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
+PERMIT_net    := --permit cpu:net --permit shm --permit netdev:eth0 --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
 PERMIT_nettest := --permit svc:net/udp:any --permit svc:net/tcp-listen:any --permit svc:net/tcp-connect \
                   --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --stack 32768
 PERMIT_wifi   := --permit cpu:net --permit wlan:ctl --permit listen:wifi --permit svc:net/link --permit svc:cfg/r:wifi. \

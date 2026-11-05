@@ -171,7 +171,75 @@
   - EVB の SD の電源（GPIO45 の SD_PWRn、IO の電源に LDO VO4 が関わるように見える）は、極性と配線を実機で確かめるまで何も駆動しない（R0）。
   - `make image-p4evb` で `build/t5-kernel-p4evb.{elf,bin,t5k}` ができる。
   - `make test-p4emu` に、EVB のカーネルが t5emu で自己試験を通ることを足した（t5emu は Tab5 の I2C の機器を模すが、EVB のカーネルは触らない）。
-- 残り: R0 と、R1 の実機の部分（EVB で起動、自己試験、Wi-Fi の STA）。EVB をつないでから。
+- **R0（2026-11-06、読み取りだけ）**:
+  - **v1.6.0**（USB のシリアル E8:F6:0A:E7:55:79）:
+    - チップ v3.2（ROM eco7）、PSRAM 32 MB（AP の第 4 世代、250 MHz）、フラッシュ 16 MB。セキュアブートとフラッシュの暗号化はどちらも無効。
+    - 出荷時のデモ（esp_brookesia_demo 1.2.0、ESP-IDF v5.5.2）は「LDO Channel 4 を 3.3V」と出す。SD の IO の電源に VO4 を使う。
+    - 画面がないので GT911 の初期化で止まり、再起動をくり返す。
+    - espflash 4.4 の `board-info` は `--no-stub` でないとつながらなかった。
+  - **v1.5.2**（30:ED:A0:E2:78:76）:
+    - チップ v1.3、PSRAM 32 MB（AP の第 4 世代、200 MHz、Tab5 と同じ）、フラッシュ 16 MB。
+    - 出荷時のデモ（1.0.1、ESP-IDF v5.5-dev）は同じく GT911 で止まる。
+    - フラッシュ全体を `build/evb152-flash-backup.bin`（sha256 d1efef50…）に読み出した。
+  - C6 のファームウェアの版は、出荷時のデモから読めなかった。
+- **R1 の実機（v1.5.2、2026-11-06）**: 利用者の確認の後、Tab5 と同じ配置で書いた（ブートローダ、パーティション表、otadata の消去、`t5-kernel-p4evb.bin`、ストア）。
+  - **PSRAM**:
+    - 最初は `boot.no_psram`（VO2 setting out of range）だった。この版の eFuse の VO2 の値（dref 6、mul 6）は、補正のない式では 2000 mV になり、カーネルの守り（1700〜1950 mV）が断っていた。
+    - ESP-IDF は、blk_version ≥ 1 のとき、この eFuse の組を 1.8 V の補正値としてそのまま使う（`ldo_ll.h:123-136`）。この基板の出荷時のデモも、その値で PSRAM を動かしている。
+    - そこで、eFuse の値のときだけ 2050 mV まで許すようにした（`psram.rs`）。PSRAM 32 MB の調整とメモリの試験（32 MB 全体、誤りなし）が通った。
+  - **2 つ目のコア**:
+    - 1 度、Core1 が 100 ms の内に上がらず（`smp.started cores=1`）、`selftest.partitions` が 1 コアの値（200‰、433‰）で落ちた。
+    - ESP-IDF の `start_other_core` と同じく、ソフトウェアの stall を解く書き込み（PMU の CPU_SW_STALL の Core1 を 0xFF）を足した。その後は 5 回の起動すべてで 2 コア、自己試験が通った（`partitions` は 400‰ → 799‰）。
+    - ただし、そのとき読んだ stall のコードは 255（止まっていない）だった。この書き込みが直したのかは分かっていない（最初の 1 回だけの現象かもしれない）。
+  - **自己試験**: すべて通った。画面の試験（m6c）は `no display` で飛ばした。
+  - **自動起動**: ストアの像には自動起動の印がないので、`fs` と `init` の自動起動の版をシリアルから入れた（`install`）。
+  - **SD**: `sd.absent`（応答なし）。カードがないか、電源（GPIO45、VO4）が入っていない。
+  - **Wi-Fi**:
+    - C6 は SDIO で応え（`wlan.up`、chip_id 13）、`wifi` は MAC を読んだ。
+    - `iotap`（WPA3）につながり、DHCP で 192.168.2.135/24 を得た。
+    - `wifi.bt_failed step=init` と `request_failed esp_err=12290` が出た。C6 のファームウェアの版の違いと推測している（後で調べる）。
+  - **常駐の見張り**（doc/56）: 次のものは起動し直しの後であきらめた。どれも EVB のための起動のリストがないためで、見張りは正しく動いた。
+    - `term`（画面なし）
+    - `matter`（SD のストアなし）
+    - `netctl`（`NET.RUL` なし）
+- **SD（v1.5.2）**:
+  - 利用者が SD を挿しても `sd.absent` のままだった。SD のピン（GPIO39〜44）の電源が入っていなかった。
+  - 利用者の許可（「入れてよい（EVB だけ）」）の後、EVB のボードのコード（`p4evb::sd_power_on`）で LDO VO4 を 3.3 V の素通し（TIEH）にした。順番は ESP-IDF の `esp_ldo_acquire_channel` と同じ。
+  - GPIO45（SD_PWRn）には触らない。Tab5 は今までどおり VO4 に触らない。
+  - 32 GB のカード（SK32G）が 4 ビット、40 MHz で応え、`fs.ready`、`init` は `T5OS/START.CFG` を読んだ。
+- **R2: Ethernet（v1.5.2、2026-11-06）**:
+  - 利用者が EVB の LAN をルーターにつないだ。
+  - **作り**:
+    - `kernel/src/platform/esp32p4v1/emac.rs`: EMAC を RMII で動かす。REF_CLK は PHY が出す 50 MHz を GPIO50 で受け、PLL は使わない。
+      - ピン、PHY のリセット（GPIO51）、MDIO、IP101 のリセットと自動交渉。
+      - DMA の記述子（鎖、64 バイト）とバッファ（1536 バイト、受信 12、送信 6）は、PSRAM のあるときに空く内蔵 SRAM（0x4FF9_0000）に置く。L1 の書き戻しと無効化を、DMA に渡す前と読む前に行う。
+      - 割り込みは CPU の線 7。受信でコアを起こすだけで、読むのはスケジューラのループ。
+      - レジスタの手順は ESP-IDF（esp_hal_emac、esp_eth、v5.4 の ip101）と hw_ver1 のヘッダから。
+    - `kernel/src/eth.rs`: `netdev:eth0`。フレームの読み書き、MAC（eFuse の工場の MAC + 3、ESP-IDF の `ESP_MAC_ETH` と同じ）、`LINK`（PHY の状態を 0.5 秒ごとに読み、変わったら `LINK_CHANGED`）、`eth.stats`。
+    - ボードの `ETH`（Tab5 は false、EVB は true）。
+    - `net`: リンク `eth0`（4 つ目のインタフェース）、DHCP のクライアント。リンクが上がるたびに DHCP をやり直す。`proto::link::ETH0`、許可 `netdev:eth0`。
+  - **結果**:
+    - PHY はアドレス 1（ID 0x0243/0x0C54）、自動交渉で 100 Mbit/s の全二重。
+    - DHCP で 192.168.2.136/24 を得た。
+  - **割り込みの間違い**:
+    - 最初は割り込みの元を 84 にしていた。`interrupts.h` の列挙を数えるときに、別名の行で数を誤っていた。
+    - そのため受信でコアが起きず、ping の往復が 3〜708 ms と揺れた（`eth.stats irqs=0`）。
+    - 割り込みの表（`interrupt_core0_reg.h` の SBD_INT_MAP が +0x170）から 92 に直すと、`irqs` が受信の数に合い、往復は 0.2〜0.4 ms でそろった（40 回中 39。最初の 1 回は ARP と推測）。
+  - **PC からの ping**:
+    - SD の守りの規則（`policy in drop`）が落とすので、測る間だけ `netctl 3` にした。終わりに `netctl 2`（`rules=6`）へ戻すことを、スクリプトの `finally` で必ず通した。
+    - 1400 バイトの ping も通った（最初の版で 20 回中 18）。
+  - **未解決**: Wi-Fi（192.168.2.135）にも同じ /24 のアドレスがあるとき、PC から Wi-Fi のアドレスへの ping は返らなかった。同じサブネットに 2 つのリンクがある形は、ルーターの使い方ではない。R3 で WAN と LAN を分ける。
+- **R1b（チップ v3、v1.6.0）の調べ**（ESP-IDF の hw_ver1 と hw_ver3 のヘッダを全部突き合わせた）:
+  - **レジスタの配置はほぼ同じ**。違うのは次のとおり。
+    - 乱数（v3 は LP_TRNG の 0x5012_6004 と有効化）
+    - CLIC（v3 は閾値が CSR `mintthresh`、属性の mode が書ける）
+    - DSI の PLL の参照（画面がない EVB では要らない）
+  - **止まる理由はメモリと起動**:
+    - v3 は L2 キャッシュを L2MEM の下の端に置くので、カーネルの RAM（0x4FF00000 から 0x29000）と重なる。
+    - ROM のデータは 0x4FF3Fxxx → 0x4FFBFxxx に移る。カーネルは 0x4FF3_FFE8 を決め打ちにしている。
+    - ブートローダは `ESP32P4_SELECTS_REV_LESS_V3=n` で作り直しが要る。
+    - CPLL は 400 MHz で、PVT の値も違う。
+  - どれも定数と小さな `#[cfg]`、2 つ目のリンカスクリプトで済む見込み。feature `chip-v3` にする。ドライバの書き直しは要らない。PSRAM は 200 MHz の設定のままでも動く見込み（推測）。
 
 ## 6. 推測と未確認
 - EMAC が DesignWare GMAC 3.x と同じ形というのは推測。TRM の章で確かめてから書く。

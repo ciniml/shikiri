@@ -261,6 +261,8 @@ pub const NAME: &str = "tab5";
 /// GPIO50).
 pub const I2C: bool = true;
 pub const KBD: bool = true;
+/// No Ethernet (doc/58).
+pub const ETH: bool = false;
 /// The ESP32-C6 (doc/research/net-stack.md §1.1).
 pub const SDIO: super::sdio::Pins = super::sdio::Pins { clk: 12, cmd: 13, data: [11, 10, 9, 8], chip_en: 15 };
 

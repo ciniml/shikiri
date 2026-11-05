@@ -40,7 +40,7 @@ use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet
 use t5_rt::net::{self as proto, iface, op, state, status};
 use t5_rt::{Channel, Error, Grants, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
 
-use fwd::{Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
+use fwd::{ETH, Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
 use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, Port};
 
 t5_rt::entry!(main);
@@ -466,6 +466,18 @@ fn open_wifi() -> Option<EthLink> {
     Some(l)
 }
 
+/// Opens `netdev:eth0` where the board has one (doc/58 R2): a DHCP
+/// client, started over whenever the link comes up.
+fn open_eth() -> Option<EthLink> {
+    let h = Handle::open(netdev::ETH0, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).ok()?;
+    let (lo, hi) = (h.ctl(netdev::MAC_LO, 0).ok()?, h.ctl(netdev::MAC_HI, 0).ok()?);
+    let b = (lo as u64 | (hi as u64) << 32).to_le_bytes();
+    let mut l = EthLink::new(ETH, Port::open(h), [b[0], b[1], b[2], b[3], b[4], b[5]], true);
+    l.dhcp = Some(l.sockets.add(dhcpv4::Socket::new()));
+    event!(Info, "net.link", link = "eth0", addr = "dhcp", mtu = netdev::MTU as u32);
+    Some(l)
+}
+
 // ---- client sockets ----
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -875,6 +887,7 @@ impl Stack {
             proto::link::HOST if self.dev.host.is_some() => t[IFACE0] = if v6 { v6a(in64(HOST_NET6, 2)) } else { v4(HOST_ADDR) },
             proto::link::WLAN0 if present(WLAN) => t[WLAN] = Some(None),
             proto::link::TEST0 if present(TEST) => t[TEST] = Some(None),
+            proto::link::ETH0 if present(ETH) => t[ETH] = Some(None),
             _ => return Err(status::NO_ADDRESS),
         }
         Ok(t)
@@ -1437,7 +1450,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         iface,
         dev,
         sockets: SocketSet::new(unsafe { core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(STORAGE0).cast::<SocketStorage<'static>>(), POOL) }),
-        eth: [None, None],
+        eth: [const { None }; IFACES - 1],
         peer: None,
         slots: [None; SOCKETS],
         pool_used: [false; POOL],
@@ -1473,6 +1486,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         w.set_addr(static_addr, 24, (static_router != 0).then_some(static_router));
         event!(Info, "net.static", link = "wlan0", addr = static_addr, router = static_router);
     }
+    stack.eth[ETH - 1] = open_eth();
     if flags & FLAG_TEST_LAN != 0 {
         let mut t = EthLink::new(TEST, Port::Test, testlan::NET_MAC, false);
         t.iface.update_ip_addrs(|a| {
@@ -1525,13 +1539,17 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             n += 1;
         }
         let first_link = n;
-        let (mut host_at, mut wifi_at) = (usize::MAX, usize::MAX);
+        let (mut host_at, mut wifi_at, mut eth_at) = (usize::MAX, usize::MAX, usize::MAX);
         if let Some(h) = &stack.dev.host {
             (hs[n], host_at) = (h.raw(), n);
             n += 1;
         }
         if let Some(h) = stack.eth[WLAN - 1].as_ref().and_then(|w| w.dev.port.handle()) {
             (hs[n], wifi_at) = (h.raw(), n);
+            n += 1;
+        }
+        if let Some(h) = stack.eth[ETH - 1].as_ref().and_then(|w| w.dev.port.handle()) {
+            (hs[n], eth_at) = (h.raw(), n);
             n += 1;
         }
         let links = n;
@@ -1567,6 +1585,23 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             && let Some(w) = stack.eth[WLAN - 1].as_mut()
         {
             w.dev.queued = true;
+        }
+        if ev.index == eth_at
+            && let Some(e) = stack.eth[ETH - 1].as_mut()
+        {
+            if ev.kind == netdev::LINK_CHANGED {
+                // Asking clears the event. A link that came up may be
+                // another network: DHCP starts over.
+                let link = e.dev.port.handle().and_then(|h| h.ctl(netdev::LINK, 0).ok()).unwrap_or(0);
+                event!(Info, "net.link_state", link = "eth0", mbps = (link & 0xFFFF) as u32, up = link != 0);
+                if link != 0
+                    && let Some(h) = e.dhcp
+                {
+                    e.sockets.get_mut::<dhcpv4::Socket>(h).reset();
+                }
+            } else {
+                e.dev.queued = true;
+            }
         }
         if ev.index == ctl_at.0 {
             if let Some(c) = ctl_listener.as_ref().and_then(|cl| cl.accept().ok())

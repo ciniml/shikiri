@@ -258,6 +258,31 @@ pub trait Platform {
     fn wlan_send(_if_type: u8, _pkt_type: u8, _payload: &[u8]) -> Result<(), &'static str> {
         Err("no Wi-Fi")
     }
+    /// Starts the wired Ethernet (doc/58 R2): the MAC, the PHY and the DMA;
+    /// the station MAC address. The link comes up later (`eth_link`).
+    fn eth_up() -> Result<u64, &'static str> {
+        Err("no Ethernet")
+    }
+    /// The next received frame into `out` (its length), if one is there.
+    fn eth_recv(_out: &mut [u8]) -> Option<usize> {
+        None
+    }
+    /// Whether a received frame waits.
+    fn eth_pending() -> bool {
+        false
+    }
+    /// Queues one frame for sending; `Err("busy")` when the ring is full.
+    fn eth_send(_frame: &[u8]) -> Result<(), &'static str> {
+        Err("no Ethernet")
+    }
+    /// The link as `netdev::LINK` gives it, read from the PHY (slow: MDIO).
+    fn eth_link() -> usize {
+        0
+    }
+    /// (interrupts taken, DMA status) for `eth.stats`.
+    fn eth_stats() -> (u32, u32) {
+        (0, 0)
+    }
     /// Initialises the SD card if needed and logs what is on it (M7a).
     fn sd_info() -> Result<u32, &'static str> {
         Err("no SD card slot")

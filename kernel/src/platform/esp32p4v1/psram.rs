@@ -78,7 +78,12 @@ fn ldo_vo2_on() -> Result<(), &'static str> {
     let before = unsafe { (rd(PMU_EXT_LDO_P1_0P1A), rd(PMU_EXT_LDO_P1_0P1A_ANA)) };
     event!(Info, "psram.ldo", dref = dref, mul = mul, efuse = efuse, nominal_mv = mv, ldo = before.0, ana = before.1);
     // A guard against a bad calibration value: the PSRAM is a 1.8 V part.
-    if !(1700..=1950).contains(&mv) {
+    // The eFuse pair is the chip's own trim for 1.8 V, used as is by
+    // ESP-IDF (ldo_ll.h:123-136); the nominal formula ignores the trim, so
+    // it reads high for it: 2000 mV for the EVB v1.5.2's chip v1.3 (dref 6,
+    // mul 6), whose factory firmware runs its PSRAM on that pair (doc/58).
+    let range = if efuse { 1700..=2050 } else { 1700..=1950 };
+    if !range.contains(&mv) {
         return Err("VO2 setting out of range");
     }
     unsafe {
