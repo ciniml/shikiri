@@ -376,6 +376,11 @@ impl<const N: usize> FmtBuf<N> {
         // Only whole UTF-8 sequences are ever copied in.
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
     }
+
+    /// Keeps the first `len` bytes (a length `as_str` returned before).
+    pub fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
 }
 
 impl<const N: usize> Default for FmtBuf<N> {

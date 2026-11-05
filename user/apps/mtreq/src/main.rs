@@ -13,7 +13,9 @@
 //! `pairaddr NODE 20202021 127.0.0.1 5540` (its own device, the
 //! emulator's test), 15 `netcred t5-test not-a-secret` (a made-up network
 //! for the PC's BLE test device, which only pretends to join), 16
-//! `netcred` (none). The answer's lines are logged. Built with `--permit svc:matter`. Exit 0 if
+//! `netcred` (none), 17 `subev NODE 1 6 0 1 10` (On/Off's StateChange
+//! events), 18 `read NODE 0 0x28 1` (Basic Information's VendorName, a
+//! string). The answer's lines are logged. Built with `--permit svc:matter`. Exit 0 if
 //! the answer ended well.
 
 use core::fmt::Write as _;
@@ -43,6 +45,8 @@ fn main(op: usize, node: usize) -> usize {
         14 => write!(req, "pairaddr {node} 20202021 127.0.0.1 5540"),
         15 => write!(req, "netcred t5-test not-a-secret"),
         16 => write!(req, "netcred"),
+        17 => write!(req, "subev {node} 1 6 0 1 10"),
+        18 => write!(req, "read {node} 0 0x28 1"),
         _ => return 1,
     };
     let Ok(c) = Channel::connect(matter::SVC) else {

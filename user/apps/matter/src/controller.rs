@@ -26,9 +26,9 @@ use simple_matter::controller::{
 use simple_matter::crypto::rustcrypto::RustCrypto;
 use simple_matter::discovery::MATTER_PORT;
 use simple_matter::discovery::client::MdnsClient;
-use simple_matter::dm::meta::{AttributeId, ClusterId, CommandId, EndpointId};
+use simple_matter::dm::meta::{AttributeId, ClusterId, CommandId, EndpointId, EventId};
 use simple_matter::im::client::{ImClient, ImEvent};
-use simple_matter::im::wire::{AttributePath, AttributeReportRef, CommandPath, ImStatus};
+use simple_matter::im::wire::{AttributePath, AttributeReportRef, CommandPath, EventPath, EventReportRef, ImStatus};
 use simple_matter::kvs::Kvs;
 use simple_matter::sc::case::common::{CASE_RESUMPTION_ID_LEN, SHARED_SECRET_LEN};
 use simple_matter::sc::initiator::{ScEvent, ScInitiator};
@@ -37,6 +37,7 @@ use simple_matter::tlv::{TlvTag, TlvValue, TlvWriter};
 use simple_matter::transport::net::{BtpConnId, PeerAddr};
 use simple_matter::transport::session::SessionId;
 use t5_rt::event;
+use t5_rt::log::FmtBuf;
 
 type Backend = RustCrypto<KernelRng>;
 type Creds = ControllerCreds<'static, Backend>;
@@ -106,6 +107,8 @@ pub enum Op {
     /// Reports go to the log (`matter.report`) until the subscription is
     /// lost or the process ends.
     Subscribe { ep: u16, cluster: u32, attr: u32, min_s: u16, max_s: u16 },
+    /// Events go to the log (`matter.event`), as reports do (doc/49 §22).
+    SubscribeEvent { ep: u16, cluster: u32, event: u32, min_s: u16, max_s: u16 },
     /// AdministratorCommissioning: open an enhanced window (OCW), revoke it.
     OpenWindow(OpenWindowParams),
     Revoke,
@@ -118,6 +121,8 @@ pub enum Outcome {
     NotFound,
     Invoked { status: u8 },
     Read { value: u64, null: bool },
+    /// A value that is not a number: as text (`fmt_value`).
+    ReadText(FmtBuf<VALUE_TEXT>),
     Subscribed { id: u32, max_s: u16 },
     Failed { why: &'static str, status: u8 },
 }
@@ -541,6 +546,16 @@ impl Controller {
                 now,
                 scratch,
             ),
+            Op::SubscribeEvent { ep, cluster, event, min_s, max_s } => self.stack.start_subscribe_events(
+                session,
+                &[],
+                &[EventPath::concrete(EndpointId(ep), ClusterId(cluster), EventId(event))],
+                None,
+                min_s,
+                max_s,
+                now,
+                scratch,
+            ),
             Op::Read { ep, cluster, attr } => self.stack.start_read(
                 session,
                 &[AttributePath::concrete(EndpointId(ep), ClusterId(cluster), AttributeId(attr))],
@@ -653,7 +668,8 @@ impl Controller {
                 for report in self.stack.sub_reports() {
                     let Ok(AttributeReportRef::Data(d)) = report else { continue };
                     let Some(c) = d.path.to_concrete() else { continue };
-                    let (value, null) = first_value(d.value()).unwrap_or((0, false));
+                    let mut value = FmtBuf::<VALUE_TEXT>::new();
+                    fmt_value(d.value(), &mut value);
                     event!(
                         Info,
                         "matter.report",
@@ -662,8 +678,24 @@ impl Controller {
                         ep = c.endpoint.0 as u32,
                         cluster = c.cluster.0,
                         attr = c.attribute.0,
-                        value = value,
-                        null = null
+                        value = value.as_str()
+                    );
+                }
+                for report in self.stack.sub_event_reports() {
+                    let Ok(EventReportRef::Data(d)) = report else { continue };
+                    let mut value = FmtBuf::<VALUE_TEXT>::new();
+                    fmt_value(d.value(), &mut value);
+                    event!(
+                        Info,
+                        "matter.event",
+                        node = node,
+                        id = subscription_id,
+                        ep = d.path.endpoint.map_or(0xFFFF, |e| e.0 as u32),
+                        cluster = d.path.cluster.map_or(0, |c| c.0),
+                        ev = d.path.event.map_or(0, |e| e.0),
+                        number = d.number,
+                        priority = d.priority,
+                        value = value.as_str()
                     );
                 }
                 true
@@ -750,11 +782,11 @@ impl Controller {
                 match (op, ev) {
                     (Op::Invoke { .. } | Op::OpenWindow(_) | Op::Revoke, ImEvent::InvokeDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
                     (Op::Write { .. }, ImEvent::WriteDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
-                    (Op::Subscribe { .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
+                    (Op::Subscribe { .. } | Op::SubscribeEvent { .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
                         self.finish(Outcome::Subscribed { id: subscription_id, max_s: max_interval_s })
                     }
                     (Op::Read { ep, cluster, attr }, ImEvent::ReadDone) => {
-                        let o = self.read_value(ep, cluster, attr).map_or(Outcome::Failed { why: "no value", status: 0 }, |(value, null)| Outcome::Read { value, null });
+                        let o = self.read_value(ep, cluster, attr).unwrap_or(Outcome::Failed { why: "no value", status: 0 });
                         self.finish(o);
                     }
                     (_, ImEvent::Failed { status }) => {
@@ -826,27 +858,101 @@ impl Controller {
         }
     }
 
-    fn read_value(&self, ep: u16, cluster: u32, attr: u32) -> Option<(u64, bool)> {
+    fn read_value(&self, ep: u16, cluster: u32, attr: u32) -> Option<Outcome> {
         for report in self.stack.read_reports() {
             let Ok(AttributeReportRef::Data(d)) = report else { continue };
             let Some(c) = d.path.to_concrete() else { continue };
             if c.endpoint.0 != ep || c.cluster.0 != cluster || c.attribute.0 != attr {
                 continue;
             }
-            return first_value(d.value());
+            if let Some((value, null)) = first_value(d.value()) {
+                return Some(Outcome::Read { value, null });
+            }
+            let mut t = FmtBuf::new();
+            fmt_value(d.value(), &mut t);
+            return Some(Outcome::ReadText(t));
         }
         None
     }
 }
 
-/// An attribute's value as a number (booleans 0 or 1), or null.
+/// An attribute's value as a number (booleans 0 or 1), or null; `None`
+/// for other types (`fmt_value`).
 fn first_value(mut v: simple_matter::tlv::TlvReader<'_>) -> Option<(u64, bool)> {
     let e = v.read_next().ok()??;
-    Some(match e.value {
-        TlvValue::Boolean(b) => (b as u64, false),
-        TlvValue::UnsignedInteger(u) => (u, false),
-        TlvValue::SignedInteger(i) => (i as u64, false),
-        TlvValue::Null => (0, true),
-        _ => (0, false),
-    })
+    match e.value {
+        TlvValue::Boolean(b) => Some((b as u64, false)),
+        TlvValue::UnsignedInteger(u) => Some((u, false)),
+        TlvValue::SignedInteger(i) => Some((i as u64, false)),
+        TlvValue::Null => Some((0, true)),
+        _ => None,
+    }
+}
+
+/// The text of a value (doc/49 §22).
+pub const VALUE_TEXT: usize = 120;
+
+/// A value (its first element) as text: numbers, `true`/`false`, `null`,
+/// `"text"`, `h'hex'` for bytes, `{0: …, 1: …}` for structures, `[…]` for
+/// arrays and lists; two levels deep, cut with `…` where the room ends.
+fn fmt_value(mut v: simple_matter::tlv::TlvReader<'_>, out: &mut FmtBuf<VALUE_TEXT>) {
+    let _ = fmt_element(&mut v, out, 0);
+}
+
+fn fmt_element(r: &mut simple_matter::tlv::TlvReader<'_>, out: &mut FmtBuf<VALUE_TEXT>, depth: u8) -> Option<bool> {
+    use core::fmt::Write as _;
+    let e = r.read_next().ok()??;
+    if matches!(e.value, TlvValue::ContainerEnd) {
+        return Some(false);
+    }
+    if depth > 0 && let TlvTag::ContextSpecific(t) = e.tag {
+        let _ = write!(out, "{t}: ");
+    }
+    match e.value {
+        TlvValue::Boolean(b) => _ = write!(out, "{b}"),
+        TlvValue::UnsignedInteger(u) => _ = write!(out, "{u}"),
+        TlvValue::SignedInteger(i) => _ = write!(out, "{i}"),
+        TlvValue::Float(f) => _ = write!(out, "{f}"),
+        TlvValue::Double(f) => _ = write!(out, "{f}"),
+        TlvValue::Null => _ = write!(out, "null"),
+        TlvValue::Utf8String(t) => _ = write!(out, "{t:?}"),
+        TlvValue::ByteString(b) => {
+            let _ = write!(out, "h'");
+            for x in b.iter().take(16) {
+                let _ = write!(out, "{x:02x}");
+            }
+            let _ = write!(out, "{}'", if b.len() > 16 { "…" } else { "" });
+        }
+        TlvValue::ContainerStart(kind) => {
+            let (open, close) = if matches!(kind, simple_matter::tlv::ContainerType::Structure) { ("{", "}") } else { ("[", "]") };
+            let _ = write!(out, "{open}");
+            let mut first = true;
+            loop {
+                if depth >= 2 {
+                    // Deeper: skipped, but counted out of the container.
+                    let e = r.read_next().ok()??;
+                    if matches!(e.value, TlvValue::ContainerEnd) {
+                        let _ = write!(out, "…{close}");
+                        break;
+                    }
+                    r.skip(&e).ok()?;
+                    continue;
+                }
+                let mark = out.as_str().len();
+                if !first {
+                    let _ = write!(out, ", ");
+                }
+                match fmt_element(r, out, depth + 1)? {
+                    true => first = false,
+                    false => {
+                        out.truncate(mark);
+                        let _ = write!(out, "{close}");
+                        break;
+                    }
+                }
+            }
+        }
+        TlvValue::ContainerEnd => {}
+    }
+    Some(true)
 }

@@ -173,7 +173,7 @@ fn num(s: Option<&str>) -> Option<u64> {
 /// windows, credentials).
 fn grant_for(cmd: &str) -> &'static str {
     match cmd {
-        "status" | "nodes" | "read" | "sub" | "help" | "" => "read",
+        "status" | "nodes" | "read" | "sub" | "subev" | "help" | "" => "read",
         "on" | "off" | "toggle" | "invoke" | "write" => "control",
         _ => "admin",
     }
@@ -298,6 +298,14 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             }
             _ => Err("sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]]"),
         },
+        "subev" => match (num(w.next()), num(w.next()), num(w.next()), num(w.next())) {
+            (Some(node), Some(ep), Some(cl), Some(ev)) => {
+                let min_s = num(w.next()).unwrap_or(0).min(3600) as u16;
+                let max_s = num(w.next()).unwrap_or(60).clamp(min_s.max(1) as u64, 3600) as u16;
+                ctrl.start(node, Op::SubscribeEvent { ep: ep as u16, cluster: cl as u32, event: ev as u32, min_s, max_s }, now)
+            }
+            _ => Err("subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]]"),
+        },
         "ocw" => match num(w.next()) {
             Some(node) => {
                 let secs = num(w.next()).unwrap_or(300).clamp(180, 900) as u16;
@@ -322,7 +330,7 @@ fn request(line: &str, c: &Channel, dev: &Device, ctrl: &mut Controller, ble: &m
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE"),
     };
     match started {
         Ok(()) => true,
@@ -378,8 +386,12 @@ fn outcome(c: &Channel, o: Outcome) {
             }
             true
         }
+        Outcome::ReadText(v) => {
+            let _ = write!(t, "{}", v.as_str());
+            true
+        }
         Outcome::Subscribed { id, max_s } => {
-            let _ = write!(t, "subscribed: id {id}, reports at least every {max_s} s (matter.report)");
+            let _ = write!(t, "subscribed: id {id}, reports at least every {max_s} s (matter.report, matter.event)");
             true
         }
         Outcome::Failed { why, status } => {

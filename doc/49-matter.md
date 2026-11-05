@@ -340,7 +340,7 @@
 - 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。
 - t5emu の試験は、デバイスとコントローラが同じプロセスで同じコア。別の実装（chip-tool など）との相互接続は実機でしか見ていない（PC の smctl と例）。
 - `UDP_WAIT` は、まだ `matter` しか使っていない。
-- §20 の残すこと（fail-safe の間の fabric）。IPv6 のアドレスは §22 で直した。`JOIN` した網の保存は doc/50（設定のサービス `cfg`。CommissioningComplete で保存、fail-safe が先に終われば戻る）。
+- §20 の残すことは §22（IPv6 のアドレス）と §23（fail-safe の間の fabric）で片付けた。`JOIN` した網の保存は doc/50（設定のサービス `cfg`。CommissioningComplete で保存、fail-safe が先に終われば戻る）。
 
 ## 22. ほかの実装との相互接続と、mDNS の直し
 利用者の指示（2026-11-05）:「順に進めてください。」（残りの 1 番目、ほかの実装との相互接続から）
@@ -388,3 +388,29 @@
 - `iotap` の LAN では、有線の PC からの mDNS が Tab5 に届かない（網の機器の都合）。
 - 起動のときに `iotap` へつながるまで約 15 秒（doc/22 §7.2）。
 - 試験の途中で、プローブを使う t5log を一度 2 つ同時に動かした（片方の要求が届かなかっただけで、ファイアウォールなどには触れていない）。
+
+## 23. 残りの続き（2026-11-05）
+§21 の残りと、§22 の後に挙げた残りを、順に片付けた。
+
+- **REVERT（fail-safe が CommissioningComplete の前に終わったとき）**（doc/50 §5）:
+  - smctl の ble-wifi を、`ConnectNetwork` の段まで進んだところで止めた。Tab5 は `matter-test` に移り、CommissioningComplete は来ない。
+  - ArmFailSafe から約 300 秒後に fail-safe が時間切れになり、`wifi.revert ssid=iotap`、`matter.fabric_removed fabrics=1` が出た。13 秒後に `iotap` へつながり、前の網の IPv6 アドレスも捨てた。設定には保存されなかった。
+  - 戻るときの切断で、`matter.wifi_failed reason=49` が 1 回出る（害はない）。
+- **fail-safe の途中で `matter` が起動し直したとき**:
+  - AddNOC で足した fabric の「確定前」の印は、コアの中（`OpCredsCluster::noc_added`）にしかない。一方、fabric の表はそのときに KVS に書かれる。なので起動し直すと、確定前の fabric が確定したものとして残っていた。
+  - 直し: `device.rs` は、fail-safe が張られている間に増えた fabric の番号を、KVS の `t5-pending-fabric` に書く。fail-safe が外れたら消す（CommissioningComplete なら残り、時間切れならコアが消す）。起動のときに残っていれば、その fabric と ACL とグループを消して保存する（`matter.unfinished_fabric_removed`）。起動し直しを fail-safe の終わりとみなす（Core spec §11.10.7.2）。
+  - 実機: smctl の `pairing address` を CASE の段で止め（fabrics=2）、`matter` を起動し直すと、`fabric=2 removed=true`、fabrics=1。fabric 1 の toggle も通った。
+- **購読の値とイベント**:
+  - 値はテキストにした（`fmt_value`）。数、`true`/`false`、`null`、`"文字列"`、`h'16進'`（16 バイトまで）、構造体 `{0: …}`、配列とリスト `[…]`（2 段まで、120 バイトで切る）。
+  - `matter.report` の `value` はこのテキスト。`read` の答えは、数なら今までどおり `N (0xN)`、ほかの型ならテキスト。
+  - 新しい要求 `subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]]`（`start_subscribe_events`）。届いたイベントは `matter.event`（node、id、ep、cluster、ev、number、priority、value）。`mtreq` の OP 17（OnOff の StateChange）と 18（VendorName の読み）。
+  - t5emu の試験に足した。toggle で `matter.event … value={0: true}`、`matter.report … value=true`、`read` で `"tab5-os"`。
+- **Matter の ACL**: コアの `AclTable` に任せている。chip-tool からの読みは §22 で通った。直すべき不具合は見つかっていない。
+- **起動のときから Matter のデバイスとして動く**:
+  - `init` の組み込みのリストを `cfg`、`wifi 1`、`net`、`netctl`、`ble`、`matter`、`font`、`term` にした。SD の `START.CFG` は `run init 1` で書き直した。
+  - 実機の起動: `ble` は `ready:bt` を 3.4 秒待ち、`matter` は `svc:net` を待ってから起動した。
+- **起動のときの `iotap` への接続**（doc/22 §7.2）:
+  - 起動のたびに 202 → 205 → 成功（`wifi` を起動し直したときは 1 回目でつながる）。`sae_pwe_h2e` を BOTH にしても変わらなかった（戻した）。
+  - 推測: 再起動で C6 は切断を送らずに消えるので、AP に前の接続が残っていて、最初の 2 回はそれで断られる。
+  - `wifi` は、切れた直後の 2 回は 1 秒後につなぎ直す（その後は 5 秒ごと）。起動から接続まで 21.1 秒 → 13.1 秒（設定から 14.6 秒 → 6.6 秒）。
+- **PC から C6 への BLE の接続の失敗**（doc/48 §9）: `wifi 5`（BT だけ、Wi-Fi を `Req_WifiStop` で止める）で `bleecho` に 10 回つないで 6/10。Wi-Fi ありの 7〜8 割と変わらない。Wi-Fi との無線の共存は原因ではない。これ以上は無線を捉える道具（スニファ）が要る。

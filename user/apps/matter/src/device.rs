@@ -14,6 +14,7 @@ use mtport::KernelRng;
 
 use crate::store::Store;
 use crate::wifilink::TabWifi;
+use simple_matter::kvs::Kvs as _;
 use simple_matter::acl::{AclHandle, AclTable};
 use simple_matter::btp::AdvData;
 use simple_matter::btp::gatt::ADV_TOTAL_LEN;
@@ -36,6 +37,8 @@ use simple_matter::tlv::TlvTag;
 use simple_matter::transport::net::PeerAddr;
 use t5_rt::event;
 
+/// The store's key for a fabric not yet confirmed by CommissioningComplete.
+const PENDING_KEY: &[u8] = b"t5-pending-fabric";
 /// Fabrics, ACL entries (5 fabrics × 4).
 const NF: usize = 5;
 const NACL: usize = 20;
@@ -227,6 +230,12 @@ pub struct Device {
     last_group_gen: u32,
     last_resumption_gen: u32,
     last_fabric_count: usize,
+    /// The fabric AddNOC added while the fail-safe is armed, until
+    /// CommissioningComplete or the fail-safe's end; kept in the store too,
+    /// so a restart meanwhile removes it (doc/49 §22.3).
+    pending_fabric: Option<NonZeroU8>,
+    /// The fabric indices last seen.
+    known: [bool; 256],
     last_on: bool,
 }
 
@@ -313,9 +322,66 @@ impl Device {
             ipv6_ll: None,
             boot_window_open: count == 0,
             last_fabric_count: count,
+            pending_fabric: None,
+            known: [false; 256],
         }) };
+        d.drop_unfinished_fabric();
+        d.known = d.fabric_indices();
         d.rebuild_mdns(now);
         Ok(d)
+    }
+
+    /// Which fabric indices exist.
+    fn fabric_indices(&self) -> [bool; 256] {
+        let mut k = [false; 256];
+        for f in self.o.fabrics.borrow().iter() {
+            k[f.fabric_index().get() as usize] = true;
+        }
+        k
+    }
+
+    /// A fabric left unfinished by a restart during the fail-safe: the
+    /// restart counts as the fail-safe's end (Core spec §11.10.7.2), so it
+    /// goes, with its access control entries and groups.
+    fn drop_unfinished_fabric(&mut self) {
+        let mut v = [0u8; 1];
+        let found = self.kvs.borrow_mut().get(PENDING_KEY, &mut v);
+        let Ok(Some(1)) = found else { return };
+        if let Some(idx) = NonZeroU8::new(v[0]) {
+            let removed = self.o.fabrics.borrow_mut().remove(idx).is_ok();
+            self.o.acl.borrow_mut().clear_fabric(idx);
+            self.o.groups.borrow_mut().clear_fabric(idx);
+            let mut kvs = self.kvs.borrow_mut();
+            let saved = self.o.fabrics.borrow().save_to(&mut *kvs).and(self.o.acl.borrow().save_to(&mut *kvs)).and(self.o.groups.borrow().save_to(&mut *kvs));
+            drop(kvs);
+            event!(Warn, "matter.unfinished_fabric_removed", fabric = idx.get() as u32, removed = removed, saved = saved.is_ok());
+            self.last_fabric_gen = self.o.fabrics.borrow().generation();
+            self.last_group_gen = self.o.groups.borrow().generation();
+            self.last_fabric_count = self.fabrics();
+        }
+        let _ = self.kvs.borrow_mut().remove(PENDING_KEY);
+    }
+
+    /// After a change of the fabrics: a new one while the fail-safe is
+    /// armed is pending until it ends.
+    fn track_pending(&mut self) {
+        let now = self.fabric_indices();
+        let armed = self.stack.device().gc.fail_safe().is_armed();
+        if armed && let Some(i) = (1..256).find(|&i| now[i] && !self.known[i]) {
+            let idx = NonZeroU8::new(i as u8).unwrap();
+            self.pending_fabric = Some(idx);
+            let _ = self.kvs.borrow_mut().set(PENDING_KEY, &[idx.get()]);
+        }
+        self.known = now;
+    }
+
+    /// The pending fabric is settled once the fail-safe is off: kept after
+    /// CommissioningComplete, removed by the core when it expired.
+    fn settle_pending(&mut self) {
+        if self.pending_fabric.is_some() && !self.stack.device().gc.fail_safe().is_armed() {
+            self.pending_fabric = None;
+            let _ = self.kvs.borrow_mut().remove(PENDING_KEY);
+        }
     }
 
     pub fn fabrics(&self) -> usize {
@@ -438,6 +504,7 @@ impl Device {
     /// saving what changed, the advertisements, the commissioning window.
     pub fn housekeep(&mut self, now: u64, mut changed: impl FnMut(Change)) {
         self.stack.device_mut().net.update_from_driver();
+        self.settle_pending();
         let on = self.on();
         if on != self.last_on {
             self.last_on = on;
@@ -460,6 +527,7 @@ impl Device {
             }
             self.refresh_operational();
             self.mdns.notify_change(now);
+            self.track_pending();
             let count = self.fabrics();
             if count > self.last_fabric_count {
                 changed(Change::Commissioned(count));

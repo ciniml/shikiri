@@ -38,6 +38,7 @@ const REQ_GET_MAC: u32 = 257;
 const REQ_SET_MODE: u32 = 260;
 const REQ_WIFI_INIT: u32 = 278;
 const REQ_WIFI_START: u32 = 280;
+const REQ_WIFI_STOP: u32 = 281;
 const REQ_WIFI_CONNECT: u32 = 282;
 const REQ_WIFI_DISCONNECT: u32 = 283;
 const REQ_WIFI_SET_CONFIG: u32 = 284;
@@ -81,6 +82,8 @@ const RESPONSE_NS: u64 = 5_000_000_000;
 const JOIN_NS: u64 = 20_000_000_000;
 /// The mark `ble` needs (doc/51 §3).
 const BT_READY: &str = "ready:bt";
+/// Retries 1 s after a disconnection before waiting 5 s.
+const QUICK_RETRIES: u32 = 2;
 /// How long to wait for the settings service at start.
 const CFG_MS: u64 = 3000;
 /// wifi_err_reason_t WIFI_REASON_ASSOC_LEAVE: the station left (our own
@@ -94,9 +97,10 @@ const EP_REQUEST: &[u8] = b"RPCRsp";
 
 /// `arg0` bit 0: also start the Bluetooth controller on the chip (doc/48);
 /// bit 1: leave the chip's modem sleep on (BLE gets more of the radio,
-/// Wi-Fi answers later; doc/48 §9).
+/// Wi-Fi answers later; doc/48 §9); bit 2: no Wi-Fi at all, only Bluetooth
+/// (to compare BLE without Wi-Fi sharing the radio, doc/48 §9).
 fn main(arg0: usize, _: usize) -> usize {
-    match run(arg0 & 1 != 0, arg0 & 2 != 0) {
+    match run(arg0 & 1 != 0, arg0 & 2 != 0, arg0 & 4 != 0) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "wifi.failed", step = step);
@@ -381,7 +385,7 @@ impl Rpc {
     }
 }
 
-fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
+fn run(bluetooth: bool, modem_sleep: bool, no_wifi: bool) -> Result<(), u32> {
     let ctl = Handle::open(wlan::CTL, rights::READ | rights::WRITE | rights::WAIT | rights::CTL).map_err(|_| 1u32)?;
     let mut rpc = Rpc { ctl, uid: 0, buf: [0; wlan::MSG_MAX], ssid: [0; wifi::SSID_MAX], ssid_len: 0, connected: false, reason: 0, last: [0; wifi::SSID_MAX], last_len: usize::MAX, last_err: 0 };
     // The settings' network, else the built-in one.
@@ -400,6 +404,15 @@ fn run(bluetooth: bool, modem_sleep: bool) -> Result<(), u32> {
     }
     // Held for the process's life: the mark goes down when it ends.
     let _bt_ready = if bluetooth && start_bluetooth(&mut rpc) { Handle::open(BT_READY, rights::CTL).ok() } else { None };
+    if no_wifi {
+        // The chip may still run an earlier `wifi`'s station: stop it.
+        let _ = rpc.call(REQ_WIFI_DISCONNECT, 1, |_| {});
+        let stopped = rpc.call(REQ_WIFI_STOP, 1, |_| {}).is_ok();
+        event!(Warn, "wifi.off", stopped = stopped);
+        loop {
+            sleep_ms(60_000);
+        }
+    }
 
     // The chip keeps the network it is given in its NVS unless told not to
     // (doc/51 §1). The first time, clear what it kept (with the NVS on, so
@@ -564,6 +577,11 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
     // Its grants (doc/52 §3.3).
     let mut grants = Grants::NONE;
     let mut retry_at: Option<u64> = None;
+    // Disconnections since the last connection: the first retries come
+    // sooner. After a reset the access point may still hold the chip's
+    // last association (it left without a word): at boot `iotap` refused
+    // the first two tries every time (reasons 202, 205, doc/49 §22).
+    let mut failures = 0u32;
     // A client's JOIN, until it associates or fails.
     let mut joining: Option<u64> = None;
     // The network of the last JOIN, until it is saved or left.
@@ -598,7 +616,9 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
                 Ok(m) if m.kind == EVENT => match rpc.on_event(&m) {
                     Some(false) => {
                         if rpc.ssid_len > 0 {
-                            retry_at = Some(time_ns() + 5_000_000_000);
+                            failures += 1;
+                            let wait_ns = if failures <= QUICK_RETRIES { 1_000_000_000 } else { 5_000_000_000 };
+                            retry_at = Some(time_ns() + wait_ns);
                         }
                         // Our own leaving (before a JOIN) is not a failure.
                         if joining.is_some() && rpc.reason != REASON_ASSOC_LEAVE {
@@ -608,6 +628,7 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
                     }
                     Some(true) => {
                         retry_at = None;
+                        failures = 0;
                         renew(rpc);
                         if joining.take().is_some() {
                             let mut m = [0u8; 2 + wifi::SSID_MAX];
