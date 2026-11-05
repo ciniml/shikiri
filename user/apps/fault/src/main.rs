@@ -26,6 +26,12 @@ pub const MODE_BAD_LOG: usize = 5;
 /// lists nothing) and names in memory the process may not read (exit 0 if
 /// both are refused).
 pub const MODE_OPEN_DENIED: usize = 6;
+/// An app-key process holds at most 8 channels (doc/56 §2): the ninth of
+/// `chan:q1`..`chan:q9` is refused with `Limit` (exit 0 if so).
+pub const MODE_LIMITS: usize = 7;
+/// `permit_drop` (doc/56 §4): `chan:q1` opens, then not once dropped;
+/// `chan:q` drops nothing, `chan:q2` stays (exit 0 if all hold).
+pub const MODE_DROP: usize = 8;
 
 fn main(mode: usize, addr: usize) -> usize {
     event!(Info, "fault.start", mode = mode, addr = Addr(addr as u32));
@@ -47,10 +53,43 @@ fn main(mode: usize, addr: usize) -> usize {
             }
             MODE_BAD_LOG => return bad_log(addr),
             MODE_OPEN_DENIED => return open_denied(addr),
+            MODE_LIMITS => return limits(),
+            MODE_DROP => return drop_permit(),
             _ => {}
         }
     }
     if mode == MODE_OK { 0 } else { 1 }
+}
+
+fn limits() -> usize {
+    use t5_rt::{Channel, Error};
+    const NAMES: [&str; 9] = ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9"];
+    let mut held = [const { None }; 9];
+    let mut first_err = None;
+    for (i, n) in NAMES.iter().enumerate() {
+        match Channel::open(n) {
+            Ok(c) => held[i] = Some(c),
+            Err(e) => {
+                first_err = Some((i, e));
+                break;
+            }
+        }
+    }
+    let ok = first_err == Some((8, Error::Limit));
+    event!(Info, "fault.limits", opened = held.iter().flatten().count() as u32, limited = ok);
+    if ok { 0 } else { 1 }
+}
+
+fn drop_permit() -> usize {
+    use t5_rt::{Channel, Error, permit_drop};
+    let opened = Channel::open("q1").is_ok();
+    let none = permit_drop("chan:q") == Ok(0);
+    let one = permit_drop("chan:q1") == Ok(1);
+    let denied = Channel::open("q1").err() == Some(Error::Denied);
+    let again = permit_drop("chan:q1") == Ok(0);
+    let other = Channel::open("q2").is_ok();
+    event!(Info, "fault.permit_drop", opened = opened, none = none, one = one, denied = denied, again = again, other = other);
+    if opened && none && one && denied && again && other { 0 } else { 1 }
 }
 
 /// `kernel_addr` is memory the process may not read.

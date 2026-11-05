@@ -52,6 +52,9 @@ pub struct Loaded {
     pub permissions: &'static [u8],
     /// The text runs from flash where it lies.
     pub xip: bool,
+    /// Signed with a system key (doc/52 §4): no per-process limits
+    /// (doc/56 §2).
+    pub system: bool,
 }
 
 fn align_up(v: usize, a: usize) -> usize {
@@ -198,6 +201,7 @@ pub unsafe fn load(bytes: &'static [u8], slot: &Slot) -> Result<Loaded, LoadErro
         stack_top: text + data_link_end + stack_size,
         build_id: info.build_id,
         permissions: info.permissions,
+        system,
         xip: info.xip_data.is_some(),
     })
 }

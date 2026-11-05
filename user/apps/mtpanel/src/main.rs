@@ -8,13 +8,15 @@
 //!
 //! `display` has one owner (doc/17 §6), usually `term`: stop it first.
 //! Built with `--permit display --permit touch --permit
-//! svc:matter/endpoint --permit svc:matter/read`. Exit 0, or the step that
-//! failed (1: the display is someone else's).
+//! svc:matter/endpoint --permit svc:matter/read`; once its endpoint is
+//! there it gives up `display`, `touch` and `svc:matter/endpoint` (doc/56
+//! §4): it keeps what it opened, and can open nothing new but `eps`. Exit
+//! 0, or the step that failed (1: the display is someone else's).
 
 use core::fmt::Write as _;
 
 use t5_rt::log::FmtBuf;
-use t5_rt::{Channel, Display, Error, Point, Touch, chan, event, matter, rgb, time_ns, touch, wait};
+use t5_rt::{Channel, Display, Error, Point, Touch, chan, event, matter, permit_drop, rgb, time_ns, touch, wait};
 
 t5_rt::entry!(main);
 
@@ -170,6 +172,9 @@ fn run(seconds: u64) -> Result<(), u32> {
             }
             _ => {}
         }
+    }
+    for permit in ["display", "touch", "svc:matter/endpoint"] {
+        let _ = permit_drop(permit);
     }
     event!(Info, "mtpanel.ready", ep = p.ep as u32);
     refresh(&mut p);

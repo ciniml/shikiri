@@ -115,7 +115,7 @@ impl Object {
             n if n == kbd::NAME.as_bytes() => Ok((Object::Kbd(crate::kbd::KbdHandle::open()?), rights::READ | rights::WAIT)),
             n if n == spawn::NAME.as_bytes() => {
                 let any = crate::ident::get(pid).is_some_and(|e| t5_abi::t5a::permits_all(e.permissions(), n));
-                Ok((Object::Spawn(crate::spawn::SpawnHandle { pid, any }), rights::WRITE))
+                Ok((Object::Spawn(crate::spawn::SpawnHandle { pid, any, restart: false }), rights::WRITE | rights::CTL))
             }
             n if n == proc::LIST.as_bytes() => Ok((Object::List(crate::procinfo::ListHandle::open(false)), rights::READ)),
             n if n == proc::APPS.as_bytes() => Ok((Object::List(crate::procinfo::ListHandle::open(true)), rights::READ)),
@@ -278,7 +278,8 @@ impl Table {
             Object::WlanCtl(c) => c.ctl(op, arg),
             Object::WlanDev(d) => d.ctl(op, arg),
             Object::CfgFlash(f) => f.ctl(op, arg),
-            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Spawn(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
+            Object::Spawn(s) => s.ctl(op, arg),
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
                 Err(Error::NoSupport)
             }
         }

@@ -24,6 +24,13 @@ const MAX_LISTENERS: usize = 16;
 const MAX_LISTENERS: usize = 8;
 const MAX_NAME: usize = t5_abi::t5a::MAX_NAME;
 
+/// Limits on processes signed with an app key (doc/56 §2): channels each
+/// may hold an end of, connections to one service, and channels all of
+/// them together (the rest stays for the system's services).
+const APP_CHANNELS: usize = 8;
+const APP_PER_SERVICE: usize = 2;
+const APP_TOTAL: usize = MAX_CHANNELS / 2;
+
 /// The messages queued for one end.
 struct Queue {
     len: [u16; chan::QUEUE],
@@ -90,12 +97,44 @@ pub struct End {
     end: usize,
 }
 
+/// Whether `pid` holds an end of `c` (or waits to be accepted as its client).
+fn holds(c: &Channel, pid: u32) -> bool {
+    c.holder.contains(&Some(pid))
+}
+
+/// Whether `pid` may hold one more channel (to `service`, for a
+/// connection): processes signed with a system key are not limited.
+fn within_limits(pid: u32, service: Option<&[u8]>) -> Result<(), Error> {
+    if crate::ident::get(pid).is_none_or(|e| e.system) {
+        return Ok(());
+    }
+    let cs = channels();
+    let app = |p: Option<u32>| p.is_some_and(|p| crate::ident::get(p).is_some_and(|e| !e.system));
+    let mine = cs.iter().filter(|c| holds(c, pid)).count();
+    let apps = cs.iter().filter(|c| c.name_len > 0 && c.holder.iter().any(|&h| app(h))).count();
+    let to_service = service.map_or(0, |n| {
+        cs.iter().filter(|c| c.service && c.holder[1] == Some(pid) && &c.name[..c.name_len] == n).count()
+    });
+    let why = if mine >= APP_CHANNELS {
+        "channels"
+    } else if apps >= APP_TOTAL {
+        "all apps' channels"
+    } else if to_service >= APP_PER_SERVICE {
+        "connections to the service"
+    } else {
+        return Ok(());
+    };
+    event!(Warn, "chan.limit", pid = pid, name = core::str::from_utf8(service.unwrap_or(b"")).unwrap_or("?"), limit = why, held = mine as u32);
+    Err(Error::Limit)
+}
+
 /// Joins the channel `name` (without the `chan:` prefix) for process `pid`:
 /// a free end of an existing channel, or end A of a new one.
 pub fn open(name: &[u8], pid: u32) -> Result<End, Error> {
     if name.is_empty() || name.len() > MAX_NAME {
         return Err(Error::Invalid);
     }
+    within_limits(pid, None)?;
     let cs = channels();
     let ch = match cs.iter().position(|c| c.name_len > 0 && !c.service && &c.name[..c.name_len] == name) {
         Some(i) => i,
@@ -268,6 +307,7 @@ pub fn listen(name: &[u8], pid: u32) -> Result<Listener, Error> {
 
 /// `open("svc:NAME")`: a new channel to the listener; the caller gets end B.
 pub fn connect(name: &[u8], pid: u32) -> Result<End, Error> {
+    within_limits(pid, Some(name))?;
     let ls = listeners();
     let l = ls.iter_mut().flatten().find(|l| &l.name[..l.name_len] == name).ok_or(Error::Off)?;
     let slot = l.pending.iter().position(Option::is_none).ok_or(Error::Busy)?;

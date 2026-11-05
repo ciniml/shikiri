@@ -1203,6 +1203,13 @@ pub fn sleep_ms(ms: u64) {
     sleep_ns(ms * 1_000_000)
 }
 
+/// Gives up `entry` and every `entry/GRANT` of this process's permissions
+/// for good (doc/56 §4); how many entries went. What is open stays open.
+pub fn permit_drop(entry: &str) -> Result<usize, Error> {
+    let (ret, v) = unsafe { syscall4(sys::PERMIT_DROP, [entry.as_ptr() as usize, entry.len(), 0, 0]) };
+    result(ret, v).map(|v| v[0])
+}
+
 /// Monotonic time since boot in nanoseconds.
 pub fn time_ns() -> u64 {
     let (_, lo, hi) = unsafe { syscall2(sys::TIME, 0, 0) };

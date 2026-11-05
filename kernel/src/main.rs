@@ -35,6 +35,7 @@ mod shm;
 mod smp;
 mod spawn;
 mod store;
+mod supervise;
 mod time;
 
 use arch::riscv32::csr::{cause, read_csr};
@@ -117,6 +118,8 @@ const MODE_EXEC_DATA: usize = 3;
 const MODE_STORE_TEXT: usize = 4;
 const MODE_BAD_LOG: usize = 5;
 const MODE_OPEN_DENIED: usize = 6;
+const MODE_LIMITS: usize = 7;
+const MODE_DROP: usize = 8;
 
 /// `rngdump` (doc/47 §5): 16 Mbit, sixteen of NIST SP 800-22's 1 Mbit
 /// sequences.
@@ -278,7 +281,13 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
             kbd::poll();
             touch_log.poll();
             screen::poll();
+            // Before the slots are freed: the watched ones that ended.
+            let now = Current::now();
+            for (pid, exit) in s.reapable() {
+                supervise::exited(pid, exit, now);
+            }
             s.reap();
+            restart_due(s, store);
             // A few frames per poll, so an install (one frame per 256 B,
             // some with a sector erase) does not stop the apps meanwhile.
             let mut frame = [0u8; t5_abi::ctl::MAX_COMMAND];
@@ -298,9 +307,12 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
 /// Starts the apps processes asked for through `proc:spawn` (doc/38).
 fn spawn_requested(s: &mut sched::Scheduler, store: &store::Store) {
     while let Some(r) = spawn::take() {
-        match request_start(s, store, Some(r.by), r.name(), r.arg0, r.arg1) {
+        match request_start(s, store, Some(r.by), r.name(), r.arg0, r.arg1, r.restart) {
             Ok(Some(pid)) => {
                 ident::set_parent(pid, r.by);
+                if r.restart {
+                    supervise::started(r.name(), r.arg0, r.arg1, r.by, pid, Current::now());
+                }
                 event!(Info, "proc.spawned", by = r.by, name = r.name(), pid = pid)
             }
             Ok(None) => {}
@@ -313,11 +325,17 @@ fn spawn_requested(s: &mut sched::Scheduler, store: &store::Store) {
         let by = w.by.unwrap_or(0);
         if let Some(need) = miss {
             event!(Warn, "proc.needs_timeout", by = by, name = w.name(), needs = core::str::from_utf8(need).unwrap_or("?"));
+            if w.restart {
+                supervise::forget(w.name(), by);
+            }
             continue;
         }
         match start(s, store, w.name(), w.arg0, w.arg1) {
             Ok(pid) => {
                 ident::set_parent(pid, by);
+                if w.restart {
+                    supervise::started(w.name(), w.arg0, w.arg1, by, pid, now);
+                }
                 event!(Info, "proc.spawned", by = by, name = w.name(), pid = pid)
             }
             Err(why) => event!(Warn, "proc.spawn_failed", by = by, name = w.name(), error = why),
@@ -327,11 +345,26 @@ fn spawn_requested(s: &mut sched::Scheduler, store: &store::Store) {
 
 /// Starts `name` now, or holds it until what its image needs is there
 /// (`Ok(None)`, doc/51 §3). `by`: the pid that asked, `None` for the host.
-fn request_start(s: &mut sched::Scheduler, store: &store::Store, by: Option<u32>, name: &str, arg0: u32, arg1: u32) -> Result<Option<u32>, &'static str> {
+fn request_start(s: &mut sched::Scheduler, store: &store::Store, by: Option<u32>, name: &str, arg0: u32, arg1: u32, restart: bool) -> Result<Option<u32>, &'static str> {
     let image = store.image(name).ok_or("no such app")?;
     match needs::missing(needs::of_image(image)) {
-        Some(need) => needs::defer(by, name, arg0, arg1, need, Current::now()).map(|_| None),
+        Some(need) => needs::defer(by, name, arg0, arg1, restart, need, Current::now()).map(|_| None),
         None => start(s, store, name, arg0, arg1).map(Some),
+    }
+}
+
+/// Starts again the watched apps whose restart is due (doc/56 §3).
+fn restart_due(s: &mut sched::Scheduler, store: &store::Store) {
+    let now = Current::now();
+    while let Some((name, arg0, arg1, by)) = supervise::due(now) {
+        let r = request_start(s, store, Some(by), name, arg0, arg1, true);
+        if let Ok(Some(pid)) = r {
+            ident::set_parent(pid, by);
+        }
+        if let Err(why) = r {
+            event!(Warn, "proc.spawn_failed", by = by, name = name, error = why);
+        }
+        supervise::restarted(name, r.ok(), now);
     }
 }
 
@@ -511,7 +544,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
             event!(Info, "kernel.stack", size = size, used = used);
             Ok(n)
         }
-        Command::Run { name, arg0, arg1 } => request_start(s, store, None, name, arg0, arg1).map(|pid| pid.unwrap_or(0)),
+        Command::Run { name, arg0, arg1 } => request_start(s, store, None, name, arg0, arg1, false).map(|pid| pid.unwrap_or(0)),
         Command::Kill { pid } => {
             if s.kill(pid) {
                 Ok(pid)
@@ -709,7 +742,7 @@ fn selftest_m1(apps: &Apps) -> u32 {
     unsafe { core::ptr::write_volatile(kernel_ram as *mut u32, 0xC0FFEE) };
     // Another process's memory (doc/52 §6): the next slot.
     let other_slot = slot(1).0;
-    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 13] = [
+    let cases: [(&'static str, &'static [u8], usize, usize, Exit); 15] = [
         ("hello", apps.hello, 0, 0, Exit::Code(0)),
         ("fault/ok", apps.fault, MODE_OK, 0, Exit::Code(0)),
         ("fault/load-mmio", apps.fault, MODE_LOAD, Current::PROTECTED_MMIO, fault(cause::LOAD_ACCESS)),
@@ -723,10 +756,20 @@ fn selftest_m1(apps: &Apps) -> u32 {
         ("fault/store-text", apps.fault, MODE_STORE_TEXT, 0, fault(cause::STORE_ACCESS)),
         ("fault/bad-log", apps.fault, MODE_BAD_LOG, kernel_addr, Exit::Code(0)),
         ("fault/open-denied", apps.fault, MODE_OPEN_DENIED, kernel_addr, Exit::Code(0)),
+        // Per-process limits and giving up permissions (doc/56).
+        ("fault/limits", apps.fault, MODE_LIMITS, 0, Exit::Code(0)),
+        ("fault/permit-drop", apps.fault, MODE_DROP, 0, Exit::Code(0)),
     ];
 
     let mut failures = 0;
+    // The store's `fault` may predate the modes for doc/56 (ABI minor 20):
+    // a new kernel is checked before the apps are installed for it.
+    let fault_abi = t5_abi::t5a::split_signed(apps.fault).ok().and_then(|s| t5_abi::t5a::parse_any_abi(s.message).ok()).map_or((0, 0), |i| i.info.abi);
     for (name, image, arg0, arg1, expected) in cases {
+        if matches!(arg0, MODE_LIMITS | MODE_DROP) && image.as_ptr() == apps.fault.as_ptr() && fault_abi.1 < 20 {
+            event!(Warn, "selftest.skipped", part = name, reason = "the store's fault is older than ABI 0.20");
+            continue;
+        }
         // One process at a time, so each reuses slot 0.
         let Some(p) = load(name, image, 0, arg0, arg1) else {
             failures += 1;

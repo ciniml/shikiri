@@ -150,6 +150,14 @@ impl Scheduler {
         false
     }
 
+    /// The processes `reap` will free now: (pid, how it ended).
+    pub fn reapable(&self) -> impl Iterator<Item = (u32, Exit)> + '_ {
+        (0..MAX_PROCS).filter(|&i| self.on_core[i] == NONE).filter_map(|i| {
+            let p = self.slots[i].as_ref()?;
+            Some((p.pid, p.exit()?))
+        })
+    }
+
     /// Frees the slots of processes that have exited (and no core runs).
     pub fn reap(&mut self) {
         for i in 0..MAX_PROCS {

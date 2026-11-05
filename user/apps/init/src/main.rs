@@ -6,13 +6,16 @@
 //! - 0: the list in `T5OS/START.CFG` on the SD card (through `svc:fs`), or
 //!   the built-in one if the file cannot be read;
 //! - 1: writes the built-in list to `T5OS/START.CFG` (to start from);
-//! - 2: the test list (t5emu): an app and one that is not in the store;
+//! - 2: the test list (t5emu): an app, one that is not in the store and
+//!   one that fails (the kernel starts it again and gives up, doc/56 §3);
 //!   then checks that the kernel refuses a name longer than the store's.
 //!
 //! A line of the list is `NAME [ARG0 [ARG1]]` (decimal or 0x hex); `#`
 //! starts a comment. Each app is started through `proc:spawn`: the kernel
 //! starts it with its own permissions and logs `proc.spawned` or
-//! `proc.spawn_failed`.
+//! `proc.spawn_failed`. The apps of the list are watched: one that faults
+//! or ends with a code other than 0 is started again (`spawn::RESTART`,
+//! doc/56 §3).
 //!
 //! The kernel autostarts `fs` and `init` (doc/30 §5). Built with `--permit
 //! proc:spawn --permit svc:fs`. Exit 0, or the step that failed.
@@ -44,6 +47,8 @@ const TEST_LIST: &str = "\
 # The test list (run init 2).
 hello 0 0x0
 no-such-app
+# Ends with 3 each time: started again, then given up.
+hello 3
 ";
 
 fn main(mode: usize, _: usize) -> usize {
@@ -119,7 +124,8 @@ fn write_file() -> Result<u32, u32> {
 
 /// Asks for each app of `list` in order; returns how many were queued.
 fn start(list: &str) -> Result<u32, u32> {
-    let h = Handle::open(spawn::NAME, rights::WRITE).map_err(|_| 2u32)?;
+    let h = Handle::open(spawn::NAME, rights::WRITE | rights::CTL).map_err(|_| 2u32)?;
+    h.ctl(spawn::RESTART, 1).map_err(|_| 2u32)?;
     let mut queued = 0;
     for (i, line) in list.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();

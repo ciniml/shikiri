@@ -6,12 +6,14 @@
 //! compares, creates and deletes `~/DEL.TXT`, and lists `~`. Then checks
 //! that the rest of the card is refused: the root's listing, reading
 //! `T5OS/START.CFG`, making `T5OS/OTHER`, and `..` out of its folder.
+//! And that a third connection to `fs` at once is refused (`Limit`, doc/56
+//! §2).
 //!
 //! Built with `--permit svc:fs` (no grants) and the app key. Exit 0 if
 //! everything held, otherwise the number of the failed check.
 
 use t5_rt::fs::{flag, status};
-use t5_rt::{Files, FsError, event, sleep_ms, time_ns};
+use t5_rt::{Channel, Error, Files, FsError, event, fs as fsabi, sleep_ms, time_ns};
 
 t5_rt::entry!(main);
 
@@ -108,6 +110,13 @@ fn run(kib: usize) -> Result<(), u32> {
         return Err(22);
     }
     event!(Info, "fstest.denied_ok");
+    // Two connections to a service at once, not three (doc/56 §2).
+    let second = Channel::connect(fsabi::SERVICE).map_err(|_| 23u32)?;
+    if Channel::connect(fsabi::SERVICE).err() != Some(Error::Limit) {
+        return Err(24);
+    }
+    drop(second);
+    event!(Info, "fstest.limit_ok");
     event!(Info, "fstest.done", bytes = len as u32, write_ms = write_ms as u32, read_ms = read_ms as u32);
     Ok(())
 }

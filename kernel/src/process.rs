@@ -90,7 +90,7 @@ impl Process {
         );
         // Who it is, for `open` and for servers (doc/52 §3.2). The loader
         // refused permissions too long to copy.
-        if let Err(why) = crate::ident::add(pid, name.as_bytes(), loaded.permissions) {
+        if let Err(why) = crate::ident::add(pid, name.as_bytes(), loaded.permissions, loaded.system) {
             event!(Error, "proc.ident_failed", pid = pid, error = why);
         }
         Process {
@@ -169,6 +169,7 @@ impl Process {
             }
             sys::LOG_EMIT => self.log_emit(a0, a1).map(|_| [0, 0, 0]),
             sys::LOG_LEVEL => Ok([log::KEEP as usize, 0, 0]),
+            sys::PERMIT_DROP => self.permit_drop(a0, a1).map(|n| [n, 0, 0]),
             sys::OPEN => self.open(a0, a1, a2).map(|h| [h, 0, 0]),
             sys::CLOSE => {
                 if let Some(i) = self.shm_mapped.iter().position(|&m| m == Some(a0)) {
@@ -282,6 +283,23 @@ impl Process {
             event!(Warn, "proc.denied", pid = self.pid, name = core::str::from_utf8(name).unwrap_or("?"));
         }
         r
+    }
+
+    /// `permit_drop` (doc/56 §4): gives up a permission for good.
+    fn permit_drop(&mut self, ptr: usize, len: usize) -> Result<usize, Error> {
+        if len == 0 || len > t5_abi::chan::GRANTS_MAX {
+            return Err(Error::Size);
+        }
+        self.check_user_range(ptr, len, false)?;
+        let mut entry = [0u8; t5_abi::chan::GRANTS_MAX];
+        unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, entry.as_mut_ptr(), len) };
+        let entry = &entry[..len];
+        if entry.contains(&0) {
+            return Err(Error::Invalid);
+        }
+        let n = crate::ident::drop_permit(self.pid, entry);
+        event!(Info, "proc.permit_dropped", pid = self.pid, permit = core::str::from_utf8(entry).unwrap_or("?"), entries = n as u32);
+        Ok(n)
     }
 
     /// `ctl(channel, PEER_*)` (doc/52 §3.2): who is at the other end of a

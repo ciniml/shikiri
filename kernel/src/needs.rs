@@ -100,6 +100,8 @@ pub struct Waiting {
     len: usize,
     pub arg0: u32,
     pub arg1: u32,
+    /// Watched once started (doc/56 §3).
+    pub restart: bool,
     since: u64,
 }
 
@@ -116,13 +118,13 @@ fn waiting() -> &'static mut [Option<Waiting>; WAITING] {
 }
 
 /// Holds a start until `need` (the first missing) and the rest are there.
-pub fn defer(by: Option<u32>, name: &str, arg0: u32, arg1: u32, need: &[u8], now: u64) -> Result<(), &'static str> {
+pub fn defer(by: Option<u32>, name: &str, arg0: u32, arg1: u32, restart: bool, need: &[u8], now: u64) -> Result<(), &'static str> {
     if name.len() > t5a::MAX_NAME {
         return Err("name too long");
     }
     let w = waiting();
     let slot = w.iter_mut().find(|s| s.is_none()).ok_or("too many starts waiting")?;
-    let mut e = Waiting { by, name: [0; t5a::MAX_NAME], len: name.len(), arg0, arg1, since: now };
+    let mut e = Waiting { by, name: [0; t5a::MAX_NAME], len: name.len(), arg0, arg1, restart, since: now };
     e.name[..name.len()].copy_from_slice(name.as_bytes());
     *slot = Some(e);
     event!(Info, "proc.waiting", name = name, needs = core::str::from_utf8(need).unwrap_or("?"));

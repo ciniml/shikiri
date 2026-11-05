@@ -32,8 +32,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// (doc/38): `proc:spawn`. Minor 15 (doc/39): `kbd`. Minor 16 (doc/40):
 /// `proc:list`, `proc:apps`, `proc:kill`. Minor 17 (doc/44): the display's
 /// 2D requests (`write`, `display::DONE`). Minor 18 (doc/46): `random`.
-/// Minor 19 (doc/48): `bt:hci`.
-pub const ABI_MINOR: u16 = 19;
+/// Minor 19 (doc/48): `bt:hci`. Minor 20 (doc/56): `permit_drop`,
+/// `Error::Limit`, `spawn::RESTART`.
+pub const ABI_MINOR: u16 = 20;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -52,6 +53,11 @@ pub mod sys {
     /// Returns the lowest level (a1) the kernel currently keeps, so apps can
     /// skip building events that would be dropped.
     pub const LOG_LEVEL: usize = 0x006;
+    /// a0/a1 = a permission (UTF-8, doc/56 §4): removes it, and every
+    /// `NAME/GRANT` under it, from this process's permissions for good.
+    /// Handles already open and connections already accepted keep what
+    /// they had. Returns the number of entries removed in a1.
+    pub const PERMIT_DROP: usize = 0x007;
     /// a0 = handle. Frees the handle.
     pub const CLOSE: usize = 0x080;
     /// a0/a1 = array of `u32` handles and its length (at most
@@ -502,6 +508,11 @@ pub mod spawn {
     pub const ARGS: usize = 8;
     /// Longest name (the store's).
     pub const NAME_MAX: usize = 32;
+    /// ctl, a2 = 1 or 0 (doc/56 §3): the apps this handle starts from now
+    /// on are started again when they fault or end with a code other than
+    /// 0 (not when stopped by `kill`), at most `RESTARTS` times a minute.
+    pub const RESTART: usize = 1;
+    pub const RESTARTS: u32 = 4;
 }
 
 /// The processes, the store's apps, and stopping a process (doc/40).
@@ -691,6 +702,9 @@ pub enum Error {
     Denied = 15,
     /// `wait` saw no event before its timeout.
     TimedOut = 16,
+    /// A per-process limit (doc/56 §2): channels held, or connections to
+    /// one service.
+    Limit = 17,
 }
 
 impl Error {
@@ -711,6 +725,7 @@ impl Error {
             14 => Error::BadAddress,
             15 => Error::Denied,
             16 => Error::TimedOut,
+            17 => Error::Limit,
             _ => Error::Fail,
         }
     }
