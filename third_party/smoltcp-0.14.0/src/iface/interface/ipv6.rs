@@ -624,6 +624,30 @@ impl InterfaceInner {
 impl Interface {
     /// Synchronize the slaac address and router state with the interface state.
     #[cfg(feature = "proto-ipv6-slaac")]
+    /// Forgets what SLAAC learned (tab5-os, doc/49 §22): the addresses made
+    /// from router advertisements' prefixes and the routes to the routers
+    /// go, and router solicitation starts over. For a link that joined
+    /// another network: the old network's addresses would otherwise stay
+    /// until their lifetimes end, and be chosen as sources there.
+    pub fn reset_slaac(&mut self) {
+        let addrs: Vec<Ipv6Cidr, IFACE_MAX_PREFIX_COUNT> = self
+            .inner
+            .slaac
+            .prefix()
+            .iter()
+            .filter_map(|(prefix, _)| Ipv6Cidr::from_link_prefix(prefix, self.inner.hardware_addr()))
+            .collect();
+        let routes = self.inner.slaac.routes().clone();
+        self.update_ip_addrs(|a| a.retain(|c| !matches!(c, IpCidr::Ipv6(c) if addrs.contains(c))));
+        self.inner.routes.update(|r| {
+            r.retain(|r| match (&r.cidr, &r.via_router) {
+                (IpCidr::Ipv6(cidr), IpAddress::Ipv6(via)) => !routes.iter().any(|f| f.same_route(cidr, via)),
+                _ => true,
+            })
+        });
+        self.inner.slaac = super::super::slaac::Slaac::new();
+    }
+
     pub(super) fn sync_slaac_state(&mut self, timestamp: Instant) {
         let required_addresses: Vec<_, IFACE_MAX_PREFIX_COUNT> = self
             .inner

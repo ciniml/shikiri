@@ -30,7 +30,7 @@
 //! | IF_INFO | interface (0, 1, …) | – | 1 if it is up (0: not there now) / bytes put in the slice (`iface`; doc/41) |
 //! | UDP_JOIN | multicast group (IPv4, or IPv6 with family 6) | – | – (the UDP socket's links join the group; doc/49) |
 //! | UDP_WAIT | – | – | 1 once a datagram waits on one of the client's UDP sockets / – (doc/49 §18) |
-//! | LINK_RENEW | – | `link` (WLAN0) | – (DHCP starts over: the Wi-Fi service joined another network; doc/49 §20) |
+//! | LINK_RENEW | 1 if another network (0: the same one again) | `link` (WLAN0) | – (the Wi-Fi service associated: multicast memberships are reported again, doc/49 §22; with 1 DHCP also starts over, §20) |
 //!
 //! UDP_WAIT is the one request whose reply can come later: when a datagram
 //! waits on any of the client's UDP sockets (at once if one already does),

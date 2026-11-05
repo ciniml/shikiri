@@ -342,6 +342,23 @@ impl EthLink {
         self.changed = true;
     }
 
+    /// Another network: what SLAAC learned and the temporary addresses go;
+    /// router solicitation starts over.
+    fn forget_ipv6(&mut self) {
+        if !self.slaac {
+            return;
+        }
+        self.iface.reset_slaac();
+        let temps: [Option<Ipv6Address>; 1 + OLD_TEMPS] = [self.temp.map(|t| t.addr), self.old_temps[0].map(|o| o.0), self.old_temps[1].map(|o| o.0)];
+        self.iface.update_ip_addrs(|a| a.retain(|c| !matches!(c, IpCidr::Ipv6(c) if temps.contains(&Some(c.address())))));
+        self.temp = None;
+        self.old_temps = [None; OLD_TEMPS];
+        self.iface.set_ipv6_source_preference(None, &[]);
+        self.v6_logged = None;
+        self.changed = true;
+        event!(Info, "net.ipv6_forgotten", link = LINK_NAMES[self.dev.link]);
+    }
+
     /// Logs the global IPv6 address when SLAAC gives (or changes) it.
     fn log_ipv6(&mut self) {
         self.privacy();
@@ -1040,9 +1057,20 @@ impl Stack {
                     return Err(status::BAD_REQUEST);
                 }
                 let w = self.eth[WLAN - 1].as_mut().ok_or(status::NO_ADDRESS)?;
-                let h = w.dhcp.ok_or(status::NO_ADDRESS)?;
-                w.sockets.get_mut::<dhcpv4::Socket>(h).reset();
-                event!(Info, "net.link_renew", link = "wlan0");
+                // The access point forgot the multicast groups (mDNS):
+                // report them again on every association (doc/49 §22).
+                w.iface.rejoin_multicast_groups();
+                // Another network: DHCP starts over.
+                let changed = u32::from_le_bytes([m[4], m[5], m[6], m[7]]) != 0;
+                if changed {
+                    let h = w.dhcp.ok_or(status::NO_ADDRESS)?;
+                    w.sockets.get_mut::<dhcpv4::Socket>(h).reset();
+                    // And the old network's IPv6 addresses and routes go
+                    // (doc/49 §22): chosen as sources there, the replies
+                    // could not come back.
+                    w.forget_ipv6();
+                }
+                event!(Info, "net.link_renew", link = "wlan0", dhcp = changed);
                 Ok((0, 0))
             }
             op::UDP_WAIT => {

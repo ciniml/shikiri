@@ -126,6 +126,18 @@ impl Interface {
         Ok(())
     }
 
+    /// Reports every group joined again (tab5-os, doc/49 §22): after the
+    /// link comes back (a Wi-Fi station associating again), a snooping
+    /// access point has forgotten the memberships and drops the group's
+    /// traffic until the next report.
+    pub fn rejoin_multicast_groups(&mut self) {
+        for (_, state) in self.inner.multicast.groups.iter_mut() {
+            if *state == GroupState::Joined {
+                *state = GroupState::Joining;
+            }
+        }
+    }
+
     /// Remove an address from the subscribed multicast IP addresses.
     pub fn leave_multicast_group<T: Into<IpAddress>>(
         &mut self,
@@ -208,8 +220,10 @@ impl Interface {
                 }
                 #[cfg(feature = "proto-ipv6")]
                 IpAddress::Ipv6(addr) => {
+                    // Joining is "exclude no sources" (RFC 3810 §5.2.12,
+                    // §6.1; tab5-os: smoltcp 0.14 sent the leave record).
                     if let Some(pkt) = self.inner.mldv2_report_packet(&[MldAddressRecordRepr::new(
-                        MldRecordType::ChangeToInclude,
+                        MldRecordType::ChangeToExclude,
                         addr,
                     )]) {
                         let Some(tx_token) = device.transmit(self.inner.now) else {
@@ -256,8 +270,9 @@ impl Interface {
                 }
                 #[cfg(feature = "proto-ipv6")]
                 IpAddress::Ipv6(addr) => {
+                    // Leaving is "include no sources" (RFC 3810 §6.1).
                     if let Some(pkt) = self.inner.mldv2_report_packet(&[MldAddressRecordRepr::new(
-                        MldRecordType::ChangeToExclude,
+                        MldRecordType::ChangeToInclude,
                         addr,
                     )]) {
                         let Some(tx_token) = device.transmit(self.inner.now) else {

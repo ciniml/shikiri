@@ -340,4 +340,51 @@
 - 購読: 構造体や文字列の値はログに出さない（数と真偽と null だけ）。イベントの購読はまだない。
 - t5emu の試験は、デバイスとコントローラが同じプロセスで同じコア。別の実装（chip-tool など）との相互接続は実機でしか見ていない（PC の smctl と例）。
 - `UDP_WAIT` は、まだ `matter` しか使っていない。
-- §20 の残すこと（IPv6 のアドレス、fail-safe の間の fabric）。`JOIN` した網の保存は doc/50（設定のサービス `cfg`。CommissioningComplete で保存、fail-safe が先に終われば戻る）。
+- §20 の残すこと（fail-safe の間の fabric）。IPv6 のアドレスは §22 で直した。`JOIN` した網の保存は doc/50（設定のサービス `cfg`。CommissioningComplete で保存、fail-safe が先に終われば戻る）。
+
+## 22. ほかの実装との相互接続と、mDNS の直し
+利用者の指示（2026-11-05）:「順に進めてください。」（残りの 1 番目、ほかの実装との相互接続から）
+
+### 22.1 試したもの
+- **Tab5 のデバイス ← chip-tool**（snap の chip-tool v1.5.1、試験用の PAA）:
+  - smctl で窓を開け、chip-tool の `pairing onnetwork-long` で、ノード 122 としてコミッショニングできた。
+  - toggle、OnOff・VendorName・ProductName・SerialNumber・PartsList・ServerList・ACL・Breadcrumb・Networks・Fabrics・Groups の NameSupport の読み、identify、fabric の一覧、unpair が通った。
+  - 保存先は別のディレクトリにし、利用者の chip-tool の fabric には触れていない。試験の後に消した。
+- **Tab5 のコントローラ → connectedhomeip の参照のライト**（Docker の `chip-cert-bins` の `chip-lighting-app`、arm64 をエミュレーションで）:
+  - `pair 30 20202021 3841` で 13.6 秒。PASE の約 10 秒は、参照アプリの側が遅いため。参照アプリの試験用の DAC で認証が通った。
+  - toggle（参照アプリのログで 0 → 1）、読み、購読（toggle の 1 秒後にレポート）、`forget` が通った。
+
+### 22.2 見つけて直したこと
+1. **chip-tool が Tab5 を引くのに約 29 秒かかった**（identify は時間切れ）。調べたこと:
+   - `iotap` の LAN では、有線の PC から Wi-Fi の Tab5 へのマルチキャストが届かない。
+     - `net` に一時的な数え方を入れて見た: PC の mDNS のフレームは IPv4 も IPv6 も 0 件。同じ AP のほかの機器の IPv6 の mDNS は届いていた。
+     - Tab5 から PC へのマルチキャストは届く。
+     - chip-tool は、Tab5 が周期的に出す告知（約 30 秒ごと）で、ようやく引けていた。
+   - これは網の機器の振る舞いで、Tab5 では直せない（BSSID がローカル管理のアドレスで、メッシュのルータらしい）。
+   - PC と Tab5 が無線で同じ AP にいる `matter-test` では、解決 200 ms、操作 0.7〜1.5 秒、identify も通った。スマホのコントローラは無線なので、こちらの場合に当たる（推測）。
+2. **ファイアウォールが IGMP を落としていた**（`net` の `filter.rs`）:
+   - MLD（ICMPv6）は常に通していたが、IGMP は通していなかった。
+   - そのため AP の IGMP の問い合わせ（約 62 秒ごと）に Tab5 が答えられず、snooping の表から Tab5 が消え、IPv4 のマルチキャスト（224.0.0.251 の mDNS）が届かなくなっていた。
+   - IGMP も常に通すようにした。今は問い合わせのたびに IGMPv2 の報告を返す。
+3. **Wi-Fi がつなぎ直すたびに、マルチキャストの参加を報告し直す**:
+   - smoltcp に `Interface::rejoin_multicast_groups` を足した。
+   - `net` は `LINK_RENEW` のたびに呼ぶ。`wifi` は網が変わったときだけでなく、つながるたびに `LINK_RENEW` を送る（`a` が 1 なら別の網で、DHCP もやり直す）。
+4. **MLDv2 の記録の種類を RFC 3810 どおりに**: smoltcp 0.14.0 は、参加に CHANGE_TO_INCLUDE（送り元なし、つまり離脱）、離脱に CHANGE_TO_EXCLUDE を送っていた。逆にした。
+   - この LAN では、どちらでも違いは見えなかった。
+5. **mDNS の告知と問い合わせを IPv6 にも**:
+   - `matter` は、IPv4 のアドレスがあると、告知もコントローラの問い合わせも 224.0.0.251 にしか送っていなかった。
+   - 参照アプリ（connectedhomeip の最小 mDNS）は IPv4 の問い合わせに答えず、Tab5 のコントローラが見つけられなかった（「no device with that discriminator」）。
+   - 今は ff02::fb に送り、IPv4 のアドレスがあれば 224.0.0.251 にも送る。
+6. **網を移ったら前の網の IPv6 アドレスを捨てる**（§21 の残り）:
+   - `matter-test` に移った後も、Tab5 は `iotap` の前置（2001:db8:0:1::/64）の一時アドレスを送り元に選んでいた。参照アプリの返事が「Network is unreachable」になり、PASE が 60 秒で失敗した。
+   - smoltcp に `Interface::reset_slaac` を足した（SLAAC のアドレスとルートを外し、ルータ要請からやり直す）。`net` は別の網の `LINK_RENEW` で、これと自分の一時アドレス（doc/46）を捨てる（`net.ipv6_forgotten`）。
+   - 実機:
+     - `iotap` に移ると 0.36 秒で `iotap` の前置のアドレスに替わった。
+     - `matter-test` に移ると `fd89:c15c:f759:4833::/64` に替わった。
+     - その後で、参照のライトの toggle が通った。
+- smoltcp の試験（SLAAC と multicast を入れて 674）が通った。third_party/README に書いた。
+
+### 22.3 残り
+- `iotap` の LAN では、有線の PC からの mDNS が Tab5 に届かない（網の機器の都合）。
+- 起動のときに `iotap` へつながるまで約 15 秒（doc/22 §7.2）。
+- 試験の途中で、プローブを使う t5log を一度 2 つ同時に動かした（片方の要求が届かなかっただけで、ファイアウォールなどには触れていない）。

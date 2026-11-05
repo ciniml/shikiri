@@ -702,18 +702,19 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
     }
 }
 
-/// Another network than the last one (or the first this process saw):
-/// `net` starts DHCP over on Wi-Fi. `net` may not be up yet (at boot);
-/// then it asks for an address anyway.
+/// After each association: `net` reports its multicast groups again, and,
+/// for another network than the last one (or the first this process saw),
+/// starts DHCP over on Wi-Fi. `net` may not be up yet (at boot); then it
+/// asks for an address anyway.
 fn renew(rpc: &mut Rpc) {
     let ssid = &rpc.ssid[..rpc.ssid_len];
-    if rpc.last_len == ssid.len() && &rpc.last[..rpc.last_len] == ssid {
-        return;
-    }
+    let changed = !(rpc.last_len == ssid.len() && &rpc.last[..rpc.last_len] == ssid);
     rpc.last[..ssid.len()].copy_from_slice(ssid);
     rpc.last_len = ssid.len();
-    match Net::connect().and_then(|n| n.link_renew(link::WLAN0)) {
-        Ok(()) => event!(Info, "wifi.renewed"),
+    // Every association: the access point has forgotten the multicast
+    // groups (doc/49 §22); another network also needs DHCP again.
+    match Net::connect().and_then(|n| n.link_renew(link::WLAN0, changed)) {
+        Ok(()) => event!(Info, "wifi.renewed", dhcp = changed),
         Err(_) => event!(Debug, "wifi.no_renew"),
     }
 }

@@ -1633,7 +1633,8 @@ fn test_join_ipv6_multicast_group(#[case] medium: Medium) {
             MldAddressRecordRepr {
                 num_srcs: 0,
                 mcast_addr: group_addr,
-                record_type: MldRecordType::ChangeToInclude,
+                // Joining: exclude no sources (RFC 3810; tab5-os).
+                record_type: MldRecordType::ChangeToExclude,
                 aux_data_len: 0,
                 payload: &[],
             }

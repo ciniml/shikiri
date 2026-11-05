@@ -559,15 +559,26 @@ fn run(test: bool) -> Result<(), u32> {
                 fast_addrs_until = now_ms() + 10_000;
             }
         }
+        // Announcements and queries go to both groups (doc/49 §22): Matter
+        // finds nodes over IPv6 (the reference SDK's minimal mDNS may not
+        // answer IPv4), and IPv4 where there is an address.
         while let Some(k) = dev.mdns_poll(now_ms(), &mut tx) {
-            send(&mut net, mdns, &tx[..k], mdns_group(has_v4));
+            send(&mut net, mdns, &tx[..k], mdns_group(false));
+            if has_v4 {
+                send(&mut net, mdns, &tx[..k], mdns_group(true));
+            }
         }
         ctrl.poll(now_ms());
         while let Some(t) = ctrl.take_tx() {
             match t.to {
                 Some(to) => send(&mut net, cudp, &t.buf[..t.len], to),
                 // A discovery query: to the group, from the mDNS socket.
-                None => send(&mut net, mdns, &t.buf[..t.len], mdns_group(has_v4)),
+                None => {
+                    send(&mut net, mdns, &t.buf[..t.len], mdns_group(false));
+                    if has_v4 {
+                        send(&mut net, mdns, &t.buf[..t.len], mdns_group(true));
+                    }
+                }
             }
             ctrl.poll(now_ms());
         }

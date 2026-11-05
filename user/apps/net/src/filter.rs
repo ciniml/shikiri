@@ -11,7 +11,10 @@
 //!
 //! DHCP (UDP 67 ↔ 68) always passes: it comes before the link has an
 //! address and matches no connection. So do IPv6's neighbor discovery and
-//! MLD (ICMPv6 130-137, 143), without which IPv6 does not work at all.
+//! MLD (ICMPv6 130-137, 143), without which IPv6 does not work at all, and
+//! IGMP (doc/49 §22): without the router's queries the Tab5 does not report
+//! its groups, and a snooping access point stops sending it IPv4 multicast
+//! (mDNS on 224.0.0.251).
 //!
 //! Addresses are kept as u128: IPv4 in the low 32 bits, told apart by the
 //! packet's (or the rule's) family.
@@ -43,6 +46,7 @@ pub const PROTO_ICMP: u8 = 1;
 pub const PROTO_TCP: u8 = 6;
 pub const PROTO_UDP: u8 = 17;
 pub const PROTO_ICMPV6: u8 = 58;
+pub const PROTO_IGMP: u8 = 2;
 
 pub const MAX_RULES: usize = 64;
 const CONNECTIONS: usize = 512;
@@ -295,8 +299,11 @@ pub fn parse(ip: &[u8]) -> Option<Pkt> {
     Some(Pkt { family, proto, src, dst, sport, dport, tcp_flags, inner })
 }
 
-/// Neighbor discovery and MLD, which pass every hook.
-fn ipv6_control(p: &Pkt, ip: &[u8]) -> bool {
+/// Neighbor discovery, MLD and IGMP, which pass every hook.
+fn control(p: &Pkt, ip: &[u8]) -> bool {
+    if p.family == 4 && p.proto == PROTO_IGMP {
+        return true;
+    }
     if p.family != 6 || p.proto != PROTO_ICMPV6 {
         return false;
     }
@@ -462,7 +469,7 @@ impl Filter {
 /// them). IPv6 has no reject (no ICMPv6 errors are made yet): it drops.
 pub fn check(hook: u8, in_link: u8, out_link: u8, ip: &[u8]) -> Action {
     let Some(p) = parse(ip) else { return Action::Pass };
-    if loopback(&p) || ipv6_control(&p, ip) {
+    if loopback(&p) || control(&p, ip) {
         return Action::Pass;
     }
     // DHCP: answers to the client, and requests to the server (doc/25).

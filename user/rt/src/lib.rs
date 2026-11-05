@@ -917,8 +917,10 @@ impl Net {
 
     /// DHCP starts over on `link` (WLAN0): the Wi-Fi service joined
     /// another network (doc/49 §20).
-    pub fn link_renew(&self, link: u8) -> Result<(), NetError> {
-        self.call(net::op::LINK_RENEW, 0, 0, link as u32).map(|_| ())
+    /// `link` associated again (doc/49 §20, §22); `changed`: with another
+    /// network (DHCP starts over).
+    pub fn link_renew(&self, link: u8, changed: bool) -> Result<(), NetError> {
+        self.call(net::op::LINK_RENEW, 0, changed as u32, link as u32).map(|_| ())
     }
 
     /// The channel to the service, to `wait` on after `udp_arm`.
