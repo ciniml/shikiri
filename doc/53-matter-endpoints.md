@@ -58,7 +58,7 @@
   - `matter` を入れ直して起動し直し、`mtep 3` と `mtep 1` で ep 2（temp）と ep 3（plug）。
   - smctl（fabric 1）: PartsList `[1, 2, 3]`、ep 2 の DeviceTypeList `[{0: 770, 1: 2}]`、温度 2150、ep 3 の ServerList `[3, 4, 6, 29]`、toggle で `matter.ep_onoff ep=3 on=true` と `mtep.state on 1`。
   - chip-tool（onnetwork、ノード 122、保存先は別のディレクトリで試験の後に消した）: PartsList、温度、ep 3 の toggle と読み、DeviceTypeList（On/Off Plug-in Unit）。対話の形で温度を購読し、2 秒ごとに 2050 → 2300 のレポートが届いた。unpair した。
-  - `mtpanel`: `term` を止めて起動すると ep 4（light、`mtpanel/panel`）。smctl から ep 4 を on にすると `mtpanel.state on=true` で描き直した。描く速さは、文字を 1 画素ずつ `rect` で描くので遅い（起動からの CPU 879 ms）。タッチは利用者に確かめてもらう。
+  - `mtpanel`: `term` を止めて起動すると ep 4（light、`mtpanel/panel`）。smctl から ep 4 を on にすると `mtpanel.state on=true` で描き直した。描く速さは、文字を 1 画素ずつ `rect` で描くので遅い（起動からの CPU 879 ms）。タッチは利用者が確かめた（2026-11-05、「動きました。よさそう。」）: タイルに触るたびに `mtpanel.touched` と、`matter` から戻った `mtpanel.state` が続き、画面のタイルも切り替わった。
 
 ## 7. 残り
 - PartsList の変化は購読で知らせない（コアの Descriptor の作り）。コントローラが新しいエンドポイントを知るのは読み直したとき。
