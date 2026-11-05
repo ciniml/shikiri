@@ -281,7 +281,14 @@
   - **実機（v1.5.2）**:
     - `run wifi 9`（BT と AP）で `wifi.ap ssid=t5evb-ap mac=b4:3a:45:99:be:11`（STA の MAC + 1）。STA は `iotap`（チャネル 11）につながったまま。
     - `net.link link=ap0`、`netctl 11` で `net.addr_fixed link=ap0`（192.168.70.1/24、`rules=7`）。
-    - PC からの Wi-Fi の探索は NetworkManager が許さず（not authorized）、電波で見えるかはまだ確かめていない。子機（スマホなど）をつないで確かめる。
+    - PC からの Wi-Fi の探索は NetworkManager が許さなかった（not authorized）。
+    - **子機（利用者の端末）**: 利用者が `t5evb-ap` につないだ。`netctl 4` の数は次のとおり。
+      - `pass in on ap0` 70（DHCP と DNS の中継）
+      - `pass forward on ap0 out wlan0` 850（AP から STA の `iotap` へ転送）
+      - 戻りの `pass forward state established,related` 1051
+      - `net.nat mapped=54`（STA のアドレスの陰へ masquerade した接続）
+      - 子機が出入りしたときと DHCP の貸し出しのログは、つなぐ前にコンソールの列からあふれて残らなかった（`log.dropped`）。
+    - **場面 A に当たる形**（LAN = AP）が、STA を出口にして動いた。有線を出口にする場合は `pass forward on ap0 out eth0` で同じ規則が働く（未試験）。
 - **R1b（チップ v3、v1.6.0）の調べ**（ESP-IDF の hw_ver1 と hw_ver3 のヘッダを全部突き合わせた）:
   - **レジスタの配置はほぼ同じ**。違うのは次のとおり。
     - 乱数（v3 は LP_TRNG の 0x5012_6004 と有効化）
