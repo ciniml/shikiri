@@ -29,6 +29,10 @@ pub enum Access {
 pub struct Pmp {
     cfg: [u8; ENTRIES],
     addr: [u32; ENTRIES],
+    /// The entries that are on, in order, with their decoded ranges:
+    /// remade on every CSR write (`check` runs on every access).
+    active: [(u64, u64, u8, bool); ENTRIES],
+    n_active: usize,
 }
 
 impl Pmp {
@@ -58,6 +62,17 @@ impl Pmp {
             }
             self.cfg[i] = b;
         }
+        self.decode();
+    }
+
+    fn decode(&mut self) {
+        self.n_active = 0;
+        for i in 0..ENTRIES {
+            if let Some((lo, hi)) = self.range(i) {
+                self.active[self.n_active] = (lo, hi, self.cfg[i], self.locked(i));
+                self.n_active += 1;
+            }
+        }
     }
 
     pub fn read_addr(&self, i: usize) -> u32 {
@@ -75,6 +90,7 @@ impl Pmp {
             return;
         }
         self.addr[i] = v;
+        self.decode();
     }
 
     /// Byte range `[lo, hi)` covered by entry `i`.
@@ -97,15 +113,14 @@ impl Pmp {
 
     pub fn check(&self, addr: u32, size: u32, access: Access, m_mode: bool) -> bool {
         let (a, e) = (addr as u64, addr as u64 + size as u64);
-        for i in 0..ENTRIES {
-            let Some((lo, hi)) = self.range(i) else { continue };
+        for &(lo, hi, cfg, locked) in &self.active[..self.n_active] {
             if e <= lo || a >= hi {
                 continue;
             }
             if a < lo || e > hi {
                 return false;
             }
-            if m_mode && !self.locked(i) {
+            if m_mode && !locked {
                 return true;
             }
             let need = match access {
@@ -113,7 +128,7 @@ impl Pmp {
                 Access::Write => W,
                 Access::Exec => X,
             };
-            return self.cfg[i] & need != 0;
+            return cfg & need != 0;
         }
         m_mode
     }

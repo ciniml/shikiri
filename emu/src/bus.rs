@@ -262,7 +262,12 @@ impl Bus {
 
     /// SYSTIMER ticks since reset.
     pub fn ticks(&self) -> u64 {
-        (self.cycles as u128 * SYSTIMER_HZ as u128 / self.cpu_hz as u128) as u64
+        // In 64 bits while the product fits (some hours of emulated time):
+        // the 128-bit division cost much, being done every instruction.
+        match self.cycles.checked_mul(SYSTIMER_HZ) {
+            Some(p) => p / self.cpu_hz,
+            None => (self.cycles as u128 * SYSTIMER_HZ as u128 / self.cpu_hz as u128) as u64,
+        }
     }
 
     /// CPU cycles at which the SYSTIMER reaches `ticks`.

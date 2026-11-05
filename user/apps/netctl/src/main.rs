@@ -16,7 +16,14 @@
 //! - 6: the NAT set for the Tab5: the test LAN and the PC masqueraded
 //!   behind Wi-Fi, a DHCP server on the test LAN, and the NDP proxy from
 //!   Wi-Fi to the test LAN (IPv6, doc/27);
-//! - 7: writes the guard set to `T5OS/NET.RUL` (to start from, doc/30 §5).
+//! - 7: writes the guard set to `T5OS/NET.RUL` (to start from, doc/30 §5);
+//! - 8: the NAT set out through the wired Ethernet (doc/58 R3, the EVB on
+//!   a router): the test LAN and the PC masqueraded behind `eth0`, a DHCP
+//!   server on the test LAN;
+//! - 9: the router set (doc/58 R3, scenario B): `eth0` a LAN of its own
+//!   (192.168.60.1/24, DHCP server) masqueraded behind Wi-Fi; only the PC
+//!   and the LAN may start traffic to the board, only the LAN and the PC
+//!   may start traffic through it.
 //!
 //! At boot (autostart, doc/30) it runs with mode 0, maybe before `net` and
 //! `fs` are up: it waits up to 10 s for each.
@@ -65,6 +72,27 @@ dhcp-server on test0 range 192.168.50.100-192.168.50.149
 ndp-proxy on wlan0 to test0
 ";
 
+const ETH_NAT_SET: &str = "\
+masquerade on eth0 from 192.168.50.0/24
+masquerade on eth0 from 10.55.0.0/24
+dhcp-server on test0 range 192.168.50.100-192.168.50.149
+";
+
+const ROUTER_SET: &str = "\
+policy in drop
+policy forward drop
+pass in on host
+pass in on eth0
+pass in state established,related
+pass forward on eth0 out wlan0
+pass forward on host
+pass forward state established,related
+address on eth0 192.168.60.1/24
+dhcp-server on eth0 range 192.168.60.100-192.168.60.149
+masquerade on wlan0 from 192.168.60.0/24
+masquerade on wlan0 from 10.55.0.0/24
+";
+
 fn main(mode: usize, _: usize) -> usize {
     let r = match mode {
         0 => from_file(),
@@ -75,6 +103,8 @@ fn main(mode: usize, _: usize) -> usize {
         5 => load(NAT_TEST_SET),
         6 => load(NAT_SET),
         7 => write_file(GUARD_SET),
+        8 => load(ETH_NAT_SET),
+        9 => load(ROUTER_SET),
         _ => Err(1),
     };
     match r {

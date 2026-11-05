@@ -35,6 +35,9 @@ pub enum Line {
     Masq(Masq),
     Dhcp(DhcpServer),
     Ndp(u8, u8),
+    /// `address on LINK A.B.C.D/N` (doc/58 R3): a fixed address in place of
+    /// the link's DHCP client.
+    Addr(u8, u32, u8),
 }
 
 fn hook(s: &str) -> Option<u8> {
@@ -144,6 +147,15 @@ pub fn parse_line(line: &str) -> Option<Line> {
         let ok = up != down && up != 0 && down != 0 && w.next().is_none();
         return ok.then_some(Line::Ndp(up, down));
     }
+    if first == "address" {
+        if w.next()? != "on" {
+            return None;
+        }
+        let link = filter::link_named(w.next()?)?;
+        let (a, len) = cidr4(w.next()?)?;
+        let ok = link != 0 && len > 0 && len < 32 && w.next().is_none();
+        return ok.then_some(Line::Addr(link, a, len));
+    }
     if first == "dhcp-server" {
         if w.next()? != "on" {
             return None;
@@ -244,6 +256,7 @@ impl Staging {
             }
             Some(Line::Dhcp(d)) if self.set.dhcp.is_none() => self.set.dhcp = Some(d),
             Some(Line::Ndp(up, down)) if self.set.ndp.is_none() => self.set.ndp = Some((up, down)),
+            Some(Line::Addr(link, a, len)) if self.set.addr.is_none() => self.set.addr = Some((link, a, len)),
             Some(Line::Rule(r)) if self.set.len < filter::MAX_RULES => {
                 self.set.rules[self.set.len] = r;
                 self.set.len += 1;

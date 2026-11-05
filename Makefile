@@ -336,13 +336,28 @@ test-emu:
 # The app store goes into the emulated flash at its partition offsets.
 EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.bin@420000
 
-test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
+# The p4 emulator runs (doc/59): each its own target, so `make -j` runs
+# them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
+# each run's output kept together.
+P4EMU_JOBS ?= 12
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26,p4emu-run-$(n))
+.PHONY: $(P4EMU_RUNS) p4emu-prep
+p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb
+
+test-p4emu: p4emu-prep
+	$(MAKE) --no-print-directory --output-sync=target -j$(P4EMU_JOBS) $(P4EMU_RUNS)
+
+p4emu-run-01:
 	$(T5EMU) $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-02:
 	@# The EVB's kernel (doc/58 §3.1) passes the same self-test; it touches
 	@# no I2C (0 transfers: the emulated Tab5's devices stay unused).
 	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --expect-event board.name --expect-event selftest.result \
 	    $(BUILD)/t5-kernel-p4evb.elf
+
+p4emu-run-03:
 	@# Control commands after the self-test (doc/14 §3): start two apps, stop
 	@# one, and check the events.
 	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
@@ -350,11 +365,15 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --ctl "run nosuchapp" --ctl "ps" \
 	    --expect-event ticker.tick --expect-event proc.killed --expect-event ctl.failed \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-04:
 	@# The RNG's health tests (doc/47 §6): a stuck register fails the
 	@# start-up test, and the kernel does not start the generator.
 	$(T5EMU) --quiet --rng-stuck $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --expect-event rng.health_fail --expect-event rng.no_entropy \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-05:
 	@# Starting apps from a process (doc/38): init's test list starts hello
 	@# and asks for an app not in the store; the kernel refuses a long name.
 	@# `hello 3` fails each time: started again 4 times, then given up
@@ -365,6 +384,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event init.done --expect-event proc.restart_planned --expect-event proc.restarted \
 	    --expect-event proc.restart_gave_up \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-06:
 	@# The settings (doc/50, doc/51): cfgctl asked for before cfg waits for
 	@# svc:cfg (Needs); cfg makes its key and keeps the table in the
 	@# emulated flash; cfgctl's self-test (values, a sealed secret not given
@@ -375,12 +396,16 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event proc.waiting --expect-event cfg.key_created --expect-event cfgctl.ok \
 	    --expect-event cfg.loaded --expect-event cfgctl.entry \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-07:
 	@# The keyboard (doc/39): keys typed on the emulated keyboard on ExtPort1
 	@# reach keylog (5 keys: press and release each, "aB\n" has Shift).
 	$(T5EMU) --quiet $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run keylog 10 6" --ctl "wait-ms 500" --ctl "keys aB\n" \
 	    --expect-event kbd.found --expect-event keylog.key --expect-event keylog.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-08:
 	@# The terminal and the shell (doc/39): term starts shell, and a line
 	@# typed on the keyboard runs; ps, apps and kill (doc/40).
 	$(T5EMU) --quiet --max-ms 40000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
@@ -389,12 +414,16 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event term.ready --expect-event term.session --expect-event shell.exec \
 	    --expect-event shell.listed --expect-event proc.kill_denied \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-09:
 	@# The terminal's drawing (doc/42): 100 lines that scroll, then every
 	@# pixel checked against the cells.
 	$(T5EMU) --quiet --max-ms 120000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run font" --ctl "wait-ms 300" --ctl "run term 1" --ctl "wait-ms 15000" \
 	    --expect-event font.ready --expect-event term.font --expect-event term.bench_ok \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-10:
 	@# Installing (M3d): the flash write path on a spare sector, an install,
 	@# running it, a rejected image, removal. Stops on any flash access the
 	@# chip would not survive (doc/14 §5.3).
@@ -405,6 +434,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event flash.test --expect-event store.installed --expect-event hello.greet \
 	    --expect-event store.rejected --expect-event store.removed \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-11:
 	@# XIP (doc/15): an XIP app installed over the control channel runs from
 	@# flash; removing it while it runs and installing another must not
 	@# overwrite its extents (it would fault, and spin.done would be missing).
@@ -413,6 +444,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --ctl "install $(APPS_DIR)/greeter.t5a" --ctl "run greeter" \
 	    --expect-event spin.done --expect-event hello.greet \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-12:
 	@# Flash work while both cores run processes (SMP S3, doc/33 §10): two
 	@# spins without system calls (id 0x101, 0x102) keep both cores in
 	@# U-mode while an app is installed, an XIP app is mapped and run, and
@@ -427,6 +460,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event store.installed --expect-event hello.greet --expect-event store.removed \
 	    --expect-event spin.done --expect-event kernel.cpu \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-13:
 	@# App update (M5b, doc/16 §4.3): over a valid greeter, 0.2 goes in
 	@# pending and its normal end confirms it; a version that faults is rolled
 	@# back and the next run is 0.2 again; an XIP update is confirmed after
@@ -442,6 +477,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event store.confirmed --expect-event store.rolled_back --expect-event proc.fault \
 	    --expect-event hello.greet --expect-event spin.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-14:
 	@# Board and display (M6a/M6b, doc/17): the modelled GT911 (ILI9881C lot)
 	@# is identified over I2C and its touch point logged; t5emu fails on any
 	@# write to IO expander #2. The display comes up and keeps refreshing
@@ -451,6 +488,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event display.panel --expect-event i2c.found --expect-event touch.point \
 	    --expect-event display.ready --expect-event display.stats --expect-event paint.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-15:
 	@# Debugging over the console line (doc/54): a tap and a screen capture
 	@# sent as commands on USB Serial/JTAG. paint draws a square where the
 	@# tap was (as well as at the modelled GT911's fixed point); the
@@ -461,18 +500,24 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --capture-out $(BUILD)/emu-capture.png --expect-pixel 600,400,fa8a --expect-pixel 20,20,ffff --expect-pixel 300,600,18c4 \
 	    --expect-event paint.ready --expect-event touch.injected --expect-event capture.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-16:
 	@# Network service (N1, doc/research/net-stack.md §4): over 127.0.0.1,
 	@# 100 UDP round trips and 1 MiB of TCP with matching hashes.
 	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run net" --ctl "run nettest" --ctl "wait-ms 30000" \
 	    --expect-event net.ready --expect-event nettest.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-17:
 	@# Host link (N2a, doc/21): t5emu plays the PC (10.55.0.1) on the
 	@# console line: 3 pings, then 16 KiB through the TCP echo server.
 	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run net" --ctl "run nettest 1" --ctl "wait-ms 40000" --host-peer 16384 \
 	    --expect-event net.ready --expect-event hostlink.open \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-18:
 	@# Forwarding (N3, doc/23): t5emu's PC reaches the test LAN's peer
 	@# (192.168.50.2, inside `net`) through the Tab5: pings, 16 KiB of TCP
 	@# echo, then Time Exceeded (TTL 1) and Destination Unreachable.
@@ -481,6 +526,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --host-peer-target 192.168.50.2 --host-peer-start net.link \
 	    --expect-event net.ready --expect-event hostlink.open \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-19:
 	@# Filter (N4, doc/24): with netctl's test set, the test LAN's peer
 	@# starts pings to the Tab5 (in) and the PC (forward), all dropped
 	@# (net.drop); then the PC's traffic through the Tab5 still passes.
@@ -489,6 +536,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --host-peer-target 192.168.50.2 --host-peer-start net.peer_probes \
 	    --expect-event net.rules --expect-event net.drop --expect-event net.peer_probes \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-20:
 	@# NAT and DHCP server (N5, doc/25): the test LAN's peer gets its
 	@# address from net's DHCP server and pings the PC, which sees the
 	@# pings come from 10.55.0.2 (masquerade on the host link).
@@ -497,6 +546,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --host-peer-start none --host-peer-pinged-by 10.55.0.2 \
 	    --expect-event net.dhcp_lease --expect-event net.peer_dhcp --expect-event net.peer_answered \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-21:
 	@# IPv6 (doc/26): the PC (fd55::1) pings fd55::2 and sends 16 KiB
 	@# through the TCP echo over IPv6; then ::1 (UDP and TCP) and a ping to
 	@# the test LAN's peer (fd50::2).
@@ -504,16 +555,22 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --ctl "run net" --ctl "run nettest 1" --ctl "wait-ms 40000" --host-peer 16384 \
 	    --host-peer-target fd55::2 \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-22:
 	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run net 1" --ctl "run nettest 6" --ctl "wait-ms 8000" --ctl "run nettest 7" --ctl "wait-ms 8000" \
 	    --expect-event nettest.loop6 --expect-event nettest.ping6 \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-23:
 	@# IPv6 forwarding (doc/27): the PC (fd55::1) reaches the test LAN's
 	@# peer (fd50::2) through the Tab5: pings and 16 KiB of TCP echo.
 	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run net 1" --ctl "wait-ms 40000" --host-peer 16384 \
 	    --host-peer-target fd50::2 --host-peer-start net.link \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-24:
 	@# Kernel update (doc/16 §3.6): with the running kernel in ota_0, a
 	@# tampered package is refused, the signed one goes into ota_1 and is
 	@# selected in otadata, and reboot ends the run (no bootloader here).
@@ -523,6 +580,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --expect-event kupdate.slot --expect-event ctl.failed --expect-event kupdate.slot_erased --expect-event kupdate.ready \
 	    --expect-event kernel.reboot \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-25:
 	@# An update that panics before confirming itself (otadata: seq 1 =
 	@# ota_0, pending_verify) resets the chip so the bootloader rolls back,
 	@# instead of stopping (doc/16 §6.10).
@@ -530,6 +589,8 @@ test-p4emu: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 	    --flash $(KUPDATE_DIR)/bad-panic.bin@10000 \
 	    --expect-event kupdate.pending --expect-event kernel.panic --expect-event kupdate.panic_reset \
 	    $(KUPDATE_DIR)/bad-panic.elf
+
+p4emu-run-26:
 	@# Matter (doc/49 §16): `matter 1` (any link, the store in memory) and
 	@# its own controller over 127.0.0.1: commissioning, a subscription to
 	@# OnOff and to its StateChange event (doc/49 §22), a toggle (the

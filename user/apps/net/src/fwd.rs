@@ -20,6 +20,8 @@ pub const WLAN: usize = 1;
 pub const TEST: usize = 2;
 /// The wired Ethernet (doc/58 R2), where the board has one.
 pub const ETH: usize = 3;
+/// The links that may lead out (doc/58 R3): `Stack::uplink`.
+pub const UPLINKS: [usize; 2] = [ETH, WLAN];
 pub const IFACES: usize = 4;
 pub const LINK_NAMES: [&str; IFACES] = ["host", "wlan0", "test0", "eth0"];
 
@@ -171,6 +173,13 @@ pub struct Route {
 }
 
 impl Stack {
+    /// The link out (doc/58 R3): the wired Ethernet when its DHCP gave a
+    /// router, else Wi-Fi. The default route, the DNS server and the DNS
+    /// relay's upstream side follow it.
+    pub fn uplink(&self) -> usize {
+        UPLINKS.into_iter().find(|&k| self.eth[k - 1].as_ref().is_some_and(|e| e.router.is_some())).unwrap_or(WLAN)
+    }
+
     /// The link's own address and prefix.
     pub fn link_addr(&self, link: usize) -> Option<(u32, u8)> {
         match link {
@@ -197,8 +206,9 @@ impl Stack {
                 consider(prefix, addr, Route { link, next_hop: dst });
             }
         }
-        if let Some(gw) = self.eth[WLAN - 1].as_ref().and_then(|e| e.router) {
-            consider(0, 0, Route { link: WLAN, next_hop: gw });
+        let up = self.uplink();
+        if let Some(gw) = self.eth[up - 1].as_ref().and_then(|e| e.router) {
+            consider(0, 0, Route { link: up, next_hop: gw });
         }
         best.map(|(_, r)| r)
     }

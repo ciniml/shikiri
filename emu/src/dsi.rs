@@ -30,8 +30,11 @@ const FRAME_TICKS: u64 = 940 * 1324 / 5;
 
 #[derive(Default)]
 pub struct Dsi {
-    host: std::collections::HashMap<u32, u32>,
-    gdma: std::collections::HashMap<u32, u32>,
+    host: crate::regmap::RegMap,
+    gdma: crate::regmap::RegMap,
+    /// The interrupt line (status & enable), kept as they change: `irq` is
+    /// asked every instruction.
+    irq_level: bool,
     /// When the frame in flight ends (ticks); None while stopped.
     busy_until: Option<u64>,
     pub frames: u64,
@@ -81,6 +84,13 @@ impl Dsi {
                 self.gdma.insert(off, v);
             }
         }
+        self.relevel();
+    }
+
+    fn relevel(&mut self) {
+        let st = self.gdma.get(&CH1_INTSTATUS0).copied().unwrap_or(0);
+        let en = self.gdma.get(&CH1_INTSIGNAL_ENABLE0).copied().unwrap_or(0);
+        self.irq_level = st & en != 0;
     }
 
     fn update(&mut self, ticks: u64) {
@@ -90,15 +100,14 @@ impl Dsi {
             self.busy_until = Some(t + FRAME_TICKS);
             self.frames += 1;
             *self.gdma.entry(CH1_INTSTATUS0).or_default() |= BLOCK_TFR_DONE;
+            self.relevel();
         }
     }
 
     /// The level of DW-GDMA's interrupt line.
     pub fn irq(&mut self, ticks: u64) -> bool {
         self.update(ticks);
-        let st = self.gdma.get(&CH1_INTSTATUS0).copied().unwrap_or(0);
-        let en = self.gdma.get(&CH1_INTSIGNAL_ENABLE0).copied().unwrap_or(0);
-        st & en != 0
+        self.irq_level
     }
 
     /// When the frame in flight ends, for `wfi`.

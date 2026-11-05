@@ -138,11 +138,13 @@ pub struct Ruleset {
     pub dhcp: Option<DhcpServer>,
     /// `ndp-proxy on UP to DOWN` (doc/27): (upstream, downstream) link.
     pub ndp: Option<(u8, u8)>,
+    /// `address on LINK CIDR` (doc/58 R3): (link, address, prefix).
+    pub addr: Option<(u8, u32, u8)>,
 }
 
 impl Ruleset {
     /// Everything passes.
-    pub const OPEN: Ruleset = Ruleset { rules: [Rule::new(Action::Pass, IN); MAX_RULES], len: 0, policy: [Action::Pass; 3], policy_log: [false; 3], masq: [None; MAX_MASQ], dhcp: None, ndp: None };
+    pub const OPEN: Ruleset = Ruleset { rules: [Rule::new(Action::Pass, IN); MAX_RULES], len: 0, policy: [Action::Pass; 3], policy_log: [false; 3], masq: [None; MAX_MASQ], dhcp: None, ndp: None, addr: None };
 }
 
 struct Filter {

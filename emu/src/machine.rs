@@ -484,7 +484,7 @@ impl Machine {
     /// The highest-level pending CLIC interrupt that may be taken now.
     fn interrupt_to_take(&self) -> Option<usize> {
         let c = &self.cpu;
-        if !c.clic_mode() || (c.m_mode && c.mstatus & ms::MIE == 0) {
+        if !c.clic_mode() || (c.m_mode && c.mstatus & ms::MIE == 0) || !self.bus.periph.clic.maybe_pending() {
             return None;
         }
         // M-mode interrupts are always enabled in U-mode; the threshold and

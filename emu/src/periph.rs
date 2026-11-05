@@ -297,6 +297,8 @@ pub struct Clic {
     ip_edge: [bool; CLIC_LINES],
     /// Level of each input line, driven by the interrupt matrix.
     pub line: [bool; CLIC_LINES],
+    /// The same, a bit per line.
+    pub line_mask: u64,
 }
 
 impl Default for Clic {
@@ -308,6 +310,7 @@ impl Default for Clic {
             ie: [false; CLIC_LINES],
             ip_edge: [false; CLIC_LINES],
             line: [false; CLIC_LINES],
+            line_mask: 0,
         }
     }
 }
@@ -321,6 +324,12 @@ impl Clic {
         self.attr[i] & 1 != 0
     }
 
+    /// Whether any line could be pending: false skips the arbitration
+    /// (every instruction looks).
+    pub fn maybe_pending(&self) -> bool {
+        self.line_mask != 0 || self.ip_edge.iter().any(|&e| e)
+    }
+
     pub fn pending(&self, i: usize) -> bool {
         if self.is_edge(i) { self.ip_edge[i] } else { self.line[i] }
     }
@@ -331,6 +340,7 @@ impl Clic {
 
     /// Latches rising edges for edge-triggered lines.
     pub fn set_lines(&mut self, lines: [bool; CLIC_LINES]) {
+        self.line_mask = lines.iter().enumerate().fold(0, |m, (i, &l)| m | (l as u64) << i);
         for i in 0..CLIC_LINES {
             if lines[i] && !self.line[i] && self.is_edge(i) {
                 self.ip_edge[i] = true;
@@ -494,7 +504,10 @@ pub struct Peripherals {
     pub from_cpu: [bool; 4],
     /// HPCORE0 reset cause reported by LP_CLKRST.
     pub reset_cause: u32,
-    other: std::collections::HashMap<u32, u32>,
+    other: crate::regmap::RegMap,
+    /// DMA2D's RX1 interrupt (raw & enabled), kept as those registers are
+    /// written: `route_interrupts` looks every instruction.
+    dma2d_irq: bool,
     warned: std::collections::HashSet<u32>,
     pub warn_unmodelled: bool,
 }
@@ -558,11 +571,11 @@ impl Peripherals {
             }
             // The divider update completes at once (clk_ll_bus_update).
             ROOT_CLK_CTRL0 => {
-                self.other.insert(ROOT_CLK_CTRL0, v & !SOC_CLK_DIV_UPDATE);
+                self.set_other(ROOT_CLK_CTRL0, v & !SOC_CLK_DIV_UPDATE);
             }
             a => {
                 self.warn(a, "write");
-                self.other.insert(a, v);
+                self.set_other(a, v);
             }
         }
     }
@@ -577,41 +590,45 @@ impl Peripherals {
     pub fn route_interrupts(&mut self, ticks: u64) {
         self.systimer.update(ticks);
         let map = *self.map_of(self.core);
-        let mut lines = [false; CLIC_LINES];
+        // A bit per line: compared with the last in one step (this runs
+        // every instruction).
+        let mut mask = 0u64;
         let st = self.systimer.int_st();
         for t in 0..3 {
             if st & (1 << t) != 0 {
                 let idx = map[SRC_SYSTIMER_TARGET0 + t] as usize;
                 if idx < CLIC_LINES {
-                    lines[idx] = true;
+                    mask |= 1 << idx;
                 }
             }
         }
         if self.dsi.irq(ticks) {
             let idx = map[SRC_GDMA] as usize;
             if idx < CLIC_LINES {
-                lines[idx] = true;
+                mask |= 1 << idx;
             }
         }
-        if self.peek(crate::dma2d::RX1_INT_RAW) & self.peek(crate::dma2d::RX1_INT_ENA) != 0 {
+        if self.dma2d_irq {
             let idx = map[crate::dma2d::SRC_DMA2D_IN_CH1] as usize;
             if idx < CLIC_LINES {
-                lines[idx] = true;
+                mask |= 1 << idx;
             }
         }
         if self.usj.int_st() != 0 {
             let idx = map[SRC_USJ] as usize;
             if idx < CLIC_LINES {
-                lines[idx] = true;
+                mask |= 1 << idx;
             }
         }
         for n in 0..4 {
             let idx = map[SRC_FROM_CPU0 + n] as usize;
             if self.from_cpu[n] && idx < CLIC_LINES {
-                lines[idx] = true;
+                mask |= 1 << idx;
             }
         }
-        self.clic.set_lines(lines);
+        if mask != self.clic.line_mask {
+            self.clic.set_lines(core::array::from_fn(|i| mask & (1 << i) != 0));
+        }
     }
 
     /// The earliest tick at which an enabled CLIC line will become pending.
@@ -643,6 +660,13 @@ impl Peripherals {
 
     /// Sets a register nothing models, as the hardware would (dma2d.rs).
     pub fn poke(&mut self, addr: u32, v: u32) {
+        self.set_other(addr, v);
+    }
+
+    fn set_other(&mut self, addr: u32, v: u32) {
         self.other.insert(addr, v);
+        if addr == crate::dma2d::RX1_INT_RAW || addr == crate::dma2d::RX1_INT_ENA {
+            self.dma2d_irq = self.peek(crate::dma2d::RX1_INT_RAW) & self.peek(crate::dma2d::RX1_INT_ENA) != 0;
+        }
     }
 }

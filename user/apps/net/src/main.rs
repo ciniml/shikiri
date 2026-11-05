@@ -374,6 +374,15 @@ impl EthLink {
         }
     }
 
+    /// No IPv4 address (IPv6 ones stay).
+    fn clear_addr(&mut self) {
+        self.iface.update_ip_addrs(|a| a.retain(|c| matches!(c, IpCidr::Ipv6(_))));
+        self.iface.routes_mut().remove_default_ipv4_route();
+        self.dev.own = None;
+        self.router = None;
+        self.changed = true;
+    }
+
     fn set_addr(&mut self, addr: u32, prefix: u8, router: Option<u32>) {
         self.iface.update_ip_addrs(|a| {
             // IPv6 addresses (SLAAC's among them) stay.
@@ -430,11 +439,7 @@ impl EthLink {
                 self.update_dns();
             }
             Some(dhcpv4::Event::Deconfigured) => {
-                self.iface.update_ip_addrs(|a| a.retain(|c| matches!(c, IpCidr::Ipv6(_))));
-                self.iface.routes_mut().remove_default_ipv4_route();
-                self.dev.own = None;
-                self.router = None;
-                self.changed = true;
+                self.clear_addr();
                 event!(Info, "net.dhcp_lost", link = name);
             }
             None => {}
@@ -476,6 +481,16 @@ fn open_eth() -> Option<EthLink> {
     l.dhcp = Some(l.sockets.add(dhcpv4::Socket::new()));
     event!(Info, "net.link", link = "eth0", addr = "dhcp", mtu = netdev::MTU as u32);
     Some(l)
+}
+
+/// Two different Ethernet links at once.
+fn two_mut(eth: &mut [Option<EthLink>; IFACES - 1], a: usize, b: usize) -> Option<(&mut EthLink, &mut EthLink)> {
+    if a == b {
+        return None;
+    }
+    let (lo, hi) = eth.split_at_mut(a.max(b));
+    let (x, y) = (lo[a.min(b)].as_mut()?, hi[0].as_mut()?);
+    Some(if a < b { (x, y) } else { (y, x) })
 }
 
 // ---- client sockets ----
@@ -534,6 +549,10 @@ pub struct Stack {
     pub v6: fwd6::Fwd6,
     /// The DHCP server, and the rule set generation it was made from.
     dhcpd: Option<dhcpd::Server>,
+    /// The uplink the DNS relay was made on.
+    relay_up: usize,
+    /// The link with a fixed address from the rules (doc/58 R3).
+    fixed: Option<usize>,
     /// The DNS relay, with the DHCP server (doc/29).
     relay: Option<dnsrelay::Relay>,
     rules_gen: u32,
@@ -591,7 +610,10 @@ impl Stack {
     /// changes).
     fn serve_dhcp(&mut self) {
         let (rules, generation) = filter::active();
-        if generation != self.rules_gen {
+        // The relay's upstream socket lives on the uplink: made again when
+        // the uplink changes (wired DHCP may finish after Wi-Fi's).
+        let up_now = self.uplink();
+        if generation != self.rules_gen || up_now != self.relay_up {
             self.rules_gen = generation;
             if let Some(old) = self.dhcpd.take()
                 && let Some(e) = self.eth[old.cfg.link as usize - 1].as_mut()
@@ -599,10 +621,12 @@ impl Stack {
                 old.remove(&mut e.sockets);
             }
             if let Some(old) = self.relay.take()
-                && let Some((down, up)) = self.down_up(old.link as usize)
+                && let Some((down, up)) = two_mut(&mut self.eth, old.link as usize - 1, self.relay_up - 1)
             {
                 old.remove(&mut down.sockets, &mut up.sockets);
             }
+            self.relay_up = up_now;
+            self.apply_addr(rules.addr);
             if let Some(cfg) = rules.dhcp
                 && cfg.link as usize != IFACE0
                 && let Some(e) = self.eth[cfg.link as usize - 1].as_mut()
@@ -620,16 +644,15 @@ impl Stack {
             w.dns6 = d6;
             w.update_dns();
         }
-        let dns = self.eth[WLAN - 1].as_ref().and_then(|w| w.dns_pick());
+        let up = self.uplink();
+        let dns = self.eth[up - 1].as_ref().and_then(|w| w.dns_pick());
         // DHCP hands out IPv4 servers only.
-        let dns4 = self.eth[WLAN - 1].as_ref().and_then(|w| w.dns_server);
-        if let Some(r) = &mut self.relay
-            && let (Some(w), Some(d)) = {
-                let (a, b) = self.eth.split_at_mut(1);
-                (a[0].as_mut(), b[0].as_mut())
+        let dns4 = self.eth[up - 1].as_ref().and_then(|w| w.dns_server);
+        if let Some(r) = &mut self.relay {
+            let down = r.link as usize;
+            if let Some((d, w)) = two_mut(&mut self.eth, down - 1, up - 1) {
+                r.poll(&mut d.sockets, &mut w.sockets, dns);
             }
-        {
-            r.poll(&mut d.sockets, &mut w.sockets, dns);
         }
         let relaying = self.relay.is_some();
         let Some(srv) = &mut self.dhcpd else { return };
@@ -640,14 +663,39 @@ impl Stack {
         srv.poll(&mut e.sockets, own, given);
     }
 
-    /// The downstream link `down` and Wi-Fi (the DNS relay's two sides),
-    /// if both are there and differ.
+    /// `address on LINK CIDR` (doc/58 R3): the link takes the address and
+    /// stops its DHCP client; a link that loses its rule gets the client
+    /// back.
+    fn apply_addr(&mut self, addr: Option<(u8, u32, u8)>) {
+        let want = addr.map(|(l, _, _)| l as usize).filter(|&l| l != IFACE0 && l != TEST);
+        if let Some(old) = self.fixed.take()
+            && want != Some(old)
+            && let Some(e) = self.eth[old - 1].as_mut()
+        {
+            e.clear_addr();
+            if e.dhcp.is_none() {
+                e.dhcp = Some(e.sockets.add(dhcpv4::Socket::new()));
+            }
+            event!(Info, "net.addr_dhcp", link = LINK_NAMES[old]);
+        }
+        let (Some(link), Some((_, a, len))) = (want, addr) else { return };
+        let Some(e) = self.eth[link - 1].as_mut() else { return };
+        if let Some(h) = e.dhcp.take() {
+            e.sockets.remove(h);
+        }
+        e.set_addr(a, len, None);
+        self.fixed = Some(link);
+        event!(Info, "net.addr_fixed", link = LINK_NAMES[link], addr = a, prefix = len as u32);
+    }
+
+    /// The downstream link `down` and the uplink (the DNS relay's two
+    /// sides, doc/58 R3), if both are there and differ.
     fn down_up(&mut self, down: usize) -> Option<(&mut EthLink, &mut EthLink)> {
-        if down != TEST {
+        let up = self.uplink();
+        if down == IFACE0 || down == up {
             return None;
         }
-        let (a, b) = self.eth.split_at_mut(1);
-        Some((b[0].as_mut()?, a[0].as_mut()?))
+        two_mut(&mut self.eth, down - 1, up - 1)
     }
 
     /// Gives each interface, besides its own addresses, the Tab5's
@@ -1154,7 +1202,8 @@ impl Stack {
             op::RESOLVE => {
                 let n = (b as usize).min(proto::NAME_MAX).min(mem.len());
                 let name = core::str::from_utf8(&mem[..n]).map_err(|_| status::BAD_REQUEST)?;
-                let w = self.eth[WLAN - 1].as_mut().ok_or(status::UNREACHABLE)?;
+                let up = self.uplink();
+                let w = self.eth[up - 1].as_mut().ok_or(status::UNREACHABLE)?;
                 let dns = w.dns.ok_or(status::UNREACHABLE)?;
                 let q = w
                     .sockets
@@ -1164,19 +1213,19 @@ impl Stack {
                 let i = match self.new_slot(client, Kind::Dns) {
                     Ok(i) => i,
                     Err(e) => {
-                        self.eth[WLAN - 1].as_mut().unwrap().sockets.get_mut::<dns::Socket>(dns).cancel_query(q);
+                        self.eth[up - 1].as_mut().unwrap().sockets.get_mut::<dns::Socket>(dns).cancel_query(q);
                         return Err(e);
                     }
                 };
-                self.attach(i, WLAN, Sock { handle: dns, pool: SHARED });
+                self.attach(i, up, Sock { handle: dns, pool: SHARED });
                 let slot = self.slots[i].as_mut().unwrap();
                 slot.query = Some(q);
                 slot.v6 = v6;
                 Ok((i as u32, 0))
             }
             op::RESOLVE_RESULT => {
-                let (_, h) = self.primary(client, sock, Kind::Dns)?;
-                let w = self.eth[WLAN - 1].as_mut().ok_or(status::UNREACHABLE)?;
+                let (link, h) = self.primary(client, sock, Kind::Dns)?;
+                let w = self.eth[link - 1].as_mut().ok_or(status::UNREACHABLE)?;
                 let slot = self.slots[sock as usize].as_mut().unwrap();
                 let Some(q) = slot.query else { return Err(status::BAD_REQUEST) };
                 match w.sockets.get_mut::<dns::Socket>(h).get_query_result(q) {
@@ -1458,6 +1507,8 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         fwd: Forwarder::new(),
         v6: fwd6::Fwd6::new(),
         dhcpd: None,
+        relay_up: WLAN,
+        fixed: None,
         relay: None,
         rules_gen: 0,
         reply_addr: None,
