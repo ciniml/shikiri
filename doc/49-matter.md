@@ -17,8 +17,8 @@
   | 段 | 内容 | 状態 |
   |---|---|---|
   | MT0 | ワークスペースに入れる。乱数と KVS のアダプタ。実機で暗号の速さを測る | 済み（§2） |
-  | MT1a | デバイスの役（On/Off）。試験アプリでループバックのコミッショニング、CASE、再起動後の CASE。t5emu の試験に入れる | まだ |
-  | MT1b | `net` にマルチキャストの参加、受けた宛先、送り元の固定。mDNS のレスポンダ。PC の chip-tool か smctl から on-network でコミッショニング | まだ |
+  | MT1a | デバイスの役（On/Off）。試験アプリでループバックのコミッショニング、CASE、再起動後の CASE。t5emu の試験に入れる | 済み（§3。t5emu は同じプロセスのコントローラから、§16） |
+  | MT1b | `net` にマルチキャストの参加、受けた宛先、送り元の固定。mDNS のレスポンダ。PC の chip-tool か smctl から on-network でコミッショニング | 済み（§3、chip-tool は §22） |
   | MT2 | コントローラの役と、シェルの `mt` コマンド | 済み（§6。運用中の機器ではなく PC の試験用のデバイスで） |
   | MT3 | Tab5 のデバイスの窓を開ける（OCW）、複数の fabric | 済み（§8） |
   | MT4 | BLE のコミッショニング（`ble` の M3/M4 の上） | 済み（デバイスの側は §10、コントローラの側は §12） |
@@ -179,7 +179,7 @@
     - smctl（btleplug）は ATT MTU を知らない（`att_mtu=None`）。そのため BTP の handshake で 23 を出し、フラグメントは 20 バイトになった。Tab5 の側の MTU は 247（`matter.ble_mtu`）。
     - 1 回のコミッショニングで C1 への書き込みが 111、indication が 171。
     - 接続の間隔は 50 ms（LE Enhanced Connection Complete の 0x0028）。それに対して、indication 1 つに平均 205 ms、最大 399 ms かかった（`ble` の中で `indicate_raw` の時間を測った。測った後で外した）。接続のイベント 4 回に 1 回ほどしか通っていない。C6 が無線を Wi-Fi と分け合っているためと思われる（doc/48 §9 の接続の失敗と同じ根）。
-    - MTU を出すコミッショナ（chip-tool やスマホ）なら、フラグメントは 244 バイトになり、数は 1/12 ほどになる見込み（まだ試していない）。
+    - MTU を出すコミッショナ（chip-tool やスマホ）なら、フラグメントは 244 バイトになり、数は 1/12 ほどになる見込み（chip-tool で 244 を確かめた。§24）。
   - ATT MTU は接続から約 2 秒後に 247 になった（最初の C1 への書き込みの前）。
 - **simple-matter の直しの確認**（2026-11-04。§8 の問題を simple-matter の側が直し、実機での確認を頼まれた。tab5-os の依存は a163275 のまま、手元で試しただけ）:
   - 44f3dce と 96c0171（どちらも main、未 push）を試した。デバイスのスタックは `MultiAdminStack` と同じ 6/3（exchange 6、再送バッファ 3）に戻している。
@@ -414,3 +414,20 @@
   - 推測: 再起動で C6 は切断を送らずに消えるので、AP に前の接続が残っていて、最初の 2 回はそれで断られる。
   - `wifi` は、切れた直後の 2 回は 1 秒後につなぎ直す（その後は 5 秒ごと）。起動から接続まで 21.1 秒 → 13.1 秒（設定から 14.6 秒 → 6.6 秒）。
 - **PC から C6 への BLE の接続の失敗**（doc/48 §9）: `wifi 5`（BT だけ、Wi-Fi を `Req_WifiStop` で止める）で `bleecho` に 10 回つないで 6/10。Wi-Fi ありの 7〜8 割と変わらない。Wi-Fi との無線の共存は原因ではない。これ以上は無線を捉える道具（スニファ）が要る。
+
+## 24. Tab5 を `matter-test` に置く、chip-tool の BLE、smctl の古いアドレス（2026-11-05）
+利用者の指示:「matterテスト中はそれでいいです」「123進めて良いです。」
+
+- **Matter の試験の間、Tab5 は `matter-test` に置く**: `iotap` では、有線の PC からの mDNS が Tab5 に届かない（§22）。
+  - smctl の `pairing ble-wifi`（試験用の fabric、ノード 7）で渡した。11.6 秒、1 回目で通った。`wifi.saved ok=true` で、網は `cfg` に保存された。passphrase は smctl の出力にも Tab5 のログにもない（0 件）。
+  - Tab5 は 192.168.8.181。PC は Wi-Fi のアダプタで同じ AP にいる。ファイアウォールの規則は網によらないので、PC からの ping は届かない。
+  - `iotap` へ戻すときは `run cfgctl 2`（`wifi.ssid` と `wifi.psk` を消す）の後に `wifi` を起動し直し、ノード 7 を unpair する。
+- **smctl が前のアドレスにこだわる**（simple-matter の smctl、1544fae）:
+  - ノード 1（`iotap` でコミッショニング）は、`nodes.tlv` に 192.168.2.112 を覚えていた。mDNS で新しいアドレスを見つけても、`start_case: NoSpace` で失敗し続けた。キャッシュへの Sigma1 がハンドシェイクの枠を使ったままになり、その片付けを待つ期限がもう過ぎていた。
+  - simple-matter のセッションに伝え、そちらで直った（作業ツリー。まだコミットしていない）。解決したアドレスが違えば、前のハンドシェイクを捨てて張り直す。実機で、古いアドレスから 11.8 秒で通った。`nodes.tlv` も書き換わり、次は 0.44 秒だった。
+  - 手元の smctl の状態は、`nodes.tlv` のアドレスを手で書き換えて使っている。
+- **chip-tool から BLE でコミッショニング**（snap の chip-tool v1.5.1、`pairing ble-wifi`、ノード 122、保存先は別のディレクトリで、試験の後に消した）:
+  - 14.4 秒で通った。BTP は version 4、ATT MTU 247、フラグメントは送受とも 244 バイト、窓は 6。Tab5 の側は C1 への書き込みが 20 回、indication が 24 回で、BLE の接続は 13.4 秒。
+  - Wi-Fi の段（AddOrUpdateWiFiNetwork、ConnectNetwork）も通った。Tab5 は同じ `matter-test` に入り直し、`wifi.saved ok=true`。
+  - その後、toggle（1.7 秒）、OnOff・VendorName・Fabrics の読み（各 0.75 秒）、unpair が通った。fabric は 3 → 2 に戻った。
+  - passphrase は chip-tool の出力にも Tab5 のログにもない（0 件）。
