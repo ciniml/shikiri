@@ -82,6 +82,16 @@ impl Watches {
         }
         self.list.push(Watch::new(node, ep, cluster, attr)).map_err(|_| "too many watches")?;
         self.save();
+        // The node's entries again in one subscription with the new one
+        // (Lapis refused a second, doc/49 §25). KeepSubscriptions is false:
+        // the device drops the one before.
+        if self.pending.is_empty() {
+            for w in self.list.iter_mut().filter(|w| w.node == node) {
+                w.sub = None;
+                w.retry_at = 0;
+                w.failures = 0;
+            }
+        }
         Ok(())
     }
 

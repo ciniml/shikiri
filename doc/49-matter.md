@@ -485,6 +485,9 @@
   - attestation で `CdVidPidMismatch`。CD に `dac_origin_vendor_id`/`dac_origin_product_id`（タグ 9、10）があると、DAC はそれと、CD の `vendor_id`/`product_id_array` は Basic Information と照合する（Core §6.2.3.1）。simple-matter 1544fae はタグ 9、10 を見ず、DAC をいつも CD の `vendor_id` と照合していた。third_party/simple-matter-1544fae に写して直し、`[patch]` で差し替えた（本体の直しは simple-matter に頼む）。
   - 失敗の理由を `matter.pair_failed`（`CommissionError` の名前）に出す。失敗したコミッショニングのトランザクションとハンドシェイクを解く（`abort_op`、`abort_handshake`）。attestation で失敗した後、すべての購読が `why=start` で始められなくなっていた。
   - 実機: 直した後、node 4 として 31 秒で入った（PASE、attestation、Wi-Fi の設定、CASE）。ほかの購読は切れなかった。
+- **Lapis を HA にも入れ、mtdash に出した**:
+  - Tab5 から `ocw 4` で窓を開け、AirQ のセッションが HA の `matter/commission` で入れた（Nature Remo Lapis、ブリッジの下に温度と湿度）。その後も Tab5 から読める（VendorName、PartsList [1, 2, 3]、温度 30.70 ℃）。
+  - `watch 4 2 0x402 0` と `watch 4 3 0x405 0`。2 本目は Lapis が IM 0x89 で断った（購読はあとから足した項目だけで張っていた）。`watch` で項目を足したら、そのノードの項目をまとめて購読し直す（KeepSubscriptions=false で前の購読は機器が捨てる）。実機では matter を起動し直して 1 本にまとめた（足したときの張り直しは、まだ実機で見ていない）。温度 30.85 ℃、湿度 34.37 %。
 - **残り**:
   - Tab5 から AirQ の fdde のアドレスへの IPv6（PASE、CASE）に返事がない（原因は不明）。PC からの ping は届く。AirQ の IPv4 が変わると、つなぎ直せないかもしれない。
   - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89。上のとおり、今は 1 本にまとめている）。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。
