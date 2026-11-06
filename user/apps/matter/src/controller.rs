@@ -231,10 +231,13 @@ pub struct Controller {
     /// Reports and lost subscriptions, for `watch` (the oldest go if no
     /// one takes them).
     reports: heapless::Deque<Report, 8>,
-    lost: heapless::Deque<u32, 4>,
-    /// Each live subscription's node: its reports may come on a session
-    /// the node no longer uses (CASE was made again).
-    subs: heapless::Vec<(u32, u64), 16>,
+    /// (node, subscription id).
+    lost: heapless::Deque<(u64, u32), 4>,
+    /// Each live subscription's session, id and node: its reports may come
+    /// on a session the node no longer uses (CASE was made again). Each
+    /// device numbers its own: the Light and the Door both gave 15, and by
+    /// the id alone the Door's reports went to the Light (doc/49 §25).
+    subs: heapless::Vec<(SessionId, u32, u64), 16>,
     /// A search by short discriminator: the request, and the devices
     /// PASE already failed with. Another device may share the 4 bits; it
     /// refuses the passcode and the next one is tried.
@@ -438,7 +441,7 @@ impl Controller {
         self.reports.pop_front()
     }
 
-    pub fn take_lost(&mut self) -> Option<u32> {
+    pub fn take_lost(&mut self) -> Option<(u64, u32)> {
         self.lost.pop_front()
     }
 
@@ -811,8 +814,8 @@ impl Controller {
                 let node = self
                     .subs
                     .iter()
-                    .find(|s| s.0 == subscription_id)
-                    .map(|s| s.1)
+                    .find(|s| s.0 == session && s.1 == subscription_id)
+                    .map(|s| s.2)
                     .or_else(|| self.nodes.iter().find(|n| n.session == Some(session)).map(|n| n.id))
                     .unwrap_or(0);
                 for report in self.stack.sub_reports() {
@@ -854,13 +857,17 @@ impl Controller {
                 }
                 true
             }
-            ImEvent::SubscriptionLost { subscription_id, .. } => {
-                event!(Warn, "matter.subscription_lost", id = subscription_id);
-                self.subs.retain(|s| s.0 != subscription_id);
+            ImEvent::SubscriptionLost { session, subscription_id } => {
+                let Some(i) = self.subs.iter().position(|s| s.0 == session && s.1 == subscription_id) else {
+                    event!(Warn, "matter.subscription_lost", node = 0u64, id = subscription_id);
+                    return true;
+                };
+                let node = self.subs.remove(i).2;
+                event!(Warn, "matter.subscription_lost", node = node, id = subscription_id);
                 if self.lost.is_full() {
                     self.lost.pop_front();
                 }
-                let _ = self.lost.push_back(subscription_id);
+                let _ = self.lost.push_back((node, subscription_id));
                 true
             }
             _ => false,
@@ -963,11 +970,11 @@ impl Controller {
                 match (op, ev) {
                     (Op::Invoke { .. } | Op::OpenWindow(_) | Op::Revoke, ImEvent::InvokeDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
                     (Op::Write { .. }, ImEvent::WriteDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
-                    (Op::Subscribe { paths, n, .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
+                    (Op::Subscribe { paths, n, .. }, ImEvent::SubscribeDone { session, subscription_id, max_interval_s }) => {
                         if self.subs.is_full() {
                             self.subs.remove(0);
                         }
-                        let _ = self.subs.push((subscription_id, node));
+                        let _ = self.subs.push((session, subscription_id, node));
                         // The priming report (the values at the start) is
                         // kept as a read's result; only these paths'.
                         for report in self.stack.read_reports() {

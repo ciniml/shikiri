@@ -177,8 +177,8 @@ impl Watches {
     }
 
     /// A subscription ended: subscribe again at once.
-    pub fn lost(&mut self, id: u32, now: u64) {
-        for w in self.list.iter_mut().filter(|w| w.sub == Some(id)) {
+    pub fn lost(&mut self, node: u64, id: u32, now: u64) {
+        for w in self.list.iter_mut().filter(|w| w.node == node && w.sub == Some(id)) {
             w.sub = None;
             w.retry_at = now;
         }

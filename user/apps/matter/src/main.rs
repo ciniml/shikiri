@@ -832,8 +832,8 @@ fn run(test: bool, memory: bool) -> Result<(), u32> {
         while let Some(r) = ctrl.take_report() {
             watches.report(&r, now_ms());
         }
-        while let Some(id) = ctrl.take_lost() {
-            watches.lost(id, now_ms());
+        while let Some((node, id)) = ctrl.take_lost() {
+            watches.lost(node, id, now_ms());
         }
         // The watched attributes: subscribe while no one else needs the
         // controller.
