@@ -469,7 +469,11 @@
   - 原因: simple-matter は購読のレポートを最後の 1 つだけ持つ（本文の `sub_result` とイベントの `sub_event`）。controller はそれを `pump` で取り出していたが、`poll` はレポートへの StatusResponse の ack が返るまで `pump` を呼ばない（`transport_deadline`）。その間に別のノードのレポートが来ると、前のレポートは上書きされていた。
   - 直し: `handle_rx` の直後に、購読のイベントを取り出す。一緒に取れた要求のイベントは `pump` まで取っておく。コミッショニング中は取り出さない（Commissioner が自分でスタックから取る）。
   - 実機: 直した後は、Door と Light の両方が Tab5 に届くのを利用者が確かめた。
+- **湿度を表示した（1 つのノードの watch を 1 本の購読に）**:
+  - AirQ は、Tab5 の購読を 2 本（CO2、温度）持った状態で、3 本目（湿度）を IM 0x89（RESOURCE_EXHAUSTED）で断った。simple-matter は KeepSubscriptions=false で購読するが、AirQ は前の購読を残していた。
+  - `Op::Subscribe` を、パス（エンドポイント、クラスタ、属性）を 4 つまで持つ形にした。`watch` は、まだ購読していない同じノードの項目を集めて、1 本の購読にする（失敗したら全部まとめて試し直す）。`sub` は 1 つのパスのまま。
+  - 実機: matter を起動し直すと、AirQ は 1 本（CO2、温度、湿度の 3 つのパス）、Door と Light は 1 本ずつになった。湿度は 31.58 %。
 - **残り**:
   - Tab5 から AirQ の fdde のアドレスへの IPv6（PASE、CASE）に返事がない（原因は不明）。PC からの ping は届く。AirQ の IPv4 が変わると、つなぎ直せないかもしれない。
-  - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89）。湿度は外した。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。
+  - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89。上のとおり、今は 1 本にまとめている）。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。
   - `matter` は客を 1 つずつしか扱わない。長いコミッショニングの間は `mtdash` の問い合わせが待たされ、取り残される（`matter.denied need=read` が出るが害はない）。

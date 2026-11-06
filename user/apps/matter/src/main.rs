@@ -35,7 +35,7 @@ use core::mem::MaybeUninit;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use blelink::BleLink;
-use controller::{ARGS, Controller, Op, Outcome, Val};
+use controller::{ARGS, Controller, Op, Outcome, SUB_PATHS, Val};
 use device::{Change, Device, Identity};
 use endpoints::{FIRST, Kind, LABEL_MAX, OWNER_MAX, SLOTS};
 use mtport::{FileKvs, KernelRng};
@@ -444,7 +444,7 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, wat
             (Some(node), Some(ep), Some(cl), Some(attr)) => {
                 let min_s = num(w.next()).unwrap_or(0).min(3600) as u16;
                 let max_s = num(w.next()).unwrap_or(60).clamp(min_s.max(1) as u64, 3600) as u16;
-                ctrl.start(node, Op::Subscribe { ep: ep as u16, cluster: cl as u32, attr: attr as u32, min_s, max_s }, now)
+                ctrl.start(node, Op::Subscribe { paths: [(ep as u16, cl as u32, attr as u32); SUB_PATHS], n: 1, min_s, max_s }, now)
             }
             _ => Err("sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]]"),
         },

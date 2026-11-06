@@ -11,7 +11,7 @@ use simple_matter::kvs::Kvs;
 use t5_rt::event;
 use t5_rt::log::FmtBuf;
 
-use crate::controller::{Op, Outcome, Report};
+use crate::controller::{Op, Outcome, Report, SUB_PATHS};
 use crate::store::Store;
 
 pub const MAX: usize = 8;
@@ -41,14 +41,14 @@ pub struct Watch {
 
 pub struct Watches {
     list: heapless::Vec<Watch, MAX>,
-    /// The entry whose subscribe the controller is doing.
-    pending: Option<usize>,
+    /// The entries whose subscribe the controller is doing (one node's).
+    pending: heapless::Vec<usize, SUB_PATHS>,
     kvs: &'static RefCell<Store>,
 }
 
 impl Watches {
     pub fn load(kvs: &'static RefCell<Store>) -> Watches {
-        let mut w = Watches { list: heapless::Vec::new(), pending: None, kvs };
+        let mut w = Watches { list: heapless::Vec::new(), pending: heapless::Vec::new(), kvs };
         let mut buf = [0u8; RECORD * MAX];
         if let Ok(Some(n)) = kvs.borrow_mut().get(KEY, &mut buf) {
             for r in buf[..n].chunks_exact(RECORD) {
@@ -89,7 +89,7 @@ impl Watches {
     pub fn remove(&mut self, node: u64, ep: u16, cluster: u32, attr: u32) -> Result<(), &'static str> {
         let i = self.find(node, ep, cluster, attr).ok_or("not watched")?;
         self.list.remove(i);
-        self.pending = None;
+        self.pending.clear();
         self.save();
         Ok(())
     }
@@ -103,43 +103,56 @@ impl Watches {
     }
 
     /// The next subscribe to start while the controller is free, if one is
-    /// due.
+    /// due: with the node's other entries not subscribed, in one
+    /// subscription (AirQ takes 3 per fabric and refused a third while
+    /// holding two, doc/49 §25).
     pub fn due(&mut self, now: u64) -> Option<(u64, Op)> {
-        if self.pending.is_some() {
+        if !self.pending.is_empty() {
             return None;
         }
-        let i = self.list.iter().position(|w| w.sub.is_none() && now >= w.retry_at)?;
-        self.pending = Some(i);
-        let w = &self.list[i];
-        Some((w.node, Op::Subscribe { ep: w.ep, cluster: w.cluster, attr: w.attr, min_s: 0, max_s: MAX_INTERVAL_S }))
+        let first = self.list.iter().position(|w| w.sub.is_none() && now >= w.retry_at)?;
+        let node = self.list[first].node;
+        let mut paths = [(0, 0, 0); SUB_PATHS];
+        for (i, w) in self.list.iter().enumerate().filter(|(_, w)| w.node == node && w.sub.is_none()) {
+            if self.pending.push(i).is_err() {
+                break;
+            }
+            paths[self.pending.len() - 1] = (w.ep, w.cluster, w.attr);
+        }
+        let n = self.pending.len() as u8;
+        Some((node, Op::Subscribe { paths, n, min_s: 0, max_s: MAX_INTERVAL_S }))
     }
 
     /// Whether a controller outcome is the answer to `due`'s subscribe.
     pub fn waiting(&self) -> bool {
-        self.pending.is_some()
+        !self.pending.is_empty()
     }
 
-    /// `due` could not start: try that entry again later.
+    /// `due` could not start: try those entries again later.
     pub fn not_started(&mut self, now: u64) {
-        if let Some(i) = self.pending.take() {
+        for i in core::mem::take(&mut self.pending) {
             self.failed(i, now);
         }
     }
 
     pub fn outcome(&mut self, o: Outcome, now: u64) {
-        let Some(i) = self.pending.take() else { return };
+        let pending = core::mem::take(&mut self.pending);
         match o {
             Outcome::Subscribed { id, .. } => {
-                let w = &mut self.list[i];
-                event!(Info, "matter.watching", node = w.node, ep = w.ep as u32, cluster = w.cluster, attr = w.attr, id = id);
-                w.sub = Some(id);
-                w.failures = 0;
+                for i in pending {
+                    let w = &mut self.list[i];
+                    event!(Info, "matter.watching", node = w.node, ep = w.ep as u32, cluster = w.cluster, attr = w.attr, id = id);
+                    w.sub = Some(id);
+                    w.failures = 0;
+                }
             }
             o => {
-                if let Outcome::Failed { why, status } = o {
+                if let (Outcome::Failed { why, status }, Some(&i)) = (o, pending.first()) {
                     event!(Info, "matter.watch_failed", node = self.list[i].node, why = why, status = status as u32);
                 }
-                self.failed(i, now)
+                for i in pending {
+                    self.failed(i, now);
+                }
             }
         }
     }
@@ -176,13 +189,13 @@ impl Watches {
         let before = self.list.len();
         self.list.retain(|w| w.node != node);
         if self.list.len() != before {
-            self.pending = None;
+            self.pending.clear();
             self.save();
         }
     }
 
     pub fn next_deadline(&self) -> Option<u64> {
-        if self.pending.is_some() {
+        if !self.pending.is_empty() {
             return None;
         }
         self.list.iter().filter(|w| w.sub.is_none()).map(|w| w.retry_at).min()

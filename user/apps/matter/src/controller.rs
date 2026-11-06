@@ -101,6 +101,8 @@ impl Val {
 
 /// A command's arguments, at most.
 pub const ARGS: usize = 6;
+/// A subscription's paths, at most.
+pub const SUB_PATHS: usize = 4;
 
 #[derive(Clone, Copy)]
 pub enum Op {
@@ -108,8 +110,9 @@ pub enum Op {
     Read { ep: u16, cluster: u32, attr: u32 },
     Write { ep: u16, cluster: u32, attr: u32, val: Val },
     /// Reports go to the log (`matter.report`) until the subscription is
-    /// lost or the process ends.
-    Subscribe { ep: u16, cluster: u32, attr: u32, min_s: u16, max_s: u16 },
+    /// lost or the process ends. Several paths (endpoint, cluster,
+    /// attribute) in one: AirQ takes few subscriptions (doc/49 §25).
+    Subscribe { paths: [(u16, u32, u32); SUB_PATHS], n: u8, min_s: u16, max_s: u16 },
     /// Events go to the log (`matter.event`), as reports do (doc/49 §22).
     SubscribeEvent { ep: u16, cluster: u32, event: u32, min_s: u16, max_s: u16 },
     /// AdministratorCommissioning: open an enhanced window (OCW), revoke it.
@@ -637,14 +640,13 @@ impl Controller {
                 now,
                 scratch,
             ),
-            Op::Subscribe { ep, cluster, attr, min_s, max_s } => self.stack.start_subscribe(
-                session,
-                &[AttributePath::concrete(EndpointId(ep), ClusterId(cluster), AttributeId(attr))],
-                min_s,
-                max_s,
-                now,
-                scratch,
-            ),
+            Op::Subscribe { paths, n, min_s, max_s } => {
+                let ps: heapless::Vec<AttributePath, SUB_PATHS> = paths[..n as usize]
+                    .iter()
+                    .map(|&(ep, cluster, attr)| AttributePath::concrete(EndpointId(ep), ClusterId(cluster), AttributeId(attr)))
+                    .collect();
+                self.stack.start_subscribe(session, &ps, min_s, max_s, now, scratch)
+            }
             Op::SubscribeEvent { ep, cluster, event, min_s, max_s } => self.stack.start_subscribe_events(
                 session,
                 &[],
@@ -961,17 +963,17 @@ impl Controller {
                 match (op, ev) {
                     (Op::Invoke { .. } | Op::OpenWindow(_) | Op::Revoke, ImEvent::InvokeDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
                     (Op::Write { .. }, ImEvent::WriteDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
-                    (Op::Subscribe { ep, cluster, attr, .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
+                    (Op::Subscribe { paths, n, .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
                         if self.subs.is_full() {
                             self.subs.remove(0);
                         }
                         let _ = self.subs.push((subscription_id, node));
                         // The priming report (the values at the start) is
-                        // kept as a read's result; only this path's.
+                        // kept as a read's result; only these paths'.
                         for report in self.stack.read_reports() {
                             let Ok(AttributeReportRef::Data(d)) = report else { continue };
                             let Some(c) = d.path.to_concrete() else { continue };
-                            if c.endpoint.0 != ep || c.cluster.0 != cluster || c.attribute.0 != attr {
+                            if !paths[..n as usize].contains(&(c.endpoint.0, c.cluster.0, c.attribute.0)) {
                                 continue;
                             }
                             let mut value = FmtBuf::<VALUE_TEXT>::new();
