@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel cfg cfgctl c6ota
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -35,6 +35,7 @@ PERMIT_mtbench := --permit random --permit svc:fs/rw:T5OS/MATTER --stack 32768
 PERMIT_mtreq  := --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin
 PERMIT_mtep   := --permit svc:matter/endpoint
 PERMIT_mtpanel := --permit display --permit touch --permit svc:matter/endpoint --permit svc:matter/read
+PERMIT_mtdash  := --permit display --permit touch --permit svc:matter/read --permit svc:matter/control
 PERMIT_cfg    := --permit listen:cfg --permit flash:cfg --permit random --permit svc:fs/rw:T5OS/CONFIG.A \
                  --permit svc:fs/rw:T5OS/CONFIG.B --stack 16384
 PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w:wifi.
@@ -74,7 +75,7 @@ QEMU_FLAGS := -M virt -smp 2 -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios no
 QEMU_STORE := -device loader,file=$(BUILD)/store/appmeta.bin,addr=0x84410000,force-raw=on \
               -device loader,file=$(BUILD)/store/apps.bin,addr=0x84420000,force-raw=on
 
-.PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 kernel-p4evb image-p4evb boot run-virt test-virt \
+.PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 kernel-p4evb image-p4evb kernel-p4evb3 image-p4evb3 boot boot-v3 run-virt test-virt \
         schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 flash-store monitor \
         probe-rs rtt clean kupdate-test-kernels flash-kernel-p4 kupdate install-apps
 
@@ -214,6 +215,19 @@ image-p4evb: kernel-p4evb
 	    $(BUILD)/t5-kernel-p4evb.elf $(BUILD)/t5-kernel-p4evb.bin
 	$(ELF2T5A) kernel $(BUILD)/t5-kernel-p4evb.bin $(BUILD)/t5-kernel-p4evb.t5k --key $(DEV_KEY)
 
+# The EV-Board v1.6.x: chip v3.x (doc/58 R1b), its own memory map and
+# bootloader (boot-v3).
+kernel-p4evb3: apps
+	cd kernel && cargo build --release \
+	    --features "platform-esp32p4v1 board-p4evb chip-v3" --target-dir target/p4evb3
+	mkdir -p $(BUILD) && cp kernel/target/p4evb3/riscv32imac-unknown-none-elf/release/t5-kernel $(BUILD)/t5-kernel-p4evb3.elf
+	tools/check-ram-text.sh $(BUILD)/t5-kernel-p4evb3.elf
+
+image-p4evb3: kernel-p4evb3
+	espflash save-image --chip esp32p4 --min-chip-rev 3.0 --flash-size 16mb \
+	    $(BUILD)/t5-kernel-p4evb3.elf $(BUILD)/t5-kernel-p4evb3.bin
+	$(ELF2T5A) kernel $(BUILD)/t5-kernel-p4evb3.bin $(BUILD)/t5-kernel-p4evb3.t5k --key $(DEV_KEY) --chip-rev 300
+
 # ESP app image for the 2nd stage bootloader (rev v1.x only), and the same
 # image signed as a kernel update package (T5K, doc/16 §2).
 KERNEL_T5K := $(BUILD)/t5-kernel-esp32p4v1.t5k
@@ -250,6 +264,11 @@ kupdate-test-kernels: image-p4
 # ESP-IDF bootloader + partition table (boot/sdkconfig.defaults, boot/partitions.csv).
 boot:
 	cd boot && bash -c '$(IDF) -B ../$(BUILD)/boot bootloader partition-table'
+
+# The same for chip v3.x (boot/sdkconfig.v3.defaults), in build/boot-v3.
+boot-v3:
+	cd boot && bash -c '$(IDF) -B ../$(BUILD)/boot-v3 -D SDKCONFIG=../$(BUILD)/boot-v3/sdkconfig \
+	    -D SDKCONFIG_DEFAULTS=sdkconfig.v3.defaults bootloader partition-table'
 
 # --- Targets below touch the device. Run them only deliberately. ---
 

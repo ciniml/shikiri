@@ -210,6 +210,10 @@ pub struct EthLink {
     changed: bool,
     /// The global IPv6 address last logged (SLAAC).
     v6_logged: Option<Ipv6Address>,
+    /// The IPv6 routes other than the default one (a Thread border
+    /// router's, RFC 4191), as last logged.
+    v6_routes_logged: usize,
+    v6_addrs_logged: usize,
     /// SLAAC is on: temporary addresses too (RFC 8981, doc/46 §4).
     slaac: bool,
     temp: Option<Temp>,
@@ -263,6 +267,8 @@ impl EthLink {
             report_at: clock_ns() + 5_000_000_000,
             changed: true,
             v6_logged: None,
+            v6_routes_logged: 0,
+            v6_addrs_logged: 0,
             slaac,
             temp: None,
             old_temps: [None; OLD_TEMPS],
@@ -379,6 +385,32 @@ impl EthLink {
                 event!(Info, "net.ipv6", link = LINK_NAMES[self.dev.link], addr = &a.octets()[..]);
             }
         }
+        let link = self.dev.link;
+        // Every address once their number changes (a link may have two
+        // on-link prefixes, doc/49 §25).
+        let n6 = self.iface.ip_addrs().iter().filter(|c| matches!(c, IpCidr::Ipv6(_))).count();
+        if n6 != self.v6_addrs_logged {
+            self.v6_addrs_logged = n6;
+            for c in self.iface.ip_addrs() {
+                if let IpCidr::Ipv6(c) = c {
+                    event!(Info, "net.ipv6_addr", link = LINK_NAMES[link], addr = &c.address().octets()[..], len = c.prefix_len() as u32);
+                }
+            }
+        }
+        let mut count = 0;
+        let logged = self.v6_routes_logged;
+        self.iface.routes_mut().update(|routes| {
+            let others = routes.iter().filter(|r| matches!(r.cidr, IpCidr::Ipv6(c) if c.prefix_len() > 0));
+            count = others.clone().count();
+            if count != logged {
+                for r in others {
+                    if let (IpCidr::Ipv6(c), IpAddress::Ipv6(via)) = (r.cidr, r.via_router) {
+                        event!(Info, "net.ipv6_route", link = LINK_NAMES[link], prefix = &c.address().octets()[..], len = c.prefix_len() as u32, via = &via.octets()[..]);
+                    }
+                }
+            }
+        });
+        self.v6_routes_logged = count;
     }
 
     /// No IPv4 address (IPv6 ones stay).

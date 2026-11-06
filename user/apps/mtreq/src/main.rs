@@ -18,7 +18,13 @@
 //! string), 19 `eps` (the apps' endpoints, doc/53), 20 `read NODE 2
 //! 0x402 0` (endpoint 2's temperature), 21 `invoke NODE 3 6 2` (toggle
 //! endpoint 3), 22 `read NODE 0 0x1d 3` (PartsList), 23 `epdel NODE` (NODE
-//! is the endpoint). The answer's lines are logged. Built with `--permit svc:matter`. Exit 0 if
+//! is the endpoint), 24 + 256 * NODE `paircode NODE CODE` (NODE: the
+//! first 10 digits of a manual pairing code), 25 `watch NODE 1 6 0`
+//! (On/Off), 26 `watch NODE 1 0x45 0` (BooleanState), 27 `watch NODE 1
+//! 0x40d 0` (CO2), 28 `values`, 29 `watch NODE 2 0x402 0` (temperature),
+//! 30 `watch NODE 3 0x405 0` (humidity), 31 + 256 * NODE + 65536 * N
+//! `pairaddr NODE CODE 192.168.8.N 5540`, 32 `relocate NODE`, 33 `unwatch
+//! NODE 3 0x405 0`. The answer's lines are logged. Built with `--permit svc:matter`. Exit 0 if
 //! the answer ended well.
 
 use core::fmt::Write as _;
@@ -55,6 +61,20 @@ fn main(op: usize, node: usize) -> usize {
         21 => write!(req, "invoke {node} 3 6 2"),
         22 => write!(req, "read {node} 0 0x1d 3"),
         23 => write!(req, "epdel {node}"),
+        // The demo's (doc/49 §25): OP 24 + 256 * NODE with the first 10
+        // digits of a manual pairing code (the check digit is worked out).
+        o if o & 0xFF == 24 => write!(req, "paircode {} {:010}", o >> 8, node),
+        // 31 + 256 * NODE + 65536 * N: `pairaddr NODE CODE 192.168.8.N 5540`
+        // (matter-test; NODE here is the code's first 10 digits).
+        o if o & 0xFF == 31 => write!(req, "pairaddr {} {:010} 192.168.8.{} 5540", (o >> 8) & 0xFF, node, o >> 16),
+        32 => write!(req, "relocate {node}"),
+        33 => write!(req, "unwatch {node} 3 0x405 0"),
+        25 => write!(req, "watch {node} 1 6 0"),
+        26 => write!(req, "watch {node} 1 0x45 0"),
+        27 => write!(req, "watch {node} 1 0x40d 0"),
+        28 => write!(req, "values"),
+        29 => write!(req, "watch {node} 2 0x402 0"),
+        30 => write!(req, "watch {node} 3 0x405 0"),
         _ => return 1,
     };
     let Ok(c) = Channel::connect(matter::SVC) else {

@@ -166,7 +166,7 @@ impl Slaac {
         }
     }
 
-    fn process_prefix(&mut self, prefix: NdiscPrefixInformation, now: Instant) {
+    pub(super) fn process_prefix(&mut self, prefix: NdiscPrefixInformation, now: Instant) {
         if !prefix.flags.contains(NdiscPrefixInfoFlags::ADDRCONF) {
             return;
         }
@@ -203,6 +203,17 @@ impl Slaac {
         // Advertisement might be unsolicited
         if self.phase == Phase::Discovering {
             self.phase = Phase::Maintaining;
+        }
+    }
+
+    /// A Route Information option (RFC 4191) of an advertisement from
+    /// `source`: a route to `cidr` through it for `lifetime`, or none if 0.
+    /// A Thread border router announces its off-mesh prefix this way.
+    pub(super) fn process_route_info(&mut self, source: &Ipv6Address, cidr: Ipv6Cidr, lifetime: Duration, now: Instant) {
+        if lifetime > Duration::ZERO {
+            self.add_route(&cidr, source, now + lifetime);
+        } else {
+            self.expire_route(&cidr, source);
         }
     }
 

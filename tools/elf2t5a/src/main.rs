@@ -13,7 +13,7 @@
 //!                 [--stack BYTES] [--permit NAME]... [--needs NAME]... [--autostart]
 //!                 [--secure-version N] [--abi MAJOR.MINOR]
 //!   elf2t5a verify IMAGE.t5a --public FILE
-//!   elf2t5a kernel IN.bin OUT.t5k --key SECRET
+//!   elf2t5a kernel IN.bin OUT.t5k --key SECRET [--chip-rev REV]
 //!   elf2t5a verify-kernel PACKAGE.t5k --public FILE
 //!   elf2t5a otadata OUT.bin SEQ STATE
 //!
@@ -46,7 +46,7 @@ const USAGE: &str = "usage:
   elf2t5a build IN.elf OUT.t5a --key SECRET [--name NAME] [--version X.Y.Z] [--stack BYTES]
                 [--permit NAME]... [--needs NAME]... [--autostart] [--secure-version N] [--abi MAJOR.MINOR]
   elf2t5a verify IMAGE.t5a --public FILE
-  elf2t5a kernel IN.bin OUT.t5k --key SECRET
+  elf2t5a kernel IN.bin OUT.t5k --key SECRET [--chip-rev REV]
   elf2t5a verify-kernel PACKAGE.t5k --public FILE
   elf2t5a otadata OUT.bin SEQ STATE";
 
@@ -339,11 +339,12 @@ fn verify(args: &[String]) -> Result<(), String> {
 
 /// Signs an ESP app image as a T5K package.
 fn kernel(args: &[String]) -> Result<(), String> {
-    let (mut files, mut key) = (Vec::new(), None);
+    let (mut files, mut key, mut rev) = (Vec::new(), None, 100);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--key" => key = Some(it.next().cloned().ok_or("--key needs a value")?),
+            "--chip-rev" => rev = it.next().and_then(|v| v.parse().ok()).ok_or("--chip-rev needs a number")?,
             s => files.push(s.to_string()),
         }
     }
@@ -353,7 +354,7 @@ fn kernel(args: &[String]) -> Result<(), String> {
     if esp.len != image.len() {
         return Err(format!("{input}: {} bytes after the image", image.len() - esp.len));
     }
-    esp.check_chip(100).map_err(|e| format!("{input}: {e:?}"))?;
+    esp.check_chip(rev).map_err(|e| format!("{input}: {e:?}"))?;
     let kp = KeyPair::from_seed(Seed::new(read_hex32(&key)?));
     let mut out = image.clone();
     out.extend_from_slice(&t5k::header(image.len()));

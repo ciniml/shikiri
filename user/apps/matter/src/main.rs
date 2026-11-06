@@ -15,13 +15,15 @@
 //!
 //! `run matter 1` is the emulator's test (doc/49 §16): no Wi-Fi, no SD card
 //! and no BLE there, so the sockets are on any link (127.0.0.1 works), the
-//! store is in memory and the MAC is made up.
+//! store is in memory and the MAC is made up. `run matter 2` is the real
+//! thing with the store in memory (without the SD card; nothing is kept).
 //!
 //! Built with `--permit svc:net --permit svc:fs --permit random --permit
 //! listen:matter --permit svc:ble`.
 
 mod blelink;
 mod controller;
+mod watch;
 mod device;
 mod endpoints;
 mod store;
@@ -107,7 +109,7 @@ fn wifi_addrs(net: &Net) -> Option<Addrs> {
 }
 
 fn main(mode: usize, _: usize) -> usize {
-    match run(mode & 1 != 0) {
+    match run(mode & 1 != 0, mode & 2 != 0) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "matter.failed", step = step);
@@ -249,15 +251,15 @@ fn num(s: Option<&str>) -> Option<u64> {
 /// windows, credentials).
 fn grant_for(cmd: &str) -> &'static str {
     match cmd {
-        "status" | "nodes" | "read" | "sub" | "subev" | "eps" | "help" | "" => "read",
-        "on" | "off" | "toggle" | "invoke" | "write" => "control",
+        "status" | "nodes" | "read" | "sub" | "subev" | "eps" | "values" | "help" | "" => "read",
+        "on" | "off" | "toggle" | "invoke" | "write" | "watch" | "unwatch" => "control",
         "endpoint" => "endpoint",
         _ => "admin",
     }
 }
 
 /// One request; true if the answer comes later (from the controller).
-fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, ble: &mut BleLink, now: u64) -> bool {
+fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, watches: &mut watch::Watches, ble: &mut BleLink, now: u64) -> bool {
     let mut w = line.split_ascii_whitespace();
     let cmd = w.next().unwrap_or("");
     let mut text = FmtBuf::<120>::new();
@@ -307,11 +309,27 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, ble
             return false;
         }
         "pair" => match (num(w.next()), num(w.next()), num(w.next())) {
-            (Some(node), Some(passcode), Some(d)) => ctrl.pair(node, passcode as u32, d as u16, now),
+            (Some(node), Some(passcode), Some(d)) => ctrl.pair(node, passcode as u32, controller::Disc::Long(d as u16), now),
             _ => Err("pair NODE PASSCODE DISCRIMINATOR"),
         },
-        "pairaddr" => match (num(w.next()), num(w.next()), w.next().and_then(|a| a.parse::<IpAddr>().ok()), num(w.next())) {
-            (Some(node), Some(passcode), Some(ip), Some(port)) => ctrl.pair_addr(node, passcode as u32, SocketAddr::new(ip, port as u16), now),
+        // A manual pairing code (as an ecosystem shows for an open window),
+        // dashes allowed.
+        "paircode" => match (num(w.next()), w.next().and_then(manual_code)) {
+            (Some(node), Some((passcode, short))) => ctrl.pair(node, passcode, controller::Disc::Short(short), now),
+            (Some(_), None) => Err("not a valid 11-digit pairing code"),
+            _ => Err("paircode NODE CODE"),
+        },
+        // PASSCODE may be a manual pairing code (more than 8 digits).
+        "relocate" => match num(w.next()) {
+            Some(node) => ctrl.relocate(node, now),
+            None => Err("relocate NODE"),
+        },
+        "pairaddr" => match (w.next(), w.next(), w.next().and_then(|a| a.parse::<IpAddr>().ok()), num(w.next())) {
+            (Some(node), Some(code), Some(ip), Some(port))
+                if let (Some(node), Some(passcode)) = (num(Some(node)), if code.len() > 8 { manual_code(code).map(|c| c.0 as u64) } else { num(Some(code)) }) =>
+            {
+                ctrl.pair_addr(node, passcode as u32, SocketAddr::new(ip, port as u16), now)
+            }
             _ => Err("pairaddr NODE PASSCODE IP PORT"),
         },
         // The passphrase is not logged (nor is the request).
@@ -340,8 +358,34 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, ble
             (Some(_), Some(_), Some(_)) => Err("busy"),
             _ => Err("pairble NODE PASSCODE DISCRIMINATOR"),
         },
+        // Attributes kept subscribed, and their last values (a panel's).
+        "watch" | "unwatch" => {
+            let r = match (num(w.next()), num(w.next()), num(w.next()), num(w.next())) {
+                (Some(node), Some(ep), Some(cl), Some(attr)) if cmd == "watch" => watches.add(node, ep as u16, cl as u32, attr as u32),
+                (Some(node), Some(ep), Some(cl), Some(attr)) => watches.remove(node, ep as u16, cl as u32, attr as u32),
+                _ => Err("watch|unwatch NODE EP CLUSTER ATTR"),
+            };
+            reply(c, r.err().unwrap_or("ok"));
+            end(c, r.is_ok());
+            return false;
+        }
+        // A line per entry: NODE EP CLUSTER ATTR, `+` if subscribed (else
+        // `-`), seconds since its last report (or `-`), the value (or `-`).
+        "values" => {
+            for e in watches.iter() {
+                let mut t = FmtBuf::<120>::new();
+                let _ = write!(t, "{} {} {} {} {} ", e.node, e.ep, e.cluster, e.attr, if e.sub.is_some() { '+' } else { '-' });
+                let _ = match (&e.value, e.at) {
+                    (Some(v), at) => write!(t, "{} {}", now.saturating_sub(at) / 1000, v.as_str()),
+                    (None, _) => write!(t, "- -"),
+                };
+                reply(c, t.as_str());
+            }
+            end(c, true);
+            return false;
+        }
         "forget" => {
-            match num(w.next()).ok_or("forget NODE").and_then(|node| ctrl.forget(node)) {
+            match num(w.next()).ok_or("forget NODE").and_then(|node| ctrl.forget(node).map(|_| watches.forget(node))) {
                 Ok(()) => {
                     reply(c, "forgotten");
                     end(c, true);
@@ -436,7 +480,7 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, ble
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]] | ocw NODE [SECONDS] | revoke NODE | eps | epdel N | endpoint KIND [LABEL]"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | paircode NODE CODE | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]] | watch NODE EP CLUSTER ATTR | unwatch NODE EP CLUSTER ATTR | values | relocate NODE | ocw NODE [SECONDS] | revoke NODE | eps | epdel N | endpoint KIND [LABEL]"),
     };
     match started {
         Ok(()) => true,
@@ -449,6 +493,34 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, ble
             false
         }
     }
+}
+
+/// The passcode and the short discriminator (its top 4 bits) of an
+/// 11-digit manual pairing code (Core spec §5.1.4.1), or `None` if it is
+/// not one or its check digit is wrong. 10 digits are taken as the code
+/// without its check digit (`mtreq` can pass only numbers that fit 32 bits).
+fn manual_code(s: &str) -> Option<(u32, u8)> {
+    let mut d = [0u8; 11];
+    let mut n = 0;
+    for b in s.bytes().filter(|&b| b != b'-' && b != b' ') {
+        if !b.is_ascii_digit() || n == d.len() {
+            return None;
+        }
+        d[n] = b;
+        n += 1;
+    }
+    // A leading digit above 3 marks the 21-digit form (vendor and product).
+    let checked = n == d.len();
+    if !(checked || n == d.len() - 1) || d[0] > b'3' {
+        return None;
+    }
+    let val = |r: core::ops::Range<usize>| d[r].iter().fold(0u32, |v, &b| v * 10 + (b - b'0') as u32);
+    let (c1, c2, c3) = (val(0..1), val(1..6), val(6..10));
+    let short = ((c1 << 2) | (c2 >> 14)) as u8;
+    let passcode = (c2 & 0x3FFF) | (c3 << 14);
+    // Encoding it again gives the same digits, check digit included.
+    let again = onboarding::manual_pairing_code((short as u16) << 8, passcode);
+    (if checked { again == d } else { again[..10] == d[..10] }).then_some((passcode, short))
 }
 
 /// A fresh passcode, discriminator and salt for a window on another node.
@@ -510,7 +582,10 @@ fn outcome(c: &Channel, o: Outcome) {
     end(c, ok);
 }
 
-fn run(test: bool) -> Result<(), u32> {
+/// `test`: t5emu's loopback (doc/49 §16). `memory`: the store in memory
+/// only (the real network; nothing is kept), for when the SD card is not
+/// there.
+fn run(test: bool, memory: bool) -> Result<(), u32> {
     // `net` may be starting too (at boot, or after it was restarted).
     let mut tries = 0;
     let mut net = loop {
@@ -534,7 +609,7 @@ fn run(test: bool) -> Result<(), u32> {
             }
         }
     };
-    let kvs = if test {
+    let kvs = if test || memory {
         Store::Mem(MemKvs::new())
     } else {
         Store::File(FileKvs::open().map_err(|e| {
@@ -577,6 +652,7 @@ fn run(test: bool) -> Result<(), u32> {
     let listener = Listener::open(matter::SVC).map_err(|_| 8u32)?;
     event!(Info, "matter.ready", fabrics = dev.fabrics() as u32, discriminator = DISCRIMINATOR as u32, mac = &addrs.mac[..], on = dev.on(), test = test);
 
+    let mut watches = watch::Watches::load(kvs);
     let mut client: Option<Client> = None;
     let mut eps: [Option<EpSession>; SLOTS] = Default::default();
     let mut ble = BleLink::new();
@@ -620,7 +696,7 @@ fn run(test: bool) -> Result<(), u32> {
                             eps[(ep - FIRST) as usize] = chan.map(|chan| EpSession { chan, ep });
                         }
                     } else {
-                        cl.waiting = request(line, &cl.chan, dev, ctrl, &mut ble, now_ms());
+                        cl.waiting = request(line, &cl.chan, dev, ctrl, &mut watches, &mut ble, now_ms());
                     }
                     if !client.as_ref().is_some_and(|c| c.waiting) {
                         client = None;
@@ -749,8 +825,24 @@ fn run(test: bool) -> Result<(), u32> {
                     outcome(&cl.chan, o);
                     client = None;
                 }
+                _ if watches.waiting() => watches.outcome(o, now_ms()),
                 _ => {}
             }
+        }
+        while let Some(r) = ctrl.take_report() {
+            watches.report(&r, now_ms());
+        }
+        while let Some(id) = ctrl.take_lost() {
+            watches.lost(id, now_ms());
+        }
+        // The watched attributes: subscribe while no one else needs the
+        // controller.
+        if !ctrl.busy()
+            && !client.as_ref().is_some_and(|c| c.waiting)
+            && let Some((node, op)) = watches.due(now_ms())
+            && ctrl.start(node, op, now_ms()).is_err()
+        {
+            watches.not_started(now_ms());
         }
         let now = now_ms();
         if now >= next_addrs && !test {
@@ -765,6 +857,7 @@ fn run(test: bool) -> Result<(), u32> {
                 .next_deadline(now)
                 .unwrap_or(u64::MAX)
                 .min(ctrl.next_deadline(now).unwrap_or(u64::MAX))
+                .min(watches.next_deadline().unwrap_or(u64::MAX))
                 .min(ble.next_deadline().unwrap_or(u64::MAX));
             let deadline = if test { deadline } else { deadline.min(next_addrs) };
             let ms = deadline.saturating_sub(now).clamp(1, IDLE_MS);

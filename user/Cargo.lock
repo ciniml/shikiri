@@ -713,6 +713,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtdash"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "t5-rt",
+]
+
+[[package]]
 name = "mtep"
 version = "0.1.0"
 dependencies = [

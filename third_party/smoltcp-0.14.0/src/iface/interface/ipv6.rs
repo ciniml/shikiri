@@ -131,6 +131,14 @@ impl InterfaceInner {
             if avoided(&sa) != avoided(&sb) {
                 return avoided(&sa);
             }
+            // tab5-os (doc/49 §25): an address in the destination's own
+            // subnet first, before rule 7. With two on-link prefixes, a
+            // temporary address of the other one made a peer answer to a
+            // prefix it had as deprecated, and the answers were lost.
+            let (na, nb) = (a.contains_addr(dst_addr), b.contains_addr(dst_addr));
+            if na != nb {
+                return nb;
+            }
             // Rule 7: prefer temporary addresses.
             if preferred(&sa) != preferred(&sb) {
                 return preferred(&sb);
@@ -388,6 +396,14 @@ impl InterfaceInner {
             &icmp_packet,
             &self.caps.checksum,
         ));
+        #[cfg(feature = "proto-ipv6-slaac")]
+        if self.slaac_enabled
+            && matches!(icmp_repr, Icmpv6Repr::Ndisc(NdiscRepr::RouterAdvert { .. }))
+            && ip_repr.src_addr.is_link_local()
+            && ip_repr.hop_limit == 255
+        {
+            self.process_route_info_options(&ip_repr.src_addr, icmp_packet.payload());
+        }
 
         #[cfg(feature = "socket-icmp")]
         let mut handled_by_icmp_socket = false;
@@ -458,6 +474,51 @@ impl InterfaceInner {
     }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    /// The Route Information options (RFC 4191 §2.3, type 24) and every
+    /// Prefix Information option of a router advertisement's `options`:
+    /// NdiscRepr keeps only the last prefix and no routes, so they are read
+    /// from the raw options here (a network may announce two on-link
+    /// prefixes in one advertisement).
+    #[cfg(feature = "proto-ipv6-slaac")]
+    fn process_route_info_options(&mut self, router: &Ipv6Address, mut options: &[u8]) {
+        const ROUTE_INFORMATION: u8 = 24;
+        while options.len() >= 8 {
+            let len = options[1] as usize * 8;
+            if len == 0 || len > options.len() {
+                return;
+            }
+            let (opt, rest) = options.split_at(len);
+            options = rest;
+            if let Ok(o) = NdiscOption::new_checked(opt)
+                && let Ok(NdiscOptionRepr::PrefixInformation(info)) = NdiscOptionRepr::parse(&o)
+            {
+                if info.is_valid_prefix_info() {
+                    self.slaac.process_prefix(info, self.now);
+                }
+                continue;
+            }
+            let prefix_len = opt[2];
+            // The prefix takes 0, 8 or 16 bytes, by the prefix length.
+            if opt[0] != ROUTE_INFORMATION || prefix_len > 128 || len < 8 + (prefix_len as usize).div_ceil(64) * 8 {
+                continue;
+            }
+            let mut prefix = [0u8; 16];
+            let n = (len - 8).min(16);
+            prefix[..n].copy_from_slice(&opt[8..8 + n]);
+            let lifetime_s = u32::from_be_bytes([opt[4], opt[5], opt[6], opt[7]]);
+            // 0xFFFFFFFF is "infinity"; a day is long enough, the router
+            // advertises again well before.
+            let lifetime = Duration::from_secs(if lifetime_s == u32::MAX { 86_400 } else { lifetime_s as u64 });
+            let cidr = Ipv6Cidr::new(Ipv6Address::from(prefix), prefix_len);
+            // Not the default route: that is the router lifetime's.
+            if prefix_len == 0 {
+                continue;
+            }
+            net_debug!("route information {} via {} for {}", cidr, router, lifetime);
+            self.slaac.process_route_info(router, cidr, lifetime, self.now);
+        }
+    }
+
     pub(super) fn process_ndisc<'frame>(
         &mut self,
         ip_repr: Ipv6Repr,
@@ -719,7 +780,8 @@ impl Interface {
                         (IpCidr::Ipv6(cidr), IpAddress::Ipv6(via_router)) => {
                             !route.same_route(cidr, via_router)
                         }
-                        _ => false,
+                        // An IPv4 route (DHCP's default) is not this one.
+                        _ => true,
                     }) {
                         let _ = routes.push(Route {
                             cidr: route.cidr.into(),

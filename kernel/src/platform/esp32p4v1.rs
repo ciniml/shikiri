@@ -186,6 +186,16 @@ const CLIC_CTRL_BASE: usize = 0x2080_1000;
 const CLIC_TIMER_CTRL: u32 = (0x3F << 24) | (1 << 8);
 const CLIC_IP: u32 = 1 << 0;
 
+/// Threshold 0: every enabled level gets through. v3 keeps the threshold in
+/// the standard `mintthresh` CSR (0x347, riscv/csr_clic.h) instead.
+unsafe fn clic_open() {
+    unsafe {
+        wr(CLIC_INT_THRESH, 0);
+        #[cfg(feature = "chip-v3")]
+        core::arch::asm!("csrw 0x347, zero");
+    }
+}
+
 // Flash MMU (doc/14 §5.1, doc/research/m3-flash-access.md §1): one entry per
 // 64 KiB page of the window 0x4000_0000-0x43FF_FFFF. Write the entry number to
 // ITEM_INDEX, then `(paddr >> 16) | VALID` to ITEM_CONTENT (spi_mem_c_reg.h:
@@ -295,7 +305,10 @@ pub fn l2_line() -> u32 {
 // on the P4, so SPI0 (the cache) must not touch flash meanwhile (doc/14 §5.2).
 const ROM_SPIFLASH_ERASE_SECTOR: usize = 0x4FC0_014C;
 const ROM_SPIFLASH_WRITE: usize = 0x4FC0_0154;
+#[cfg(not(feature = "chip-v3"))]
 const ROM_SPIFLASH_LEGACY_DATA: usize = 0x4FF3_FFE8;
+#[cfg(feature = "chip-v3")]
+const ROM_SPIFLASH_LEGACY_DATA: usize = 0x4FFB_FFE8;
 const SECTOR: u32 = 4096;
 const PAGE: usize = 256;
 
@@ -501,7 +514,10 @@ unsafe fn wr(addr: usize, v: u32) {
 }
 
 impl Platform for Esp32p4v1 {
+    #[cfg(not(feature = "chip-v3"))]
     const NAME: &'static str = "esp32p4-v1.x";
+    #[cfg(feature = "chip-v3")]
+    const NAME: &'static str = "esp32p4-v3.x";
     const MTVEC_MODE: usize = 3;
     // Upper L2MEM below the 128 KiB L2 cache (doc/02 §1.1, doc/07 §3), but
     // the kernel's .bss below it (RAM_HI, doc/30 §2). Apps only use it when
@@ -563,7 +579,7 @@ impl Platform for Esp32p4v1 {
             Self::ipi_clear();
             wr(INTMTX_CORE1_BASE + 4 * (FROM_CPU_INTR0_SOURCE + 1), IPI_CLIC_INDEX as u32);
             wr(CLIC_CTRL_BASE + 4 * IPI_CLIC_INDEX, CLIC_TIMER_CTRL);
-            wr(CLIC_INT_THRESH, 0);
+            clic_open();
             if L2_LINE == 128 {
                 set_l2_line();
             }
@@ -618,7 +634,7 @@ impl Platform for Esp32p4v1 {
             Self::ipi_clear();
             wr(INTMTX_CORE0_BASE + 4 * FROM_CPU_INTR0_SOURCE, IPI_CLIC_INDEX as u32);
             wr(CLIC_CTRL_BASE + 4 * IPI_CLIC_INDEX, CLIC_TIMER_CTRL);
-            wr(CLIC_INT_THRESH, 0);
+            clic_open();
         }
     }
 
@@ -992,13 +1008,16 @@ impl Platform for Esp32p4v1 {
         }
         // PVT first, then the clock, as ESP-IDF's pmu_init and esp_clk_init
         // do (doc/research/m4-psram-and-clock.md §10).
-        if !clock::pvt_on() {
+        // On v3 ESP-IDF uses PVT only with eFuse block versions 2..99 and
+        // otherwise runs 400 MHz on the PMU's default dbias (24,
+        // pmu_param.c:332-350), which the bootloader leaves.
+        if !clock::pvt_on() && !cfg!(feature = "chip-v3") {
             t5_abi::event!(Warn, "clock.no_pvt");
             return;
         }
-        let mhz = clock::cpu_360();
+        let mhz = clock::cpu_full();
         t5_abi::event!(Info, "clock.cpu", mhz = mhz.unwrap_or(0), measured_khz = cpu_khz());
-        clock::log_voltages("cpu360");
+        clock::log_voltages("cpu_full");
     }
 
     fn set_cpu_mhz(mhz: u32) -> Result<u32, &'static str> {

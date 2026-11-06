@@ -514,6 +514,24 @@
     - ブートローダは `ESP32P4_SELECTS_REV_LESS_V3=n` で作り直しが要る。
     - CPLL は 400 MHz で、PVT の値も違う。
   - どれも定数と小さな `#[cfg]`、2 つ目のリンカスクリプトで済む見込み。feature `chip-v3` にする。ドライバの書き直しは要らない。PSRAM は 200 MHz の設定のままでも動く見込み（推測）。
+- **R1b その 1: チップ v3 のカーネル（EVB v1.6.0、2026-11-07、途中）**:
+  - **作ったもの**:
+    - feature `chip-v3`（`make image-p4evb3`）と `kernel/link-esp32p4v3.ld`。v3 はブートローダが 128 KiB の L2 キャッシュを L2MEM の下の端（0x4FF0_0000〜0x4FF2_0000）に置く。
+      - RAM: 0x4FF2_0000 から 0x25000。
+      - RAM_HI: 0x4FF8_0000 まで（v1 と同じく、アプリの領域と Wi-Fi/Ethernet のリングの手前まで）。
+      - Core1 のスタックは、ブートローダの領域（0x4FFA_0000〜0x4FFB_AFC0）に置く。
+    - ROM の関数の番地は v1 と全部同じだった（esp32p4.rom.ld と rom.eco5.ld を突き合わせた）。違うのは `rom_spiflash_legacy_data`（0x4FFB_FFE8）だけ。
+    - CLIC の閾値は、v3 では CSR `mintthresh`（0x347）にもある。両方を 0 にする。
+    - CPLL は 400 MHz（v1 は 360 MHz）。分周は同じで、CPU 400、MEM 200、APB 100 MHz。ESP-IDF は v3（eFuse のブロック版が 100 以上）では PVT を使わず、既定の dbias 24 で 400 MHz で動かす。ブートローダもその値のまま渡す。
+    - ブートローダは `boot/sdkconfig.v3.defaults`（`make boot-v3`、REV_LESS_V3=n、最小の版 3.0）。`elf2t5a kernel` に `--chip-rev` を足した。
+  - **実機（利用者の確認の後）**:
+    - フラッシュ全体を `build/evb160-flash-backup.bin`（sha256 727a484f…）に読み出した。espflash の ROM モードでは読めず、ESP-IDF 6.0 の esptool の stub を使った。
+    - esptool の `--erase-all` で全体を消してから書いた（確認のときに挙げたのは otadata の消去だけだった。出荷時の中身は上のバックアップにある）。
+    - 最初の版（CPU 100 MHz のまま）は 2 回起動した: 2 コア、PSRAM 32 MB（memtest 0 件）、フラッシュの写像、乱数。
+    - その後、USB の Serial/JTAG への入力が止まった。電源を入れ直すと列挙もされなかった。ダウンロードモードでも ROM が例外の中で回り、書き込みが `Write timeout` になった。
+    - JTAG（OpenOCD）は使え、ota_0 を消すと戻った。続く 400 MHz の版の書き込みも途中で切れたので、USB の線や給電の問題も疑っている。
+    - 今の ota_0 は書きかけで、ブートローダが拒む。
+  - **残り**: USB が止まる原因の切り分け（線、給電、ブートローダの設定、カーネル）、400 MHz の版、ストアと Ethernet、Wi-Fi。中断してデモ（doc/49 §25）を先にした。
 
 ## 6. 推測と未確認
 - EMAC が DesignWare GMAC 3.x と同じ形というのは推測。TRM の章で確かめてから書く。

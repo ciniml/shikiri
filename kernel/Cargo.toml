@@ -18,6 +18,10 @@ platform-esp32p4v1 = []
 # The board under platform-esp32p4v1 (doc/58 §3.1): the Tab5 unless this
 # is set (the ESP32-P4-Function-EV-Board v1.5.x).
 board-p4evb = []
+# Chip v3.x (ESP32-P4 ECO5, the EV-Board v1.6.x; doc/58 R1b): another memory
+# map (the L2 cache at the bottom of L2MEM) and ROM data address. Needs a
+# bootloader built for v3 (boot/sdkconfig.v3).
+chip-v3 = []
 # L3 test: lock the core up after the self-test (doc/12 §7). Never ship.
 test-lockup = []
 # M5a rollback tests (doc/16 §3.6): a kernel that panics right after it

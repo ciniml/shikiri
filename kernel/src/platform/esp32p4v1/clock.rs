@@ -183,12 +183,17 @@ const LP_CLKRST_HP_CLK_CTRL: usize = 0x5011_1040;
 const HP_ROOT_CLK_SRC_CPLL: u32 = 1;
 /// ets_update_cpu_frequency (esp32p4.rom.ld:32): the ROM's ticks per µs.
 const ROM_UPDATE_CPU_FREQUENCY: usize = 0x4FC0_0044;
-const CPLL_MHZ: u32 = 360;
+/// CPLL as the bootloader leaves it: 360 MHz on v1.x, 400 MHz on v3
+/// (rtc_clk.c, the CONFIG_ESP32P4_SELECTS_REV_LESS_V3 branches).
+#[cfg(not(feature = "chip-v3"))]
+pub const CPLL_MHZ: u32 = 360;
+#[cfg(feature = "chip-v3")]
+pub const CPLL_MHZ: u32 = 400;
 
 /// (CPU, MEM, SYS, APB) dividers - 1, as in the registers. CPU 360, MEM
-/// 180, SYS 180, APB 90 (rtc_clk.c:231-245).
-const DIV_360: [u32; 4] = [0, 1, 0, 1];
-const DIV_90: [u32; 4] = [3, 0, 0, 0];
+/// 180, SYS 180, APB 90 (rtc_clk.c:231-245); on v3 400, 200, 200, 100.
+const DIV_FULL: [u32; 4] = [0, 1, 0, 1];
+const DIV_QUARTER: [u32; 4] = [3, 0, 0, 0];
 
 fn dividers() -> [u32; 4] {
     unsafe {
@@ -230,26 +235,26 @@ unsafe fn rescale(d: &[u32; 4], up: bool) {
     }
 }
 
-/// Raises the CPU to 360 MHz if it runs at the bootloader's 90 MHz from
-/// CPLL. A warm reset may come back already at 360 MHz (the bootloader
-/// keeps the clocks when APB is at 90 MHz, bootloader_clock_init.c:51), so
-/// the current dividers decide. Returns the CPU clock in MHz the registers
-/// now say.
-pub fn cpu_360() -> Option<u32> {
-    set_cpu_mhz(360)
+/// Raises the CPU to CPLL (360 MHz; 400 on v3) if it runs at the
+/// bootloader's CPLL / 4. A warm reset may come back already at full speed
+/// (the bootloader keeps the clocks when APB is at 90 MHz,
+/// bootloader_clock_init.c:51), so the current dividers decide. Returns the
+/// CPU clock in MHz the registers now say.
+pub fn cpu_full() -> Option<u32> {
+    set_cpu_mhz(CPLL_MHZ)
 }
 
-/// Sets the CPU to 360 or 90 MHz (CPLL / 1 or / 4) if the dividers are in
+/// Sets the CPU to 360 or 90 MHz (400 or 100 on v3: CPLL / 1 or / 4) if the dividers are in
 /// one of those two known states (the `clock` control command, doc/16
 /// §6.9, as well as boot). Returns the CPU clock the registers now say.
 pub fn set_cpu_mhz(mhz: u32) -> Option<u32> {
     let src = unsafe { rd(LP_CLKRST_HP_CLK_CTRL) } & 3;
     let before = dividers();
-    let ok = src == HP_ROOT_CLK_SRC_CPLL && (before == DIV_90 || before == DIV_360);
+    let ok = src == HP_ROOT_CLK_SRC_CPLL && (before == DIV_QUARTER || before == DIV_FULL);
     event!(Info, "clock.dividers", root_src = src, cpu = before[0], mem = before[1], sys = before[2], apb = before[3], known = ok);
     let target = match mhz {
-        360 => DIV_360,
-        90 => DIV_90,
+        m if m == CPLL_MHZ => DIV_FULL,
+        m if m == CPLL_MHZ / 4 => DIV_QUARTER,
         _ => return None,
     };
     if !ok {
@@ -257,7 +262,7 @@ pub fn set_cpu_mhz(mhz: u32) -> Option<u32> {
     }
     if before != target {
         unsafe {
-            rescale(&target, mhz == 360);
+            rescale(&target, mhz == CPLL_MHZ);
             let update: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_UPDATE_CPU_FREQUENCY);
             update(mhz);
         }

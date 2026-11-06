@@ -1,0 +1,9 @@
+[package]
+name = "mtdash"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+t5-rt = { path = "../../rt" }
+heapless = "0.9"

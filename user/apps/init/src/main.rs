@@ -6,6 +6,8 @@
 //! - 0: the list in `T5OS/START.CFG` on the SD card (through `svc:fs`), or
 //!   the built-in one if the file cannot be read;
 //! - 1: writes the built-in list to `T5OS/START.CFG` (to start from);
+//! - 3: writes the panel's list there: the same, with `mtdash` (the Matter
+//!   controller's tiles, doc/49 §25) on the screen in place of `term`;
 //! - 2: the test list (t5emu): an app, one that is not in the store and
 //!   one that fails (the kernel starts it again and gives up, doc/56 §3);
 //!   then checks that the kernel refuses a name longer than the store's.
@@ -43,6 +45,17 @@ font
 term
 ";
 
+/// The panel's (`run init 3`): `mtdash` owns the display instead of `term`.
+const PANEL_LIST: &str = "\
+cfg
+wifi 1
+net
+netctl
+ble
+matter
+mtdash
+";
+
 const TEST_LIST: &str = "\
 # The test list (run init 2).
 hello 0 0x0
@@ -54,7 +67,8 @@ hello 3
 fn main(mode: usize, _: usize) -> usize {
     let r = match mode {
         0 => from_file(),
-        1 => write_file(),
+        1 => write_file(DEFAULT_LIST),
+        3 => write_file(PANEL_LIST),
         2 => start(TEST_LIST).and_then(|n| too_long().map(|_| n)),
         _ => Err(1),
     };
@@ -111,14 +125,14 @@ fn from_file() -> Result<u32, u32> {
     }
 }
 
-fn write_file() -> Result<u32, u32> {
+fn write_file(list: &str) -> Result<u32, u32> {
     let mut files = files()?;
     let _ = files.mkdir("T5OS");
     let f = files.open(LIST_FILE, fs::flag::WRITE | fs::flag::CREATE).map_err(|_| 20u32)?;
     files.write(f, b"# tab5-os: apps started at boot (doc/38), read by init. NAME [ARG0 [ARG1]]\n").map_err(|_| 21u32)?;
-    files.write(f, DEFAULT_LIST.as_bytes()).map_err(|_| 21u32)?;
+    files.write(f, list.as_bytes()).map_err(|_| 21u32)?;
     files.close(f).map_err(|_| 22u32)?;
-    event!(Info, "init.written", file = LIST_FILE, bytes = DEFAULT_LIST.len() as u32);
+    event!(Info, "init.written", file = LIST_FILE, bytes = list.len() as u32);
     Ok(0)
 }
 

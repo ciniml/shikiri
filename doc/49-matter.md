@@ -431,3 +431,40 @@
   - Wi-Fi の段（AddOrUpdateWiFiNetwork、ConnectNetwork）も通った。Tab5 は同じ `matter-test` に入り直し、`wifi.saved ok=true`。
   - その後、toggle（1.7 秒）、OnOff・VendorName・Fabrics の読み（各 0.75 秒）、unpair が通った。fabric は 3 → 2 に戻った。
   - passphrase は chip-tool の出力にも Tab5 のログにもない（0 件）。
+
+## 25. Tab5 を 3 つ目の admin に（HA Community Day のデモ、2026-11-07）
+利用者の指示:「デモを優先」（別のセッションが HA と機器を受け持ち、Tab5 のコントローラをこちらで進めた）。
+
+- **構成**: 網は `matter-test`。HA（Matter Server）と smctl がすでに admin の機器に、Tab5 が 3 つ目の admin として入る。
+  - Light: M5StopWatch、Wi-Fi、node 3
+  - AirQ: ESP32-S3、Wi-Fi、node 1
+  - Door: NanoC6、Thread、ESP の OTBR の向こう、node 2
+- **コミッショニング**:
+  - `paircode NODE CODE`: 機器側（smctl か HA）が開けた窓の 11 桁のコードを使う。ハイフンは無視し、検査数字は符号化し直して確かめる。10 桁は検査数字なしとみなす（`mtreq` が 32 ビットの数しか渡せないため）。短い discriminator（上位 4 ビット）で探す。
+  - AirQ と Door は、短い discriminator がどちらも 12 だった。PASE が失敗したら、試したアドレスを除いて次の候補を探す（`matter.next_candidate`、200 秒まで）。
+  - `pairaddr NODE CODE IP PORT`: 探さずに入れる。PASSCODE の代わりにコードも書ける。
+  - mDNS のアドレスは、IPv4 → リンクローカルでない IPv6 の順に選ぶ。
+- **IP が変わったとき**: CASE が失敗したら、mDNS で運用アドレスを 1 度だけ引き直して、もう一度 CASE をする（`matter.locate`、`matter.relocated`）。新しいアドレスは、CASE が通ってから保存する。`relocate NODE` で試せる。
+- **購読を持ち続ける（`watch`）**:
+  - `watch NODE EP CLUSTER ATTR` と `unwatch` は、SD の KVS（`t5-watch`）に 8 つまで持つ。
+  - `matter` は、コントローラが空いていれば購読する（最大の間隔は 20 秒）。切れたらすぐ張り直し、失敗したら 5、10、20、30 秒おきに試す。起動のときも同じ。
+  - `values` は、それぞれの最後の値と経過秒を返す。最初の値は、購読の答えのプライミングのレポートから取る。
+  - レポートのノードは、購読の ID から決める。CASE を張り直すと、セッションからは引けなかった（`node=0`）。
+- **`mtdash`**（新しいアプリ）:
+  - 1 秒ごとに `values` を聞き、タイルを描く: Light（タッチで toggle）、Door（BooleanState、true は閉）、CO2（1000 ppm 以上は橙）、温度、湿度、PM2.5、空気の質。
+  - `run init 3` で、`term` の代わりに `mtdash` を起動する START.CFG を書く（`run init 1` で元に戻る）。
+- **`run matter 2`**: SD がないとき、保存をメモリに置いて本物の網で動かす。
+- **ネットワーク**（`net`、vendored の smoltcp、third_party/README）:
+  - RA の Route Information Option（RFC 4191）を読む。OTBR の OMR の経路 fd5a:3d14:1acf:1::/64 を、OTBR のリンクローカル経由で足す。これで Thread の機器に届く。
+  - 1 つの RA の PIO を全部読む。この網では、AP の fd89::/64 と OTBR 自身の on-link prefix fdde:ad00:beef:cafe::/64 が出ている。smoltcp は最後の 1 つしか取っていなかった。
+  - SLAAC の経路の同期の不具合を直した。IPv4 の経路が 1 本でもあると、IPv6 の経路が足されなかった。
+  - 送り元の選び方: 宛て先と同じサブネットのアドレスを、一時アドレス（RFC 6724 の規則 7）より先にする。
+  - 経路は 8 本まで、前置は 4 つまでにした。`net.ipv6_addr` と `net.ipv6_route` を出す。
+- **実機**:
+  - Light は 03:12 に入った（PASE から done まで約 3 秒）。Tab5 からの toggle は 0.25 秒で status 0 が返り、HA の表示も追従した。HA からの toggle も、Tab5 の値に届いた。
+  - AirQ は IPv4（192.168.8.163）を指定して、6.3 秒で入った。
+  - Door は Thread 経由で 13.1 秒。それまでの 2 回の CASE の失敗は、OTBR が固まっていたため（コンソールのログが送れずにブロックしていた）。
+- **残り**:
+  - Tab5 から AirQ の fdde のアドレスへの IPv6（PASE、CASE）に返事がない（原因は不明）。PC からの ping は届く。AirQ の IPv4 が変わると、つなぎ直せないかもしれない。
+  - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89）。湿度は外した。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。
+  - `matter` は客を 1 つずつしか扱わない。長いコミッショニングの間は `mtdash` の問い合わせが待たされ、取り残される（`matter.denied need=read` が出るが害はない）。

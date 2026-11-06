@@ -53,6 +53,9 @@ const CONTROLLER_NODE: u64 = 0x0000_0000_7AB5_0001;
 /// How long discovery looks, and how often it asks again.
 const DISCOVER_MS: u64 = 10_000;
 const DISCOVER_EVERY_MS: u64 = 1000;
+/// A search by short discriminator, through every candidate (PASE gives
+/// up on a silent one after 60 s).
+const SEARCH_MS: u64 = 200_000;
 /// Over BLE: how long PASE to AddNOC may take.
 const BLE_PAIR_MS: u64 = 90_000;
 const BLE: PeerAddr = PeerAddr::Ble(BtpConnId(0));
@@ -127,17 +130,60 @@ pub enum Outcome {
     Failed { why: &'static str, status: u8 },
 }
 
+/// A subscription's attribute report, for `watch`.
+pub struct Report {
+    pub node: u64,
+    pub ep: u16,
+    pub cluster: u32,
+    pub attr: u32,
+    pub value: FmtBuf<VALUE_TEXT>,
+}
+
+/// The discriminator a device is looked for by: all 12 bits (QR code,
+/// `pair`) or the top 4 (a manual pairing code, `paircode`).
+#[derive(Clone, Copy)]
+pub enum Disc {
+    Long(u16),
+    Short(u8),
+}
+
+impl Disc {
+    fn matches(self, d: Option<u16>) -> bool {
+        match (self, d) {
+            (Disc::Long(want), Some(d)) => d == want,
+            (Disc::Short(want), Some(d)) => (d >> 8) as u8 == want,
+            _ => false,
+        }
+    }
+}
+
+/// The address to reach a device at, of those mDNS gave: IPv4 first, then
+/// a routable IPv6 one (a Thread device has only those, through its border
+/// router); a link-local one would need its scope.
+fn pick_addr<'a, I: Iterator<Item = &'a core::net::IpAddr>>(addrs: impl Fn() -> I) -> Option<core::net::IpAddr> {
+    let routable = |a: &&core::net::IpAddr| match a {
+        core::net::IpAddr::V4(_) => true,
+        core::net::IpAddr::V6(v6) => !v6.is_unicast_link_local(),
+    };
+    addrs().find(|a| a.is_ipv4()).or_else(|| addrs().find(routable)).or_else(|| addrs().next()).copied()
+}
+
 #[derive(Clone, Copy)]
 enum Activity {
     Idle,
-    Discover { node: u64, passcode: u32, discriminator: u16, until: u64, next_query: u64 },
+    Discover { node: u64, passcode: u32, discriminator: Disc, until: u64, next_query: u64 },
     Pairing { node: u64, addr: SocketAddr, since: u64 },
     /// Over BLE: waiting for `blelink`'s link; PASE to AddNOC; then the
     /// node's operational address (mDNS).
     BleLink { node: u64, passcode: u32, since: u64 },
     BlePairing { node: u64, since: u64 },
     Resolve { node: u64, since: u64, until: u64, next_query: u64 },
-    Connecting { node: u64, addr: SocketAddr, op: Op },
+    /// `relocated`: the address came from mDNS after CASE to the stored
+    /// one failed; CASE is not tried a third time.
+    Connecting { node: u64, addr: SocketAddr, op: Op, relocated: bool },
+    /// CASE to the stored address failed: the node's operational address
+    /// from mDNS (it may have a new one), then CASE again.
+    Locate { node: u64, op: Op, until: u64, next_query: u64 },
     AwaitOp { node: u64, op: Op },
 }
 
@@ -179,6 +225,26 @@ pub struct Controller {
     kvs: &'static RefCell<Store>,
     last_phase: Option<Phase>,
     outcome: Option<Outcome>,
+    /// Reports and lost subscriptions, for `watch` (the oldest go if no
+    /// one takes them).
+    reports: heapless::Deque<Report, 8>,
+    lost: heapless::Deque<u32, 4>,
+    /// Each live subscription's node: its reports may come on a session
+    /// the node no longer uses (CASE was made again).
+    subs: heapless::Vec<(u32, u64), 16>,
+    /// A search by short discriminator: the request, and the devices
+    /// PASE already failed with. Another device may share the 4 bits; it
+    /// refuses the passcode and the next one is tried.
+    search: Option<Search>,
+}
+
+#[derive(Clone)]
+struct Search {
+    node: u64,
+    passcode: u32,
+    discriminator: Disc,
+    until: u64,
+    tried: heapless::Vec<SocketAddr, 4>,
 }
 
 fn resumption_key(node: u64) -> [u8; 19] {
@@ -246,6 +312,10 @@ impl Controller {
                 kvs,
                 last_phase: None,
                 outcome: None,
+                reports: heapless::Deque::new(),
+                lost: heapless::Deque::new(),
+                subs: heapless::Vec::new(),
+                search: None,
             })
         };
         if generated {
@@ -342,6 +412,29 @@ impl Controller {
         self.nodes.iter().map(|n| (n.id, n.addr, n.session.is_some()))
     }
 
+    /// Looks the node up over mDNS and opens CASE there (the address it
+    /// has is kept unless that works), then reads VendorName: a test of a
+    /// node's other addresses.
+    pub fn relocate(&mut self, node: u64, now: u64) -> Result<(), &'static str> {
+        if self.busy() {
+            return Err("busy");
+        }
+        let i = self.node_index(node).ok_or("unknown node")?;
+        self.nodes[i].session = None;
+        let op = Op::Read { ep: 0, cluster: 0x28, attr: 1 };
+        self.activity = Activity::Locate { node, op, until: now + DISCOVER_MS, next_query: now };
+        self.pump(now);
+        Ok(())
+    }
+
+    pub fn take_report(&mut self) -> Option<Report> {
+        self.reports.pop_front()
+    }
+
+    pub fn take_lost(&mut self) -> Option<u32> {
+        self.lost.pop_front()
+    }
+
     pub fn busy(&self) -> bool {
         !matches!(self.activity, Activity::Idle)
     }
@@ -397,10 +490,11 @@ impl Controller {
 
     /// Finds the device with `discriminator` over mDNS, then commissions it
     /// as node `node`.
-    pub fn pair(&mut self, node: u64, passcode: u32, discriminator: u16, now: u64) -> Result<(), &'static str> {
+    pub fn pair(&mut self, node: u64, passcode: u32, discriminator: Disc, now: u64) -> Result<(), &'static str> {
         if self.busy() {
             return Err("busy");
         }
+        self.search = matches!(discriminator, Disc::Short(_)).then(|| Search { node, passcode, discriminator, until: now + SEARCH_MS, tried: heapless::Vec::new() });
         self.activity = Activity::Discover { node, passcode, discriminator, until: now + DISCOVER_MS, next_query: now };
         self.pump(now);
         Ok(())
@@ -509,7 +603,7 @@ impl Controller {
         let mut scratch = [0u8; MAX_PACKET_SIZE];
         let d = self.stack.start_case(PeerAddr::Udp(addr), CONTROLLER_FABRIC_INDEX, node, now, &mut scratch).map_err(|_| "CASE")?;
         self.queue_directive(&scratch, d);
-        self.activity = Activity::Connecting { node, addr, op };
+        self.activity = Activity::Connecting { node, addr, op, relocated: false };
         Ok(())
     }
 
@@ -584,10 +678,27 @@ impl Controller {
 
     /// An mDNS packet (answers to discovery).
     pub fn mdns_rx(&mut self, pkt: &[u8], now: u64) {
+        if let Activity::Locate { node, op, .. } = self.activity {
+            let cfid = self.o.ca.compressed_fabric_id_bytes();
+            let Some(found) = MdnsClient::parse_operational(pkt, &cfid, node) else { return };
+            let Some(ip) = pick_addr(|| found.addrs.iter()) else { return };
+            let addr = SocketAddr::new(ip, if found.port == 0 { MATTER_PORT } else { found.port });
+            event!(Info, "matter.relocated", node = node, v4 = ip.is_ipv4(), port = addr.port() as u32);
+            // Kept once CASE there succeeds.
+            let mut scratch = [0u8; MAX_PACKET_SIZE];
+            match self.stack.start_case(PeerAddr::Udp(addr), CONTROLLER_FABRIC_INDEX, node, now, &mut scratch) {
+                Ok(d) => {
+                    self.queue_directive(&scratch, d);
+                    self.activity = Activity::Connecting { node, addr, op, relocated: true };
+                }
+                Err(_) => self.finish(Outcome::Failed { why: "CASE", status: 0 }),
+            }
+            return;
+        }
         if let Activity::Resolve { node, since, .. } = self.activity {
             let cfid = self.o.ca.compressed_fabric_id_bytes();
             let Some(found) = MdnsClient::parse_operational(pkt, &cfid, node) else { return };
-            let Some(ip) = found.addrs.iter().find(|a| a.is_ipv4()).or_else(|| found.addrs.iter().next()).copied() else { return };
+            let Some(ip) = pick_addr(|| found.addrs.iter()) else { return };
             let addr = SocketAddr::new(ip, if found.port == 0 { MATTER_PORT } else { found.port });
             event!(Info, "matter.resolved", node = node, v4 = ip.is_ipv4(), port = addr.port() as u32);
             let Some(comm) = self.comm.as_mut() else { return };
@@ -599,14 +710,18 @@ impl Controller {
         }
         let Activity::Discover { node, passcode, discriminator, .. } = self.activity else { return };
         let Some(found) = MdnsClient::parse_commissionable(pkt) else { return };
-        if found.discriminator != Some(discriminator) {
+        if !discriminator.matches(found.discriminator) {
             return;
         }
-        // IPv4 first: a link-local IPv6 address would need its scope.
-        let Some(ip) = found.addrs.iter().find(|a| a.is_ipv4()).or_else(|| found.addrs.iter().next()).copied() else { return };
+        let Some(ip) = pick_addr(|| found.addrs.iter()) else { return };
         let port = if found.port == 0 { MATTER_PORT } else { found.port };
         let addr = SocketAddr::new(ip, port);
-        event!(Info, "matter.found", discriminator = discriminator as u32, v4 = ip.is_ipv4(), port = port as u32);
+        if self.search.as_ref().is_some_and(|s| s.tried.contains(&addr)) {
+            return;
+        }
+        let mut at = FmtBuf::<48>::new();
+        let _ = core::fmt::Write::write_fmt(&mut at, format_args!("{ip}"));
+        event!(Info, "matter.found", discriminator = found.discriminator.unwrap_or(0) as u32, v4 = ip.is_ipv4(), port = port as u32, addr = at.as_str());
         self.begin_pair(node, passcode, addr, now);
     }
 
@@ -654,7 +769,7 @@ impl Controller {
         }
         match self.activity {
             Activity::Idle => self.stack.next_deadline(now),
-            Activity::Discover { next_query, until, .. } | Activity::Resolve { next_query, until, .. } => Some(next_query.min(until)),
+            Activity::Discover { next_query, until, .. } | Activity::Resolve { next_query, until, .. } | Activity::Locate { next_query, until, .. } => Some(next_query.min(until)),
             _ => Some(self.stack.next_deadline(now).unwrap_or(now + 20)),
         }
     }
@@ -664,7 +779,13 @@ impl Controller {
     fn subscription_event(&mut self, ev: ImEvent) -> bool {
         match ev {
             ImEvent::SubscriptionReport { session, subscription_id } => {
-                let node = self.nodes.iter().find(|n| n.session == Some(session)).map_or(0, |n| n.id);
+                let node = self
+                    .subs
+                    .iter()
+                    .find(|s| s.0 == subscription_id)
+                    .map(|s| s.1)
+                    .or_else(|| self.nodes.iter().find(|n| n.session == Some(session)).map(|n| n.id))
+                    .unwrap_or(0);
                 for report in self.stack.sub_reports() {
                     let Ok(AttributeReportRef::Data(d)) = report else { continue };
                     let Some(c) = d.path.to_concrete() else { continue };
@@ -680,6 +801,10 @@ impl Controller {
                         attr = c.attribute.0,
                         value = value.as_str()
                     );
+                    if self.reports.is_full() {
+                        self.reports.pop_front();
+                    }
+                    let _ = self.reports.push_back(Report { node, ep: c.endpoint.0, cluster: c.cluster.0, attr: c.attribute.0, value });
                 }
                 for report in self.stack.sub_event_reports() {
                     let Ok(EventReportRef::Data(d)) = report else { continue };
@@ -702,6 +827,11 @@ impl Controller {
             }
             ImEvent::SubscriptionLost { subscription_id, .. } => {
                 event!(Warn, "matter.subscription_lost", id = subscription_id);
+                self.subs.retain(|s| s.0 != subscription_id);
+                if self.lost.is_full() {
+                    self.lost.pop_front();
+                }
+                let _ = self.lost.push_back(subscription_id);
                 true
             }
             _ => false,
@@ -757,9 +887,24 @@ impl Controller {
                     self.activity = Activity::Resolve { node, since, until, next_query: now + DISCOVER_EVERY_MS };
                 }
             }
-            Activity::Connecting { node, addr, op } => match self.stack.sc_take_event() {
+            Activity::Locate { node, op, until, next_query } => {
+                if now >= until {
+                    self.finish(Outcome::Failed { why: "CASE (no address)", status: 0 });
+                } else if now >= next_query {
+                    let mut q = [0u8; 160];
+                    let cfid = self.o.ca.compressed_fabric_id_bytes();
+                    if let Ok(n) = MdnsClient::build_resolve_operational(&mut q, &cfid, node, true) {
+                        self.queue(&q[..n], None);
+                    }
+                    self.activity = Activity::Locate { node, op, until, next_query: now + DISCOVER_EVERY_MS };
+                }
+            }
+            Activity::Connecting { node, addr, op, relocated } => match self.stack.sc_take_event() {
                 Some(ScEvent::CaseEstablished { session, resumed }) => {
                     self.set_node(node, addr, Some(session));
+                    if relocated {
+                        self.save_nodes();
+                    }
                     self.save_resumption(node);
                     event!(Info, "matter.case", node = node, resumed = resumed);
                     let mut scratch = [0u8; MAX_PACKET_SIZE];
@@ -770,6 +915,13 @@ impl Controller {
                         }
                         Err(_) => self.finish(Outcome::Failed { why: "start", status: 0 }),
                     }
+                }
+                // The node may have another address now (DHCP, a new
+                // border router): look it up once.
+                Some(ScEvent::Failed { .. }) if !relocated => {
+                    event!(Info, "matter.locate", node = node);
+                    self.activity = Activity::Locate { node, op, until: now + DISCOVER_MS, next_query: now };
+                    self.pump(now);
                 }
                 Some(ScEvent::Failed { .. }) => self.finish(Outcome::Failed { why: "CASE", status: 0 }),
                 _ => {}
@@ -782,7 +934,29 @@ impl Controller {
                 match (op, ev) {
                     (Op::Invoke { .. } | Op::OpenWindow(_) | Op::Revoke, ImEvent::InvokeDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
                     (Op::Write { .. }, ImEvent::WriteDone { status }) => self.finish(Outcome::Invoked { status: status.to_u8() }),
-                    (Op::Subscribe { .. } | Op::SubscribeEvent { .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
+                    (Op::Subscribe { ep, cluster, attr, .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
+                        if self.subs.is_full() {
+                            self.subs.remove(0);
+                        }
+                        let _ = self.subs.push((subscription_id, node));
+                        // The priming report (the values at the start) is
+                        // kept as a read's result; only this path's.
+                        for report in self.stack.read_reports() {
+                            let Ok(AttributeReportRef::Data(d)) = report else { continue };
+                            let Some(c) = d.path.to_concrete() else { continue };
+                            if c.endpoint.0 != ep || c.cluster.0 != cluster || c.attribute.0 != attr {
+                                continue;
+                            }
+                            let mut value = FmtBuf::<VALUE_TEXT>::new();
+                            fmt_value(d.value(), &mut value);
+                            if self.reports.is_full() {
+                                self.reports.pop_front();
+                            }
+                            let _ = self.reports.push_back(Report { node, ep: c.endpoint.0, cluster: c.cluster.0, attr: c.attribute.0, value });
+                        }
+                        self.finish(Outcome::Subscribed { id: subscription_id, max_s: max_interval_s })
+                    }
+                    (Op::SubscribeEvent { .. }, ImEvent::SubscribeDone { subscription_id, max_interval_s, .. }) => {
                         self.finish(Outcome::Subscribed { id: subscription_id, max_s: max_interval_s })
                     }
                     (Op::Read { ep, cluster, attr }, ImEvent::ReadDone) => {
@@ -847,6 +1021,18 @@ impl Controller {
                     if addr.is_none() {
                         self.ble_close = true;
                     }
+                    // Found by 4 bits of the discriminator, refused in
+                    // PASE: maybe another device; look for the next.
+                    if let (Some(mut s), Some(a), true) = (self.search.take(), addr, matches!(prev, Phase::Pase | Phase::Idle))
+                        && now < s.until
+                        && s.tried.push(a).is_ok()
+                    {
+                        event!(Info, "matter.next_candidate", node = node, tried = s.tried.len() as u32);
+                        self.activity = Activity::Discover { node: s.node, passcode: s.passcode, discriminator: s.discriminator, until: now + DISCOVER_MS, next_query: now };
+                        self.search = Some(s);
+                        return;
+                    }
+                    self.search = None;
                     self.finish(Outcome::PairFailed { stage, reason: "commissioning" });
                     return;
                 }

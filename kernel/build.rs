@@ -7,6 +7,7 @@ fn main() {
     let p4 = env::var_os("CARGO_FEATURE_PLATFORM_ESP32P4V1").is_some();
     let script = match (virt, p4) {
         (true, false) => "link-virt.ld",
+        (false, true) if env::var_os("CARGO_FEATURE_CHIP_V3").is_some() => "link-esp32p4v3.ld",
         (false, true) => "link-esp32p4v1.ld",
         _ => panic!("select exactly one of the features platform-virt / platform-esp32p4v1"),
     };
