@@ -29,6 +29,8 @@ struct Map {
     /// The link's address and the port given out.
     outside: (u32, u16),
     expires: u64,
+    /// An answer came back.
+    replied: bool,
 }
 
 struct Nat {
@@ -36,6 +38,7 @@ struct Nat {
     next_port: u16,
     pub mapped: u32,
     pub full: u32,
+    pub evicted: u32,
 }
 
 /// In .bss, filled by `init` (as the filter's table).
@@ -52,6 +55,7 @@ pub fn init() {
         core::ptr::addr_of_mut!((*p).next_port).write(PORTS.start);
         core::ptr::addr_of_mut!((*p).mapped).write(0);
         core::ptr::addr_of_mut!((*p).full).write(0);
+        core::ptr::addr_of_mut!((*p).evicted).write(0);
     }
 }
 
@@ -145,10 +149,17 @@ pub fn outbound(ip: &mut [u8], link: u8, addr: u32) {
             m.outside.1
         }
         None => {
-            let Some(slot) = n.maps.iter().position(|m| m.is_none_or(|m| !live(&m))) else {
+            // No room: the unanswered mapping that ends first makes room
+            // (as the filter's connections, doc/58 R5).
+            let free = n.maps.iter().position(|m| m.is_none_or(|m| !live(&m)));
+            let Some(slot) = free.or_else(|| (0..MAPS).filter(|&i| n.maps[i].is_some_and(|m| !m.replied)).min_by_key(|&i| n.maps[i].map_or(0, |m| m.expires))) else {
                 n.full += 1;
                 return;
             };
+            if free.is_none() {
+                n.evicted += 1;
+                n.maps[slot] = None;
+            }
             // The next port not in use on this link for this protocol.
             let mut port = None;
             for _ in 0..PORTS.len() {
@@ -163,7 +174,7 @@ pub fn outbound(ip: &mut [u8], link: u8, addr: u32) {
                 n.full += 1;
                 return;
             };
-            n.maps[slot] = Some(Map { proto, link, inside, remote, outside: (addr, port), expires: now + lifetime(proto) });
+            n.maps[slot] = Some(Map { proto, link, inside, remote, outside: (addr, port), expires: now + lifetime(proto), replied: false });
             n.mapped += 1;
             port
         }
@@ -190,13 +201,15 @@ pub fn inbound(ip: &mut [u8], link: u8) -> bool {
         return false;
     };
     m.expires = now + lifetime(proto);
+    m.replied = true;
     let (addr, port) = m.inside;
     rewrite(ip, ihl, 16, addr, port_at, csum_at, pseudo, port);
     true
 }
 
-/// (mappings made, times the table or the ports ran out).
-pub fn stats() -> (u32, u32) {
+/// (mappings made, times the table or the ports ran out, unanswered
+/// mappings dropped to make room).
+pub fn stats() -> (u32, u32, u32) {
     let n = nat();
-    (n.mapped, n.full)
+    (n.mapped, n.full, n.evicted)
 }

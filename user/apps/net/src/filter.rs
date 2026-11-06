@@ -53,6 +53,11 @@ const CONNECTIONS: usize = 512;
 /// Slots looked at from a key's hash.
 const PROBE: usize = 8;
 const LOG_PER_S: u32 = 10;
+/// ICMP errors the host itself sends (doc/58 R5): at most this many a
+/// second after a burst, as Linux's `icmp_msgs_per_sec`. Otherwise a flood
+/// to closed ports gets one answer a packet, doubling the work.
+const ICMP_ERR_PER_S: u64 = 100;
+const ICMP_ERR_BURST: u32 = 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -154,6 +159,11 @@ struct Filter {
     table: [Option<Conn>; CONNECTIONS],
     tracked: u32,
     table_full: u32,
+    /// Unanswered connections dropped to make room.
+    evicted: u32,
+    icmp_tokens: u32,
+    icmp_refill: u64,
+    icmp_limited: u32,
     log_left: u32,
     log_until: u64,
     log_suppressed: u32,
@@ -177,6 +187,10 @@ pub fn init() {
         }
         core::ptr::addr_of_mut!((*p).tracked).write(0);
         core::ptr::addr_of_mut!((*p).table_full).write(0);
+        core::ptr::addr_of_mut!((*p).evicted).write(0);
+        core::ptr::addr_of_mut!((*p).icmp_tokens).write(ICMP_ERR_BURST);
+        core::ptr::addr_of_mut!((*p).icmp_refill).write(0);
+        core::ptr::addr_of_mut!((*p).icmp_limited).write(0);
         core::ptr::addr_of_mut!((*p).log_left).write(0);
         core::ptr::addr_of_mut!((*p).log_until).write(0);
         core::ptr::addr_of_mut!((*p).log_suppressed).write(0);
@@ -214,9 +228,9 @@ pub fn log_stats() {
     }
     let now = crate::clock_ns();
     let live = f.table.iter().flatten().filter(|c| c.expires > now).count() as u32;
-    event!(Info, "net.conntrack", live = live, tracked = f.tracked, table_full = f.table_full);
-    let (mapped, full) = crate::nat::stats();
-    event!(Info, "net.nat", mapped = mapped, full = full);
+    event!(Info, "net.conntrack", live = live, tracked = f.tracked, table_full = f.table_full, evicted = f.evicted, icmp_limited = f.icmp_limited);
+    let (mapped, full, evicted) = crate::nat::stats();
+    event!(Info, "net.nat", mapped = mapped, full = full, evicted = evicted);
 }
 
 // ---- packets ----
@@ -388,13 +402,41 @@ impl Filter {
 
     fn insert(&mut self, c: Conn, now: u64) {
         let h = c.key.hash();
-        match (0..PROBE).map(|i| (h + i) % CONNECTIONS).find(|&i| self.table[i].is_none_or(|o| o.expires <= now)) {
+        let window = (0..PROBE).map(|i| (h + i) % CONNECTIONS);
+        let mut slot = window.clone().find(|&i| self.table[i].is_none_or(|o| o.expires <= now));
+        if slot.is_none() {
+            // No room: the unanswered connection that ends first makes
+            // room (as Linux's early drop), so that a flood of new ones
+            // does not keep the next ones out for their whole lifetime.
+            // Answered ones stay.
+            slot = window.filter(|&i| self.table[i].is_some_and(|o| !o.replied)).min_by_key(|&i| self.table[i].map_or(0, |o| o.expires));
+            if slot.is_some() {
+                self.evicted += 1;
+            }
+        }
+        match slot {
             Some(i) => {
                 self.table[i] = Some(c);
                 self.tracked += 1;
             }
             None => self.table_full += 1,
         }
+    }
+
+    /// Whether the host may send one more ICMP error now.
+    fn icmp_error_allowed(&mut self, now: u64) -> bool {
+        let step = S / ICMP_ERR_PER_S;
+        if now >= self.icmp_refill + step {
+            let add = ((now - self.icmp_refill) / step).min(ICMP_ERR_BURST as u64) as u32;
+            self.icmp_tokens = (self.icmp_tokens + add).min(ICMP_ERR_BURST);
+            self.icmp_refill = now;
+        }
+        if self.icmp_tokens == 0 {
+            self.icmp_limited += 1;
+            return false;
+        }
+        self.icmp_tokens -= 1;
+        true
     }
 
     /// The packet's state, and its connection's slot.
@@ -480,6 +522,9 @@ pub fn check(hook: u8, in_link: u8, out_link: u8, ip: &[u8]) -> Action {
     }
     let f = f();
     let now = crate::clock_ns();
+    if hook == OUT && p.inner.is_some() && !f.icmp_error_allowed(now) {
+        return Action::Drop;
+    }
     let (state, slot) = f.classify(&p, now);
     let rule = (0..f.rules.len).find(|&i| f.rules.rules[i].matches(hook, in_link, out_link, &p, state));
     let (action, log) = match rule {
