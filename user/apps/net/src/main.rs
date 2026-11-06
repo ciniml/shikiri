@@ -50,8 +50,10 @@ const CLIENTS: usize = 4;
 const SOCKETS: usize = 8;
 /// smoltcp sockets with buffers: a client socket that listens on every
 /// link takes one per interface.
-const POOL: usize = 16;
-const TCP_BUF: usize = 16 << 10;
+const POOL: usize = 12;
+/// Each way. 16 KiB held a TCP connection over Wi-Fi to about 20 Mbps
+/// (the window over a 3-5 ms round trip under load, doc/58 R5).
+const TCP_BUF: usize = 32 << 10;
 const UDP_PACKETS: usize = 16;
 const UDP_BUF: usize = 8 << 10;
 const ICMP_PACKETS: usize = 2;

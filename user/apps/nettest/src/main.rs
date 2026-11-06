@@ -8,7 +8,8 @@
 //!
 //! With `mode` 1 it is instead a TCP echo server on port 7777 (for a PC on
 //! the host link, doc/21), serving one connection after another until
-//! killed. With `mode` 2 it fetches `http://ARG/` (ARG an IPv4 address as
+//! killed; with `arg` 1 it only reads (discard) and with 2 only writes
+//! until the peer closes (one direction at a time, doc/58 R5). With `mode` 2 it fetches `http://ARG/` (ARG an IPv4 address as
 //! a number, e.g. 0x01010101) and logs the status line and the size: a
 //! test of the way out over Wi-Fi (doc/22). With `mode` 3 it pings ARG four
 //! times; with `mode` 4 it resolves a few names by DNS and fetches the
@@ -33,7 +34,7 @@ const TCP_BYTES: usize = 1 << 20;
 
 fn main(mode: usize, arg: usize) -> usize {
     let r = match mode {
-        1 => echo_server(),
+        1 => echo_server(arg),
         2 => http_get(arg as u32),
         3 => ping(arg as u32),
         4 => resolve(),
@@ -124,9 +125,12 @@ fn resolve() -> Result<(), u32> {
     http_get(first)
 }
 
-fn echo_server() -> Result<(), u32> {
+fn echo_server(how: usize) -> Result<(), u32> {
     let mut net = connect()?;
     let mut buf = [0u8; 4096];
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = i as u8;
+    }
     let mut served = 0u32;
     loop {
         let s = net.tcp_listen(7777).map_err(|_| 30u32)?;
@@ -139,15 +143,24 @@ fn echo_server() -> Result<(), u32> {
             }
         }
         let mut bytes = 0u32;
-        loop {
+        // Source: until the peer goes away.
+        while how == 2 && net.send_all(s, &buf).is_ok() {
+            bytes += buf.len() as u32;
+        }
+        while how != 2 {
             let n = net.recv(s, &mut buf).map_err(|_| 32u32)?;
             if n == 0 {
                 break;
             }
-            net.send_all(s, &buf[..n]).map_err(|_| 33u32)?;
+            if how == 0 {
+                net.send_all(s, &buf[..n]).map_err(|_| 33u32)?;
+            }
             bytes += n as u32;
         }
-        net.close(s).map_err(|_| 34u32)?;
+        // The source's peer may have closed already.
+        if net.close(s).is_err() && how != 2 {
+            return Err(34);
+        }
         served += 1;
         event!(Info, "nettest.echoed", bytes = bytes);
     }
