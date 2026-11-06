@@ -631,13 +631,11 @@ fn start_bluetooth(rpc: &mut Rpc) -> bool {
 }
 
 /// Logs events; after a disconnection, connects again (every 5 s). Serves
-/// `svc:wifi`'s client. `home`: the network it started with, until a
+/// `svc:wifi`'s clients. `home`: the network it started with, until a
 /// client's JOIN is saved.
 fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
     let listener = Listener::open(wifi::SVC).ok();
-    let mut client: Option<Channel> = None;
-    // Its grants (doc/52 §3.3).
-    let mut grants = Grants::NONE;
+    let mut clients: [Option<Client>; CLIENTS] = [const { None }; CLIENTS];
     let mut retry_at: Option<u64> = None;
     // Disconnections since the last connection: the first retries come
     // sooner. After a reset the access point may still hold the chip's
@@ -646,6 +644,9 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
     let mut failures = 0u32;
     // A client's JOIN, until it associates or fails.
     let mut joining: Option<u64> = None;
+    // Who gets its answer (and an OTA's): the client's slot.
+    let mut join_from: Option<usize> = None;
+    let mut ota_from: Option<usize> = None;
     // The network of the last JOIN, until it is saved or left.
     let mut joined: Option<Network> = None;
     // A firmware update under way (doc/58 R5).
@@ -657,25 +658,37 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
             (a, b) => a.or(b),
         };
         let timeout = until.map_or(t5_rt::FOREVER, |t| t.saturating_sub(now).max(1));
-        let mut hs = [rpc.ctl.raw(); 3];
+        let mut hs = [rpc.ctl.raw(); 2 + CLIENTS];
         let mut n = 1;
-        // Another client waits until this one goes: with the listener in
-        // the set, its pending connection would end every wait at once
-        // (and the old client's closing would never be seen, doc/58 R5).
-        if let (Some(l), None) = (&listener, &client) {
+        // With every slot taken, another client waits until one goes: with
+        // the listener in the set, its pending connection would end every
+        // wait at once (and a closing would never be seen, doc/58 R5).
+        if let Some(l) = &listener
+            && clients.iter().any(Option::is_none)
+        {
             hs[n] = l.0.raw();
             n += 1;
         }
-        if let Some(c) = &client {
-            hs[n] = c.0.raw();
+        for c in clients.iter().flatten() {
+            hs[n] = c.chan.0.raw();
             n += 1;
         }
         let ev = wait_raw(&hs[..n], timeout);
         if let Ok(ev) = ev
             && ev.kind == chan::PEER_CLOSED
-            && client.as_ref().is_some_and(|c| c.0.raw() == hs[ev.index])
+            && let Some(i) = clients.iter().position(|c| c.as_ref().is_some_and(|c| c.chan.0.raw() == hs[ev.index]))
         {
-            client = None;
+            clients[i] = None;
+            if join_from == Some(i) {
+                join_from = None;
+            }
+            // An update its client left: the chip keeps its old image.
+            if ota_from == Some(i) {
+                ota_from = None;
+                if ota.take().is_some() {
+                    event!(Warn, "wifi.ota_abandoned");
+                }
+            }
         }
         // The chip's messages.
         loop {
@@ -690,7 +703,7 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
                         // Our own leaving (before a JOIN) is not a failure.
                         if joining.is_some() && rpc.reason != REASON_ASSOC_LEAVE {
                             joining = None;
-                            answer(&client, &[wifi::FAILED, rpc.reason as u8, (rpc.reason >> 8) as u8]);
+                            answer(&clients, join_from.take(), &[wifi::FAILED, rpc.reason as u8, (rpc.reason >> 8) as u8]);
                         }
                     }
                     Some(true) => {
@@ -702,7 +715,7 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
                             m[0] = wifi::JOINED;
                             m[1] = rpc.ssid_len as u8;
                             m[2..2 + rpc.ssid_len].copy_from_slice(&rpc.ssid[..rpc.ssid_len]);
-                            answer(&client, &m[..2 + rpc.ssid_len]);
+                            answer(&clients, join_from.take(), &m[..2 + rpc.ssid_len]);
                         }
                     }
                     None => {}
@@ -716,103 +729,127 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
         if joining.is_some_and(|t| now >= t) {
             joining = None;
             event!(Warn, "wifi.join_timeout");
-            answer(&client, &[wifi::FAILED, 0, 0]);
+            answer(&clients, join_from.take(), &[wifi::FAILED, 0, 0]);
         }
         if retry_at.is_some_and(|t| now >= t) {
             retry_at = None;
             event!(Info, "wifi.reconnect");
             rpc.call(REQ_WIFI_CONNECT, 1, |_| {})?;
         }
-        // A new client (one at a time), and its requests.
-        if client.is_none()
+        // New clients, while a slot is free, and their requests.
+        while let Some(i) = clients.iter().position(Option::is_none)
             && let Some(c) = listener.as_ref().and_then(|l| l.accept().ok())
         {
-            grants = c.peer_grants();
-            client = Some(c);
+            clients[i] = Some(Client { grants: c.peer_grants(), chan: c });
         }
         let mut req = [0u8; chan::MSG_MAX];
-        while let Some(Ok(k)) = client.as_ref().map(|c| c.0.read(&mut req)) {
-            let is_ota = matches!(req[0], wifi::OTA_BEGIN | wifi::OTA_DATA | wifi::OTA_END);
-            let allowed = grants.has(b"join") || (req[0] == wifi::STATUS && grants.has(b"status")) || (is_ota && grants.has(b"ota"));
-            if !allowed {
-                event!(Warn, "wifi.denied", request = req[0]);
-                answer(&client, &[wifi::DENIED, req[0]]);
-                continue;
-            }
-            match req[0] {
-                wifi::STATUS => {
-                    let mut m = [0u8; 3 + wifi::SSID_MAX];
-                    m[0] = wifi::STATUS;
-                    m[1] = rpc.connected as u8;
-                    m[2] = rpc.ssid_len as u8;
-                    m[3..3 + rpc.ssid_len].copy_from_slice(&rpc.ssid[..rpc.ssid_len]);
-                    answer(&client, &m[..3 + rpc.ssid_len]);
+        for i in 0..CLIENTS {
+            let me = Some(i);
+            while let Some((Ok(k), grants)) = clients[i].as_ref().map(|c| (c.chan.0.read(&mut req), &c.grants)) {
+                let is_ota = matches!(req[0], wifi::OTA_BEGIN | wifi::OTA_DATA | wifi::OTA_END);
+                let allowed = grants.has(b"join") || (req[0] == wifi::STATUS && grants.has(b"status")) || (is_ota && grants.has(b"ota"));
+                if !allowed {
+                    event!(Warn, "wifi.denied", request = req[0]);
+                    answer(&clients, me, &[wifi::DENIED, req[0]]);
+                    continue;
                 }
-                wifi::JOIN => {
-                    let r = &req[..k];
-                    let sl = *r.get(1).unwrap_or(&0) as usize;
-                    let pl = r.get(2 + sl).map_or(usize::MAX, |&p| p as usize);
-                    let (Some(ssid), Some(psk)) = (r.get(2..2 + sl), r.get(3 + sl..3 + sl + pl.min(wifi::PSK_MAX + 1))) else {
-                        answer(&client, &[wifi::FAILED, 0, 0]);
-                        continue;
-                    };
-                    let Some(net) = Network::new(ssid, psk).filter(|_| sl > 0) else {
-                        answer(&client, &[wifi::FAILED, 0, 0]);
-                        continue;
-                    };
-                    event!(Info, "wifi.join", ssid = core::str::from_utf8(ssid).unwrap_or("?"));
-                    join(rpc, &net)?;
-                    joined = Some(net);
-                    retry_at = None;
-                    joining = Some(time_ns() + JOIN_NS);
-                }
-                wifi::SAVE => {
-                    // Only the network it is on.
-                    let net = joined.filter(|n| rpc.connected && n.ssid() == &rpc.ssid[..rpc.ssid_len]);
-                    let ok = net.is_some_and(|n| n.save());
-                    if let (true, Some(n)) = (ok, net) {
-                        home = n;
-                        joined = None;
+                match req[0] {
+                    wifi::STATUS => {
+                        let mut m = [0u8; 3 + wifi::SSID_MAX];
+                        m[0] = wifi::STATUS;
+                        m[1] = rpc.connected as u8;
+                        m[2] = rpc.ssid_len as u8;
+                        m[3..3 + rpc.ssid_len].copy_from_slice(&rpc.ssid[..rpc.ssid_len]);
+                        answer(&clients, me, &m[..3 + rpc.ssid_len]);
                     }
-                    event!(Info, "wifi.saved", ok = ok);
-                    answer(&client, &[wifi::SAVED, ok as u8]);
-                }
-                wifi::REVERT => {
-                    if joined.take().is_some() {
-                        event!(Info, "wifi.revert", ssid = core::str::from_utf8(home.ssid()).unwrap_or("?"));
-                        join(rpc, &home)?;
+                    wifi::JOIN => {
+                        let r = &req[..k];
+                        let sl = *r.get(1).unwrap_or(&0) as usize;
+                        let pl = r.get(2 + sl).map_or(usize::MAX, |&p| p as usize);
+                        let (Some(ssid), Some(psk)) = (r.get(2..2 + sl), r.get(3 + sl..3 + sl + pl.min(wifi::PSK_MAX + 1))) else {
+                            answer(&clients, me, &[wifi::FAILED, 0, 0]);
+                            continue;
+                        };
+                        let Some(net) = Network::new(ssid, psk).filter(|_| sl > 0) else {
+                            answer(&clients, me, &[wifi::FAILED, 0, 0]);
+                            continue;
+                        };
+                        event!(Info, "wifi.join", ssid = core::str::from_utf8(ssid).unwrap_or("?"));
+                        // A JOIN still under way gives way to this one.
+                        if joining.is_some() && join_from != me {
+                            answer(&clients, join_from, &[wifi::FAILED, 0, 0]);
+                        }
+                        join(rpc, &net)?;
+                        joined = Some(net);
                         retry_at = None;
                         joining = Some(time_ns() + JOIN_NS);
+                        join_from = me;
                     }
+                    wifi::SAVE => {
+                        // Only the network it is on.
+                        let net = joined.filter(|n| rpc.connected && n.ssid() == &rpc.ssid[..rpc.ssid_len]);
+                        let ok = net.is_some_and(|n| n.save());
+                        if let (true, Some(n)) = (ok, net) {
+                            home = n;
+                            joined = None;
+                        }
+                        event!(Info, "wifi.saved", ok = ok);
+                        answer(&clients, me, &[wifi::SAVED, ok as u8]);
+                    }
+                    wifi::REVERT => {
+                        if joined.take().is_some() {
+                            event!(Info, "wifi.revert", ssid = core::str::from_utf8(home.ssid()).unwrap_or("?"));
+                            if joining.is_some() && join_from != me {
+                                answer(&clients, join_from, &[wifi::FAILED, 0, 0]);
+                            }
+                            join(rpc, &home)?;
+                            retry_at = None;
+                            joining = Some(time_ns() + JOIN_NS);
+                            join_from = me;
+                        }
+                    }
+                    wifi::OTA_BEGIN => {
+                        let size = req.get(1..5).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+                        let r = if size == 0 || size > wifi::OTA_MAX || (ota.is_some() && ota_from != me) {
+                            Err((1, 0))
+                        } else {
+                            event!(Warn, "wifi.ota_begin", bytes = size as u32);
+                            ota_call(rpc, REQ_OTA_BEGIN, |_| {}).map(|_| {
+                                ota = Some(Ota { size, sent: 0, have: 0, buf: [0; OTA_CHUNK], failed: None });
+                                ota_from = me;
+                            })
+                        };
+                        ota_answer(&clients, me, r);
+                    }
+                    wifi::OTA_DATA => {
+                        let Some(o) = ota.as_mut().filter(|_| ota_from == me) else { continue };
+                        o.take(rpc, &req[1..k]);
+                    }
+                    wifi::OTA_END => {
+                        let r = match ota.take_if(|_| ota_from == me) {
+                            None => Err((1, 0)),
+                            Some(mut o) => {
+                                ota_from = None;
+                                o.finish(rpc)
+                            }
+                        };
+                        event!(Warn, "wifi.ota_end", ok = r.is_ok(), step = r.err().map_or(0, |e| e.0), esp_err = r.err().map_or(0, |e| e.1));
+                        ota_answer(&clients, me, r);
+                    }
+                    _ => answer(&clients, me, &[wifi::FAILED, 0, 0]),
                 }
-                wifi::OTA_BEGIN => {
-                    let size = req.get(1..5).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
-                    let r = if size == 0 || size > wifi::OTA_MAX {
-                        Err((1, 0))
-                    } else {
-                        event!(Warn, "wifi.ota_begin", bytes = size as u32);
-                        ota_call(rpc, REQ_OTA_BEGIN, |_| {}).map(|_| {
-                            ota = Some(Ota { size, sent: 0, have: 0, buf: [0; OTA_CHUNK], failed: None });
-                        })
-                    };
-                    ota_answer(&client, r);
-                }
-                wifi::OTA_DATA => {
-                    let Some(o) = ota.as_mut() else { continue };
-                    o.take(rpc, &req[1..k]);
-                }
-                wifi::OTA_END => {
-                    let r = match ota.take() {
-                        None => Err((1, 0)),
-                        Some(mut o) => o.finish(rpc),
-                    };
-                    event!(Warn, "wifi.ota_end", ok = r.is_ok(), step = r.err().map_or(0, |e| e.0), esp_err = r.err().map_or(0, |e| e.1));
-                    ota_answer(&client, r);
-                }
-                _ => answer(&client, &[wifi::FAILED, 0, 0]),
             }
         }
     }
+}
+
+/// How many clients `svc:wifi` serves at once (`matter` keeps one).
+const CLIENTS: usize = 4;
+
+struct Client {
+    chan: Channel,
+    /// Its grants (doc/52 §3.3).
+    grants: Grants,
 }
 
 /// A firmware image on its way to the chip: `size` bytes, `sent` of them
@@ -879,13 +916,13 @@ fn ota_call(rpc: &mut Rpc, id: u32, body: impl FnOnce(&mut Pb)) -> Result<(), (u
     rpc.call_within(id, 1, OTA_RESPONSE_NS, body).map(|_| ()).map_err(|_| if rpc.last_err != 0 { (5, rpc.last_err) } else { (6, 0) })
 }
 
-fn ota_answer(client: &Option<Channel>, r: Result<(), (u8, i32)>) {
+fn ota_answer(clients: &[Option<Client>], to: Option<usize>, r: Result<(), (u8, i32)>) {
     let (ok, step, err) = match r {
         Ok(()) => (1, 0, 0),
         Err((step, err)) => (0, step, err),
     };
     let e = err.to_le_bytes();
-    answer(client, &[wifi::OTA_STATUS, ok, step, e[0], e[1], e[2], e[3]]);
+    answer(clients, to, &[wifi::OTA_STATUS, ok, step, e[0], e[1], e[2], e[3]]);
 }
 
 /// After each association: `net` reports its multicast groups again, and,
@@ -915,9 +952,10 @@ fn join(rpc: &mut Rpc, net: &Network) -> Result<(), u32> {
     rpc.call(REQ_WIFI_CONNECT, 1, |_| {}).map(|_| ())
 }
 
-fn answer(client: &Option<Channel>, m: &[u8]) {
-    if let Some(c) = client {
-        let _ = c.0.write(m);
+/// To the client in slot `to`, if it is still there.
+fn answer(clients: &[Option<Client>], to: Option<usize>, m: &[u8]) {
+    if let Some(Some(c)) = to.map(|i| &clients[i]) {
+        let _ = c.chan.0.write(m);
     }
 }
 

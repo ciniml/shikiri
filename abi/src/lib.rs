@@ -428,7 +428,10 @@ pub mod ble {
     pub const MSG_MAX: usize = 256;
 }
 
-/// The Wi-Fi service's requests (doc/49 §20): one client at a time.
+/// The Wi-Fi service's requests (doc/49 §20): up to 4 clients at once.
+/// A JOIN's or REVERT's answer goes to the client that asked (a later one
+/// from another client answers the first `FAILED`); an OTA belongs to the
+/// client that began it (others get step 1) and ends if it goes.
 pub mod wifi {
     pub const SVC: &str = "wifi";
     /// Request `[JOIN, ssid_len, ssid…, psk_len, psk…]`: leave the access

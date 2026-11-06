@@ -5,7 +5,8 @@
 //! c6ota IP PORT` fetches `http://IP:PORT/c6.bin` (IP an IPv4 address as a
 //! number) and hands it to `wifi` (`svc:wifi/ota`), which writes it with
 //! esp_hosted's OTA. The chip boots it about 5 s after the end; restart the
-//! board then.
+//! board then. `run c6ota 0 0` only asks whether `wifi` answers (an END
+//! with no update under way, refused at step 1); the chip is not touched.
 //!
 //! The image is checked before anything is sent: an ESP image for the C6
 //! (magic 0xE9, chip id 13), no larger than the chip's OTA partition.
@@ -33,6 +34,14 @@ fn main(ip: usize, port: usize) -> usize {
 }
 
 fn run(ip: u32, port: u16) -> Result<usize, u32> {
+    if ip == 0 {
+        let w = connect_wifi()?;
+        w.send(&[wifi::OTA_END]).map_err(|_| 14u32)?;
+        return match status(&w, 15) {
+            Err(15) => Ok(0),
+            _ => Err(15),
+        };
+    }
     let mut net = Net::connect().map_err(|_| 1u32)?;
     let s = net.tcp_connect_ip(IpAddr::V4(Ipv4Addr::from_bits(ip)), port).map_err(|_| 2u32)?;
     net.wait_established(s, 10_000).map_err(|_| 3u32)?;

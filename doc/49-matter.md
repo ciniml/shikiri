@@ -309,7 +309,7 @@
   - `pairble` は、覚えた網があれば `Commissioner::set_wifi_credentials` で渡す。AddNOC の後に AddOrUpdateWiFiNetwork と ConnectNetwork を BLE で行い、それから BLE を閉じて CASE。
   - `mtreq` の OP 15 は `netcred t5-test not-a-secret`（PC の試験用のデバイスは、つながったふりをするだけ）。OP 16 で消す。
   - 実機: PC の `ble-onoff-light` をノード 21 として 22.7 秒（`add_wifi_network`、`connect_network` の段を通った）。
-- **`svc:wifi`**（`t5_abi::wifi`、`wifi` サービス、クライアントは 1 つずつ）:
+- **`svc:wifi`**（`t5_abi::wifi`、`wifi` サービス、クライアントは同時に 4 つまで、doc/58 R5）:
   - `JOIN`（SSID と passphrase）: 今のアクセスポイントを離れ（`Req_WifiDisconnect`、283）、設定を変えて接続する。
     - 結果は、つながれば `JOINED`。切断の理由が来れば `FAILED`（自分で離れたときの理由 8、`ASSOC_LEAVE` は数えない）、20 秒で答えがなくても `FAILED`。
     - 後は組み込みの網と同じく 5 秒ごとにつなぎ直す。passphrase はチップへ送るだけで、ログに出さず、サービスが終われば忘れる。
