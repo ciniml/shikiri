@@ -236,6 +236,9 @@ pub struct Controller {
     /// PASE already failed with. Another device may share the 4 bits; it
     /// refuses the passcode and the next one is tried.
     search: Option<Search>,
+    /// A request's event taken with a report (simple-matter's `im_take_event`
+    /// gives either); `pump` takes it.
+    im_event: Option<ImEvent>,
 }
 
 #[derive(Clone)]
@@ -316,6 +319,7 @@ impl Controller {
                 lost: heapless::Deque::new(),
                 subs: heapless::Vec::new(),
                 search: None,
+                im_event: None,
             })
         };
         if generated {
@@ -581,6 +585,7 @@ impl Controller {
         if let Some(d) = self.stack.handle_rx(dg, BLE, now, &mut scratch) {
             self.queue_directive(&scratch, d);
         }
+        self.take_reports();
     }
 
     /// `op` on node `node`: at once on a live session, else after CASE.
@@ -674,6 +679,28 @@ impl Controller {
         if let Some(d) = self.stack.handle_rx(dg, PeerAddr::Udp(from), now, &mut scratch) {
             self.queue_directive(&scratch, d);
         }
+        self.take_reports();
+    }
+
+    /// A report at once: simple-matter keeps only the last one, and `pump`
+    /// waits for the transport to settle (the report's StatusResponse
+    /// acknowledged). A second node's report within that wait replaced the
+    /// first (Door, then the Light HA turned on for it, doc/49 §25).
+    /// Not while commissioning: the Commissioner takes its own events from
+    /// the stack.
+    fn take_reports(&mut self) {
+        if self.comm.is_some() {
+            return;
+        }
+        while let Some(ev) = self.stack.im_take_event() {
+            if !self.subscription_event(ev) {
+                self.im_event = Some(ev);
+            }
+        }
+    }
+
+    fn im_take_event(&mut self) -> Option<ImEvent> {
+        self.im_event.take().or_else(|| self.stack.im_take_event())
     }
 
     /// An mDNS packet (answers to discovery).
@@ -843,7 +870,7 @@ impl Controller {
             Activity::Idle => {
                 // Nothing asked for: reports; drop stray events.
                 let _ = self.stack.sc_take_event();
-                if let Some(ev) = self.stack.im_take_event() {
+                if let Some(ev) = self.im_take_event() {
                     self.subscription_event(ev);
                 }
             }
@@ -927,7 +954,7 @@ impl Controller {
                 _ => {}
             },
             Activity::AwaitOp { node, op } => {
-                let Some(ev) = self.stack.im_take_event() else { return };
+                let Some(ev) = self.im_take_event() else { return };
                 if self.subscription_event(ev) {
                     return;
                 }
