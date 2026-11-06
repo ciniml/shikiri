@@ -19,7 +19,7 @@ use t5_abi::event;
 
 use super::i2c::{func_in_sel, func_out_sel, io_mux_reg};
 use super::psram::delay_us;
-use super::{cache_invalidate, cache_writeback, rd, wr};
+use super::{cache_invalidate, cache_writeback, dcache_invalidate, rd, wr};
 
 // ---- registers (hw_ver1 emac_reg.h; esp32p4.peripherals.ld) ----------------
 const MAC: usize = 0x5009_8000;
@@ -437,7 +437,7 @@ pub fn pending() -> bool {
         return false;
     }
     let d = rx_desc();
-    cache_invalidate(d, DESC, false);
+    dcache_invalidate(d, DESC);
     let ready = word(d) & OWN == 0;
     // Diagnosis (doc/58 R5): the DMA past this descriptor while it reads
     // as the DMA's here means a stale copy or a ring out of step.
@@ -456,7 +456,7 @@ pub fn recv(out: &mut [u8]) -> Option<usize> {
     }
     for _ in 0..RX_N {
         let d = rx_desc();
-        cache_invalidate(d, DESC, false);
+        dcache_invalidate(d, DESC);
         let status = word(d);
         if status & OWN != 0 {
             return None;
@@ -474,7 +474,8 @@ pub fn recv(out: &mut [u8]) -> Option<usize> {
         let n = len.saturating_sub(4).min(out.len());
         if good {
             let buf = RX_BUF + st.rx_next * BUF;
-            cache_invalidate(buf, BUF, false);
+            // Only the lines the frame is in.
+            dcache_invalidate(buf, len.next_multiple_of(64).min(BUF));
             out[..n].copy_from_slice(unsafe { core::slice::from_raw_parts(buf as *const u8, n) });
         }
         // Back to the DMA.
@@ -498,7 +499,7 @@ pub fn send(frame: &[u8]) -> Result<(), &'static str> {
         return Err("frame too long");
     }
     let d = TX_DESC + st.tx_next * DESC;
-    cache_invalidate(d, DESC, false);
+    dcache_invalidate(d, DESC);
     if word(d) & OWN != 0 {
         return Err("busy");
     }

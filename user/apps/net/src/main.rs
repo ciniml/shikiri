@@ -38,7 +38,7 @@ use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address, Ipv6Cidr};
 use t5_rt::net::{self as proto, iface, op, state, status};
-use t5_rt::{Channel, Error, Grants, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw};
+use t5_rt::{Channel, Error, Grants, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw_at};
 
 use fwd::{AP, ETH, Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
 use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, Port};
@@ -90,14 +90,19 @@ pub fn link_local(mac: [u8; 6]) -> IpCidr {
 /// The time of the current pass (`tick`), in ns. Reading the time is a
 /// system call; once per pass instead of once per smoltcp poll and per
 /// packet (filter, NAT, neighbour tables) took 300,000 calls per 16 MiB
-/// echo away (doc/34).
+/// echo away (doc/34). After `wait` the main loop takes the time `wait`
+/// returns (doc/58 R5: two `TIME`s a pass were 9% of net's time).
 static mut CLOCK_NS: u64 = 0;
 
 /// Reads the time for the pass that begins.
 pub fn tick() -> u64 {
     let t = time_ns();
-    unsafe { CLOCK_NS = t };
+    set_clock(t);
     t
+}
+
+fn set_clock(t: u64) {
+    unsafe { CLOCK_NS = t };
 }
 
 pub fn clock_ns() -> u64 {
@@ -1641,12 +1646,14 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         for e in stack.eth.iter().flatten() {
             e.dev.port.kick();
         }
-        tick();
+        // The time is the last `wait`'s: the delay comes out a pass's work
+        // longer than it is. Reading the time again here cost more than
+        // that (doc/58 R5).
         let delay = stack.poll_delay();
         let timeout = delay.map_or(IDLE_NS, |d| (d.total_micros() * 1000).min(IDLE_NS)).max(1);
-        let ev = wait_raw(&hs[..n], timeout);
+        let (ev, at) = wait_raw_at(&hs[..n], timeout);
         // Requests below are handled at the time they came.
-        tick();
+        set_clock(at);
         let ev = match ev {
             Ok(ev) => ev,
             Err(Error::TimedOut) => continue,

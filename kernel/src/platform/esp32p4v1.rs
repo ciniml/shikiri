@@ -360,6 +360,16 @@ pub(super) fn cache_invalidate(addr: usize, len: usize, l2: bool) {
     }
 }
 
+/// Invalidates `[addr, addr + len)` in L1 D only: memory a DMA wrote that
+/// is never run as code (the EMAC's descriptors and buffers, doc/58 R5).
+/// Half the ROM calls of `cache_invalidate`.
+pub(super) fn dcache_invalidate(addr: usize, len: usize) {
+    unsafe {
+        let invalidate: RomCacheFn = core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR);
+        invalidate(CACHE_MAP_L1_DCACHE, addr as u32, len as u32);
+    }
+}
+
 /// Writes `[addr, addr + len)` back from L1 D, then from L2 if `l2`
 /// (cache_ll.h:644-693: the levels are written back in order).
 pub(super) fn cache_writeback(addr: usize, len: usize, l2: bool) {

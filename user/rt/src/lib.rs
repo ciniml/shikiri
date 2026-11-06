@@ -71,6 +71,28 @@ unsafe fn syscall4(nr: usize, a: [usize; 4]) -> (isize, [usize; 3]) {
 }
 
 #[inline(always)]
+/// `syscall4` that also returns a4/a5 (`wait`'s time, ABI minor 21).
+unsafe fn syscall4_t(nr: usize, a: [usize; 4]) -> (isize, [usize; 3], u64) {
+    let ret: isize;
+    let (v1, v2, v3, lo, hi): (usize, usize, usize, usize, usize);
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") nr,
+            inlateout("a0") a[0] => ret,
+            inlateout("a1") a[1] => v1,
+            inlateout("a2") a[2] => v2,
+            inlateout("a3") a[3] => v3,
+            lateout("a4") lo, lateout("a5") hi,
+            lateout("a6") _, lateout("t0") _, lateout("t1") _, lateout("t2") _,
+            lateout("t3") _, lateout("t4") _, lateout("t5") _, lateout("t6") _,
+            lateout("ra") _,
+            options(nostack),
+        );
+    }
+    (ret, [v1, v2, v3], ((hi as u64) << 32) | lo as u64)
+}
+
 unsafe fn syscall2(nr: usize, a0: usize, a1: usize) -> (isize, usize, usize) {
     let (ret, v) = unsafe { syscall4(nr, [a0, a1, 0, 0]) };
     (ret, v[0], v[1])
@@ -161,6 +183,16 @@ pub fn wait_raw(handles: &[u32], timeout_ns: u64) -> Result<Event, Error> {
         syscall4(sys::WAIT, [handles.as_ptr() as usize, handles.len(), timeout_ns as usize, (timeout_ns >> 32) as usize])
     };
     result(ret, v).map(|v| Event { index: v[0], kind: v[1], value: v[2] })
+}
+
+/// `wait_raw`, and the time (ns, as `time_ns`) when the wait ended, timed
+/// out or not: a loop around `wait` needs no `time_ns` of its own (doc/58
+/// R5).
+pub fn wait_raw_at(handles: &[u32], timeout_ns: u64) -> (Result<Event, Error>, u64) {
+    let (ret, v, now) = unsafe {
+        syscall4_t(sys::WAIT, [handles.as_ptr() as usize, handles.len(), timeout_ns as usize, (timeout_ns >> 32) as usize])
+    };
+    (result(ret, v).map(|v| Event { index: v[0], kind: v[1], value: v[2] }), now)
 }
 
 /// `wait_raw` on handles.

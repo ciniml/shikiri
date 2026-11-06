@@ -598,8 +598,10 @@ p4emu-run-26:
 	@# and of a string. The apps' endpoints (doc/53): `mtep` brings a
 	@# temperature sensor (endpoint 2) and a plug (3); the controller reads
 	@# PartsList and the temperature and toggles the plug (`mtep.state`).
+	@# `matter` takes ~3.2 s to be ready (its CA's key): 5 s before the
+	@# first request (3 s raced it, doc/58 R5).
 	$(T5EMU) --quiet --max-ms 180000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
-	    --ctl "run net" --ctl "wait-ms 3000" --ctl "run matter 1" --ctl "wait-ms 3000" \
+	    --ctl "run net" --ctl "wait-ms 3000" --ctl "run matter 1" --ctl "wait-ms 5000" \
 	    --ctl "run mtreq 14 1" --ctl "wait-ms 25000" --ctl "run mtreq 13 1" --ctl "wait-ms 5000" \
 	    --ctl "run mtreq 17 1" --ctl "wait-ms 5000" \
 	    --ctl "run mtreq 5 1" --ctl "wait-ms 5000" --ctl "run mtreq 6 1" --ctl "wait-ms 3000" \

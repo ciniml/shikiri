@@ -136,11 +136,14 @@ impl Process {
     pub fn try_wake(&mut self, now: u64) -> bool {
         match self.state {
             State::Sleeping { until } if until <= now => {}
-            State::Waiting { handles, n, until } => match self.handles.poll(&handles[..n], now) {
-                Some((i, ev, v)) => self.set_result(Ok([i, ev, v])),
-                None if until <= now => self.set_result(Err(Error::TimedOut)),
-                None => return false,
-            },
+            State::Waiting { handles, n, until } => {
+                match self.handles.poll(&handles[..n], now) {
+                    Some((i, ev, v)) => self.set_result(Ok([i, ev, v])),
+                    None if until <= now => self.set_result(Err(Error::TimedOut)),
+                    None => return false,
+                }
+                self.set_time(now);
+            }
             _ => return false,
         }
         self.state = State::Ready;
@@ -235,11 +238,17 @@ impl Process {
                 }
                 r.map(|v| [v, 0, 0])
             }
-            sys::WAIT => match self.wait(a0, a1, ((a3 as u64) << 32) | a2 as u64) {
-                Ok(Some(r)) => Ok(r),
-                Ok(None) => return Next::Switch,
-                Err(e) => Err(e),
-            },
+            sys::WAIT => {
+                // The time `wait` read: another SYSTIMER read is ~2 µs.
+                let mut now = 0;
+                let r = match self.wait(a0, a1, ((a3 as u64) << 32) | a2 as u64, &mut now) {
+                    Ok(Some(r)) => Ok(r),
+                    Ok(None) => return Next::Switch,
+                    Err(e) => Err(e),
+                };
+                self.set_time(now);
+                r
+            }
             sys::READ | sys::WRITE => self.io(a0, a1, a2, nr == sys::WRITE),
             _ => Err(Error::NoSupport),
         };
@@ -259,6 +268,13 @@ impl Process {
             }
             Err(e) => r[reg::A0] = (e as usize).wrapping_neg(),
         }
+    }
+
+    /// The time in a4/a5 (`wait`'s second result, ABI minor 21).
+    fn set_time(&mut self, now: u64) {
+        let ns = time::ticks_to_ns(now);
+        self.frame.regs[reg::A4] = ns as usize;
+        self.frame.regs[reg::A5] = (ns >> 32) as usize;
     }
 
     /// Checks that `[ptr, ptr + len)` lies entirely inside memory the process
@@ -375,7 +391,8 @@ impl Process {
     /// Starts a `wait`: `Ok(Some(..))` if an event is there already,
     /// `Ok(None)` if the process now blocks (the result is set when it
     /// wakes).
-    fn wait(&mut self, ptr: usize, n: usize, timeout_ns: u64) -> Result<Option<[usize; 3]>, Error> {
+    fn wait(&mut self, ptr: usize, n: usize, timeout_ns: u64, now_out: &mut u64) -> Result<Option<[usize; 3]>, Error> {
+        *now_out = Current::now();
         if n == 0 || n > WAIT_MAX {
             return Err(Error::Size);
         }
@@ -386,7 +403,7 @@ impl Process {
         let mut handles = [0u32; WAIT_MAX];
         unsafe { core::ptr::copy_nonoverlapping(ptr as *const u32, handles.as_mut_ptr(), n) };
         self.handles.check_wait(&handles[..n])?;
-        let now = Current::now();
+        let now = *now_out;
         if let Some((i, ev, v)) = self.handles.poll(&handles[..n], now) {
             return Ok(Some([i, ev, v]));
         }

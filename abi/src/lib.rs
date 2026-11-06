@@ -33,8 +33,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// `proc:list`, `proc:apps`, `proc:kill`. Minor 17 (doc/44): the display's
 /// 2D requests (`write`, `display::DONE`). Minor 18 (doc/46): `random`.
 /// Minor 19 (doc/48): `bt:hci`. Minor 20 (doc/56): `permit_drop`,
-/// `Error::Limit`, `spawn::RESTART`.
-pub const ABI_MINOR: u16 = 20;
+/// `Error::Limit`, `spawn::RESTART`. Minor 21 (doc/58 R5): `wait` returns
+/// the time too.
+pub const ABI_MINOR: u16 = 21;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -64,7 +65,9 @@ pub mod sys {
     /// `WAIT_MAX`), a2/a3 = timeout in ns (lo/hi; `FOREVER` = none, 0 =
     /// just poll). Returns the index of the handle in the array (a1), the
     /// event (a2) and its value (a3) of the first handle that has one;
-    /// `Error::TimedOut` if none came in time.
+    /// `Error::TimedOut` if none came in time. Either way also the time
+    /// (as `TIME`, ns) when it ended in a4/a5 (lo/hi; minor 21): a process
+    /// that waits in a loop needs no `TIME` per pass (doc/58 R5).
     pub const WAIT: usize = 0x082;
     /// a0/a1 = object name (UTF-8), a2 = rights (`rights`). Returns the
     /// handle in a1. Only names in the image's Permissions TLV can be

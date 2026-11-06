@@ -162,6 +162,10 @@ static ACTIVE: AtomicPtr<Scheduler> = AtomicPtr::new(core::ptr::null_mut());
 /// How often `run(None, ..)` calls `poll` while processes keep the CPU busy
 /// or everyone sleeps.
 pub const POLL_MS: u64 = 10;
+/// How often the scheduler loop feeds the watchdog (it bites after about
+/// 2 s). Feeding on every pass took three writes to the LP domain with the
+/// lock held, tens of thousands of times a second under load (doc/58 R5).
+const FEED_MS: u64 = 100;
 
 impl Scheduler {
     pub fn new() -> Scheduler {
@@ -294,16 +298,20 @@ impl Scheduler {
 pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mut Scheduler)) {
     let limit = limit_ms.map(|ms| Current::now() + time::ms_to_ticks(ms));
     let mut next_poll = Current::now();
+    let mut next_feed = 0;
     ACTIVE.store(this, Ordering::Release);
 
     loop {
-        Current::feed_watchdog();
         Current::display_service();
         crate::hostlink::poll();
         crate::wlan::poll();
         crate::eth::poll();
         crate::capture::poll();
         let now = Current::now();
+        if now >= next_feed {
+            Current::feed_watchdog();
+            next_feed = now + time::ms_to_ticks(FEED_MS);
+        }
         // Borrowed until the process runs or the core sleeps.
         let s = unsafe { &mut *this };
         if limit.is_none() && now >= next_poll {
