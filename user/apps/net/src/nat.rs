@@ -5,6 +5,11 @@
 //! gets the original destination back and is forwarded. Checksums are
 //! adjusted, not recomputed (RFC 1624).
 //!
+//! The table is open addressing on a keyed hash of the inside host and the
+//! far end (doc/58 R5); the port given out is `PORTS.start` + the slot, so
+//! the answer finds its mapping without a search, and the key (random at
+//! start) keeps the ports from being guessed.
+//!
 //! ICMP errors about a masqueraded packet (a router's Time Exceeded) are
 //! not translated yet.
 
@@ -12,10 +17,12 @@
 use crate::filter::{self, PROTO_ICMP, PROTO_TCP, PROTO_UDP};
 use crate::fwd::be32;
 
-const MAPS: usize = 256;
-/// Ports (and echo identifiers) handed out; below the stack's own
-/// ephemeral ports (49152 and up).
-const PORTS: core::ops::Range<u16> = 30000..40000;
+const MAPS: usize = 2048;
+/// Slots looked at from a mapping's hash.
+const PROBE: usize = 16;
+/// Ports (and echo identifiers) handed out, one per slot; below the
+/// stack's own ephemeral ports (49152 and up).
+const PORTS: core::ops::Range<u16> = 30000..30000 + MAPS as u16;
 const S: u64 = 1_000_000_000;
 
 #[derive(Clone, Copy)]
@@ -31,11 +38,13 @@ struct Map {
     expires: u64,
     /// An answer came back.
     replied: bool,
+    /// More went out after the answer (UDP: a stream, kept longer).
+    stream: bool,
 }
 
 struct Nat {
     maps: [Option<Map>; MAPS],
-    next_port: u16,
+    key: u64,
     pub mapped: u32,
     pub full: u32,
     pub evicted: u32,
@@ -44,15 +53,15 @@ struct Nat {
 /// In .bss, filled by `init` (as the filter's table).
 static mut NAT: core::mem::MaybeUninit<Nat> = core::mem::MaybeUninit::uninit();
 
-/// Empties the table; once, at start.
-pub fn init() {
+/// Empties the table, with `key` for the hash; once, at start.
+pub fn init(key: u64) {
     unsafe {
         let p = (*core::ptr::addr_of_mut!(NAT)).as_mut_ptr();
         let maps = core::ptr::addr_of_mut!((*p).maps).cast::<Option<Map>>();
         for i in 0..MAPS {
             maps.add(i).write(None);
         }
-        core::ptr::addr_of_mut!((*p).next_port).write(PORTS.start);
+        core::ptr::addr_of_mut!((*p).key).write(key);
         core::ptr::addr_of_mut!((*p).mapped).write(0);
         core::ptr::addr_of_mut!((*p).full).write(0);
         core::ptr::addr_of_mut!((*p).evicted).write(0);
@@ -63,11 +72,24 @@ fn nat() -> &'static mut Nat {
     unsafe { (*core::ptr::addr_of_mut!(NAT)).assume_init_mut() }
 }
 
-fn lifetime(proto: u8) -> u64 {
-    match proto {
+/// As the filter's: UDP that only asked and was answered (DNS) goes in 30
+/// s, as in Linux; a stream stays 120 s.
+fn lifetime(m: &Map) -> u64 {
+    match m.proto {
         PROTO_TCP => 600 * S,
-        PROTO_UDP => 120 * S,
+        PROTO_UDP if m.stream => 120 * S,
         _ => 30 * S,
+    }
+}
+
+impl Nat {
+    fn window(&self, proto: u8, link: u8, inside: (u32, u16), remote: (u32, u16)) -> impl Iterator<Item = usize> + Clone + use<> {
+        let mut h = self.key ^ (proto as u64) << 8 ^ link as u64;
+        for v in [inside.0 as u64, inside.1 as u64, remote.0 as u64, remote.1 as u64] {
+            h = (h ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+        }
+        let h = (h >> 32) as usize;
+        (0..PROBE).map(move |i| (h + i) % MAPS)
     }
 }
 
@@ -141,44 +163,36 @@ pub fn outbound(ip: &mut [u8], link: u8, addr: u32) {
     let (inside, remote) = ((src, sport), (be32(&ip[16..20]), dport));
     let n = nat();
     let now = crate::clock_ns();
-    let live = |m: &Map| m.expires > now;
-    let found = n.maps.iter_mut().flatten().find(|m| live(m) && m.proto == proto && m.link == link && m.inside == inside && m.remote == remote);
-    let port = match found {
-        Some(m) => {
-            m.expires = now + lifetime(proto);
-            m.outside.1
+    let window = n.window(proto, link, inside, remote);
+    let found = window.clone().find(|&i| n.maps[i].is_some_and(|m| m.expires > now && m.proto == proto && m.link == link && m.inside == inside && m.remote == remote));
+    let slot = match found {
+        Some(i) => {
+            let m = n.maps[i].as_mut().unwrap();
+            if m.replied {
+                m.stream = true;
+            }
+            m.expires = now + lifetime(m);
+            i
         }
         None => {
+            let free = window.clone().find(|&i| n.maps[i].is_none_or(|m| m.expires <= now));
             // No room: the unanswered mapping that ends first makes room
             // (as the filter's connections, doc/58 R5).
-            let free = n.maps.iter().position(|m| m.is_none_or(|m| !live(&m)));
-            let Some(slot) = free.or_else(|| (0..MAPS).filter(|&i| n.maps[i].is_some_and(|m| !m.replied)).min_by_key(|&i| n.maps[i].map_or(0, |m| m.expires))) else {
+            let Some(i) = free.or_else(|| window.filter(|&i| n.maps[i].is_some_and(|m| !m.replied)).min_by_key(|&i| n.maps[i].map_or(0, |m| m.expires))) else {
                 n.full += 1;
                 return;
             };
             if free.is_none() {
                 n.evicted += 1;
-                n.maps[slot] = None;
             }
-            // The next port not in use on this link for this protocol.
-            let mut port = None;
-            for _ in 0..PORTS.len() {
-                let p = n.next_port;
-                n.next_port = if p + 1 >= PORTS.end { PORTS.start } else { p + 1 };
-                if !n.maps.iter().flatten().any(|m| live(m) && m.proto == proto && m.link == link && m.outside.1 == p) {
-                    port = Some(p);
-                    break;
-                }
-            }
-            let Some(port) = port else {
-                n.full += 1;
-                return;
-            };
-            n.maps[slot] = Some(Map { proto, link, inside, remote, outside: (addr, port), expires: now + lifetime(proto), replied: false });
+            let mut m = Map { proto, link, inside, remote, outside: (addr, PORTS.start + i as u16), expires: 0, replied: false, stream: false };
+            m.expires = now + lifetime(&m);
+            n.maps[i] = Some(m);
             n.mapped += 1;
-            port
+            i
         }
     };
+    let port = PORTS.start + slot as u16;
     rewrite(ip, ihl, 12, addr, port_at, csum_at, pseudo, port);
 }
 
@@ -197,11 +211,14 @@ pub fn inbound(ip: &mut [u8], link: u8) -> bool {
     let sport = if proto == PROTO_ICMP { 0 } else { u16::from_be_bytes([l4[0], l4[1]]) };
     let (dst, remote) = (be32(&ip[16..20]), (be32(&ip[12..16]), sport));
     let now = crate::clock_ns();
-    let Some(m) = nat().maps.iter_mut().flatten().find(|m| m.expires > now && m.proto == proto && m.link == link && m.outside == (dst, dport) && m.remote == remote) else {
+    if !PORTS.contains(&dport) {
+        return false;
+    }
+    let Some(m) = nat().maps[(dport - PORTS.start) as usize].as_mut().filter(|m| m.expires > now && m.proto == proto && m.link == link && m.outside == (dst, dport) && m.remote == remote) else {
         return false;
     };
-    m.expires = now + lifetime(proto);
     m.replied = true;
+    m.expires = now + lifetime(m);
     let (addr, port) = m.inside;
     rewrite(ip, ihl, 16, addr, port_at, csum_at, pseudo, port);
     true

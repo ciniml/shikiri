@@ -148,7 +148,7 @@ fn init_statics() {
         fill(core::ptr::addr_of_mut!(ETH_STORAGE).cast::<SocketStorage<'static>>(), (POOL + 4) * (IFACES - 1), || SocketStorage::EMPTY);
     }
     filter::init();
-    nat::init();
+    nat::init(random_u64());
 }
 static mut DNS_SLOTS: [Option<dns::DnsQuery>; DNS_QUERIES] = [const { None }; DNS_QUERIES];
 

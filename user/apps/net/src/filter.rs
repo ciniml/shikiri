@@ -49,9 +49,9 @@ pub const PROTO_ICMPV6: u8 = 58;
 pub const PROTO_IGMP: u8 = 2;
 
 pub const MAX_RULES: usize = 64;
-const CONNECTIONS: usize = 512;
+const CONNECTIONS: usize = 2048;
 /// Slots looked at from a key's hash.
-const PROBE: usize = 8;
+const PROBE: usize = 16;
 const LOG_PER_S: u32 = 10;
 /// ICMP errors the host itself sends (doc/58 R5): at most this many a
 /// second after a burst, as Linux's `icmp_msgs_per_sec`. Otherwise a flood
@@ -378,17 +378,21 @@ struct Conn {
     /// The first packet's source: the other way is the reply.
     from: (u128, u16),
     replied: bool,
+    /// More came from the first side after the answer (UDP: a stream).
+    stream: bool,
     expires: u64,
 }
 
 const S: u64 = 1_000_000_000;
 
-fn lifetime(proto: u8, replied: bool, closing: bool) -> u64 {
+/// UDP that only asked and was answered (DNS) goes in 30 s, as in Linux
+/// (`nf_conntrack_udp_timeout`); a stream stays 120 s (doc/58 R5).
+fn lifetime(proto: u8, replied: bool, stream: bool, closing: bool) -> u64 {
     match proto {
         _ if closing => 10 * S,
         PROTO_TCP if replied => 600 * S,
         PROTO_TCP => 60 * S,
-        PROTO_UDP if replied => 120 * S,
+        PROTO_UDP if stream => 120 * S,
         _ => 30 * S,
     }
 }
@@ -464,12 +468,14 @@ impl Filter {
                 let c = self.table[i].as_mut().unwrap();
                 if (p.src, p.sport) != c.from {
                     c.replied = true;
+                } else if c.replied {
+                    c.stream = true;
                 }
-                c.expires = now + lifetime(p.proto, c.replied, closing);
+                c.expires = now + lifetime(p.proto, c.replied, c.stream, closing);
             }
             None if state == st::NEW => {
                 let key = Key::new(p.proto, p.src, p.sport, p.dst, p.dport);
-                self.insert(Conn { key, from: (p.src, p.sport), replied: false, expires: now + lifetime(p.proto, false, closing) }, now);
+                self.insert(Conn { key, from: (p.src, p.sport), replied: false, stream: false, expires: now + lifetime(p.proto, false, false, closing) }, now);
             }
             None => {}
         }
