@@ -514,6 +514,19 @@ impl Platform for Esp32p4v1 {
     const IPI_IRQ: usize = IPI_CLIC_INDEX;
 
     fn start_secondary(entry: usize) -> bool {
+        unsafe extern "C" {
+            static __stack1_bottom: u8;
+            static __stack1_top: u8;
+        }
+        // Core 1's stack is where the bootloader ran (link-esp32p4v1.ld).
+        // The ROM's flash parameters, which the flash writes use, must not
+        // be there.
+        let stack1 = core::ptr::addr_of!(__stack1_bottom) as usize..core::ptr::addr_of!(__stack1_top) as usize;
+        let chip = unsafe { rd(ROM_SPIFLASH_LEGACY_DATA) } as usize;
+        if stack1.contains(&chip) {
+            t5_abi::event!(Error, "smp.stack1_in_use", rom_flash_chip = t5_abi::log::Addr(chip as u32));
+            return false;
+        }
         unsafe {
             let set_boot: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_SET_APPCPU_BOOT_ADDR);
             // Core 1 may still run from before a reset that did not stop it

@@ -1,7 +1,7 @@
-/* Shared kernel layout. Platform scripts define the RAM region and the
- * REGION_TEXT / REGION_RODATA / REGION_LOG / REGION_BSS aliases and the
- * KERNEL_STACK and KERNEL_STACK1 (second core) sizes before including this
- * file. */
+/* Shared kernel layout. Platform scripts define the RAM region, the
+ * REGION_TEXT / REGION_RODATA / REGION_HOT / REGION_LOG / REGION_BSS /
+ * REGION_STACK1 aliases and the KERNEL_STACK and KERNEL_STACK1 (second
+ * core) sizes before including this file. */
 ENTRY(_start)
 
 SECTIONS
@@ -11,6 +11,14 @@ SECTIONS
     .flash.appdesc : ALIGN(4) {
         KEEP(*(.flash.appdesc))
     } > REGION_RODATA
+
+    /* The read-only data of .hot_text's modules (jump tables and such),
+     * beside it. Before .rodata so that its patterns take these first. */
+    .hot_rodata : ALIGN(4) {
+        *(.rodata.*9t5_kernel5sched* .rodata.*9t5_kernel7process* .rodata.*9t5_kernel6handle*)
+        *(.rodata.*9t5_kernel7channel* .rodata.*9t5_kernel3eth* .rodata.*9t5_kernel4wlan*)
+        *(.rodata.*9esp32p4v14emac* .rodata.*9esp32p4v14sdio*)
+    } > REGION_HOT
 
     .rodata : ALIGN(4) {
         *(.rodata .rodata.* .srodata .srodata.*)
@@ -22,6 +30,26 @@ SECTIONS
         . = . + 8;
         . = ALIGN(4) + 0x20;
     } > REGION_RODATA
+
+    /* Code the kernel runs all the time (doc/58 R5): the trap path, the
+     * scheduler, the syscalls, the handles and the network devices. On the
+     * ESP32-P4 it runs from RAM rather than through the flash window and
+     * the L2 cache the apps' PSRAM shares.
+     * Before .text so that its patterns take these first. */
+    .hot_text : ALIGN(64) {
+        __hot_text_start = .;
+        KEEP(*(.text.trap_entry))
+        *(.text.switch_to_user_asm)
+        *(.text.*9t5_kernel4arch* .text.*9t5_kernel5sched* .text.*9t5_kernel7process*)
+        *(.text.*9t5_kernel6handle* .text.*9t5_kernel7channel* .text.*9t5_kernel3shm*)
+        *(.text.*9t5_kernel3smp* .text.*9t5_kernel4time* .text.*9t5_kernel3eth* .text.*9t5_kernel4wlan*)
+        *(.text.*9esp32p4v14emac* .text.*9esp32p4v14sdio*)
+        *(.text.*8Platform8eth_recv .text.*8Platform8eth_send .text.*8Platform11eth_pending)
+        *(.text.*8Platform9alarm_due .text.*8Platform9set_alarm .text.*8Platform11clear_alarm)
+        *(.text.memcpy .text.memmove .text.memset .text.memcmp .text.bcmp .text.*17compiler_builtins*)
+        . = ALIGN(64);
+        __hot_text_end = .;
+    } > REGION_HOT
 
     .text : ALIGN(4) {
         KEEP(*(.text._start))
@@ -62,7 +90,7 @@ SECTIONS
         __stack1_bottom = .;
         . += KERNEL_STACK1;
         __stack1_top = .;
-    } > REGION_BSS
+    } > REGION_STACK1
 
     __kernel_end = .;
 

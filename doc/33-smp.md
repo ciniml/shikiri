@@ -12,7 +12,7 @@ doc/32 の提案（方式 A: 大きなカーネルの鍵、デバイスは Core0
 
 ## 2. S1: カーネル（`kernel/src/smp.rs`、`arch/riscv32/mod.rs`、リンカスクリプト）
 - **入口**: `_start` は `mhartid` を見る。0 でない hart（QEMU はすべての hart をここから始める）は、`SECONDARY_GO` が 0 でなくなるまで待ち、`_start_secondary` へ進む。P4 の Core1 は、ROM から直接 `_start_secondary` に来る。
-- **`_start_secondary`**: MIE=0、mscratch=0、gp=0 にし、Core1 用のスタック（`.stack1`。P4 は RAM_HI に 64 KiB、QEMU は 32 KiB）に切り替えて、`smp::kmain_secondary` を呼ぶ。
+- **`_start_secondary`**: MIE=0、mscratch=0、gp=0 にし、Core1 用のスタック（`.stack1`。P4 は 64 KiB、QEMU は 32 KiB。P4 では doc/58 R5 から、起動の後に空くブートローダの領域 0x4FF2_9000 に置く）に切り替えて、`smp::kmain_secondary` を呼ぶ。
 - **`kmain_secondary`**:
   - プラットフォームの初期化（P4 は Core1 の CLIC のしきい値）、トラップのベクタ、PMP の初期化をする。
   - `smp.core_up`（hart、mtvec、sp）を出し、`CORE_UP` を立てる。

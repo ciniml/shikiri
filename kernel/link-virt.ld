@@ -15,6 +15,9 @@ REGION_ALIAS("REGION_TEXT", TEXT);
 REGION_ALIAS("REGION_RODATA", RODATA);
 REGION_ALIAS("REGION_LOG", RAM);
 REGION_ALIAS("REGION_BSS", RAM);
+/* Not TEXT: QEMU starts at its beginning, where _start must be. */
+REGION_ALIAS("REGION_HOT", RODATA);
+REGION_ALIAS("REGION_STACK1", RAM);
 /* 92K: the 4 KiB I/O buffer moved from the stack to .bss (doc/34). */
 KERNEL_STACK = 92K;
 KERNEL_STACK1 = 32K;
