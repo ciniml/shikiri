@@ -23,7 +23,8 @@
 //! (On/Off), 26 `watch NODE 1 0x45 0` (BooleanState), 27 `watch NODE 1
 //! 0x40d 0` (CO2), 28 `values`, 29 `watch NODE 2 0x402 0` (temperature),
 //! 30 `watch NODE 3 0x405 0` (humidity), 31 + 256 * NODE + 65536 * N
-//! `pairaddr NODE CODE 192.168.8.N 5540`, 32 `relocate NODE`, 33 `unwatch
+//! `pairaddr NODE CODE 192.168.8.N 5540`, 32 `relocate NODE`, 34 + 256 * NODE
+//! `pairble NODE CODE`, 33 `unwatch
 //! NODE 3 0x405 0`. The answer's lines are logged. Built with `--permit svc:matter`. Exit 0 if
 //! the answer ended well.
 
@@ -68,6 +69,8 @@ fn main(op: usize, node: usize) -> usize {
         // (matter-test; NODE here is the code's first 10 digits).
         o if o & 0xFF == 31 => write!(req, "pairaddr {} {:010} 192.168.8.{} 5540", (o >> 8) & 0xFF, node, o >> 16),
         32 => write!(req, "relocate {node}"),
+        // 34 + 256 * NODE: `pairble NODE CODE10` (as OP 24, over BLE).
+        o if o & 0xFF == 34 => write!(req, "pairble {} {:010}", o >> 8, node),
         33 => write!(req, "unwatch {node} 3 0x405 0"),
         25 => write!(req, "watch {node} 1 6 0"),
         26 => write!(req, "watch {node} 1 0x45 0"),

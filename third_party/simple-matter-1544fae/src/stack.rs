@@ -1,0 +1,1244 @@
+//! 統合層(スタック組み立て):単一 poll 駆動の Matter デバイススタック。
+//!
+//! `docs/design/transport-exchange.md` §9 の「DefaultStack・単一 poll 駆動」に基づき、
+//! [`SessionManager`] + TX バッファプール + [`ExchangeManager`] + [`ProtocolMux`]
+//! ([`SecureChannel`] + [`InteractionModel`])+ 共有 [`FabricTable`] を 1 つの型
+//! [`MatterStack`] に束ねる。const generic のサイジングはプロファイル型エイリアス
+//! [`DefaultStack`] で隠す。
+//!
+//! # 単一駆動 API(sans-IO 維持)
+//!
+//! ソケットには触れず、バイト列と時刻だけを扱う:
+//!
+//! - [`MatterStack::handle_rx`] — 受信 datagram を処理し、送るべき応答があれば
+//!   [`SendDirective`] を返す(バイト列は呼び出し側の `tx_out` に書かれる)。
+//! - [`MatterStack::poll`] — 時間駆動の送出(MRP 再送・standalone ACK・購読レポート)を
+//!   1 件返す。[`SendDirective`] が `None` になるまで繰り返し呼ぶ。
+//! - [`MatterStack::next_deadline`] — 次に [`poll`](MatterStack::poll) すべき絶対時刻。
+//!
+//! MRP 再送・standalone ACK・SC ハンドシェイクタイムアウト・fail-safe 期限・IM 購読レポートを
+//! すべて 1 つの deadline/poll 系に統合する。
+//!
+//! # fabric テーブルの共有(統合の要)
+//!
+//! CASE responder([`SecureChannel`] の型引数 `F`)は AddNOC で追加された fabric を
+//! Sigma2 で読む必要がある。OpCreds クラスタ([`InteractionModel`] 内)と CASE は同一の
+//! [`ProtocolMux`] に格納されるため相互参照できない。よって [`FabricTable`] は**呼び出し側が
+//! 所有する `RefCell`** に置き、CASE 側([`SharedFabricCreds`])と OpCreds 側
+//! ([`OpCredsCluster::new_shared`](crate::dm::clusters::OpCredsCluster::new_shared))の
+//! 両方が `&'s RefCell<FabricTable>` で参照する(自己参照を避ける、設計判断)。
+//!
+//! # コミッショニング窓(最小)
+//!
+//! 本統合層は「コミッショニング窓は常時開」を採る(最小構成)。PASE は
+//! [`PaseConfig`](crate::sc::PaseConfig) が設定されている限り常に受理する。窓の開閉・タイムアウト
+//! (OpenCommissioningWindow)は本ピースのスコープ外(discovery/platform 統合と連動、乖離)。
+
+use core::cell::{Ref, RefCell};
+use core::num::NonZeroU8;
+
+use crate::buf::BufferPool;
+use crate::crypto::AES_CCM_TAG_LEN;
+use crate::crypto::{Crypto, Rng};
+use crate::dm::DataModel;
+use crate::exchange::{
+    ExchangeId, ExchangeManager, HandlerAction, Outgoing, PollAction, ProtocolMux, SendTiming,
+};
+use crate::fabric::{FabricCredentials, FabricEntry, FabricTable};
+use crate::groups::GroupKeyResolver;
+use crate::im::engine::InteractionModel;
+use crate::im::wire::{ImOpCode, PROTO_ID_INTERACTION_MODEL};
+use crate::sc::case::creds::{Fabric, FabricStore, NocResolver, PeerIdentity};
+use crate::sc::SecureChannel;
+use crate::transport::counter::PeerWindow;
+use crate::transport::header::{DstNodeId, PacketHeader, PayloadHeader, SecFlags};
+use crate::transport::net::{PeerAddr, MAX_RX_PACKET_SIZE};
+use crate::transport::secure::SecureCodec;
+use crate::transport::session::fixed::FixedVec;
+use crate::transport::session::{EvictHint, SessionId, SessionInit, SessionManager};
+use crate::transport::util::{ParseBuf, WriteBuf};
+
+/// スタックが扱う 1 パケットの最大バイト数(TX バッファ・`tx_out` のサイズ目安)。
+///
+/// CASE Sigma2(responder NOC/ICAC を含む)を 1 datagram で送れるよう、ワイヤ上限
+/// (`MAX_RX_PACKET_SIZE`)以上の余裕を取る。
+pub const MAX_PACKET_SIZE: usize = 1600;
+
+/// 統合層が返す送信指示。
+///
+/// バイト列は [`MatterStack::handle_rx`] / [`MatterStack::poll`] に渡した `tx_out` の先頭
+/// [`len`](SendDirective::len) バイトに書かれる。呼び出し側はそれを [`addr`](SendDirective::addr)
+/// へ 1 datagram として送る(ソケット操作は呼び出し側の責務、sans-IO)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendDirective {
+    /// 送信先。
+    pub addr: PeerAddr,
+    /// `tx_out` に書かれた送信バイト数。
+    pub len: usize,
+}
+
+/// PASE / CASE responder が話す Secure Channel(0x0000)ハンドラの型。
+type Sc<'s, C, R, const NF: usize, const H: usize> =
+    SecureChannel<'s, C, R, SharedFabricCreds<'s, C, NF>, H>;
+
+/// スタックが用いる enum mux(SC + IM)。
+type Mux<
+    's,
+    C,
+    R,
+    D,
+    const NF: usize,
+    const H: usize,
+    const READS: usize,
+    const SUBS: usize,
+    const PATHS: usize,
+> = ProtocolMux<Sc<'s, C, R, NF, H>, InteractionModel<D, READS, SUBS, PATHS>>;
+
+/// 単一 poll 駆動の Matter デバイススタック(設計 §9)。
+///
+/// 型引数は `C`(暗号 backend)/ `R`(乱数)/ `D`(デバイス [`DataModel`])と、サイジングの
+/// const generic。`'s` は共有する crypto と [`FabricTable`](`RefCell`)の借用寿命。数値は
+/// プロファイルエイリアス [`DefaultStack`] で隠せる。
+pub struct MatterStack<
+    's,
+    C: Crypto,
+    R: Rng,
+    D: DataModel,
+    const NF: usize,
+    const SESSIONS: usize,
+    const EXCHANGES: usize,
+    const TX_BUFS: usize,
+    const HANDSHAKES: usize,
+    const READS: usize,
+    const SUBS: usize,
+    const PATHS: usize,
+> {
+    crypto: &'s C,
+    sessions: SessionManager<SESSIONS>,
+    mgr: ExchangeManager<Mux<'s, C, R, D, NF, HANDSHAKES, READS, SUBS, PATHS>, EXCHANGES>,
+    tx_pool: BufferPool<TX_BUFS, MAX_PACKET_SIZE>,
+    /// 再送バッファを空けるために、ACK の来ない会話をあきらめた回数(診断用)。
+    retrans_given_up: u32,
+    /// ハンドラが応答 payload を書く作業バッファ(平文)。
+    resp: [u8; MAX_PACKET_SIZE],
+    /// groupcast 復号鍵のリゾルバ(`docs/design/group-messaging.md` §5.1)。
+    /// `None` = groupcast 受信無効(既定)。
+    group_keys: Option<&'s dyn GroupKeyResolver>,
+    /// groupcast 送信元別のメッセージカウンタ窓(trust-first、設計 §5.1 手順 3)。
+    group_peers: FixedVec<GroupPeer, GROUP_PEERS>,
+}
+
+/// groupcast 送信元 `(fabric, node)` ごとの trust-first カウンタ状態。
+/// [`MatterStack::pool_usage`] の結果(各プールの使用数と容量)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolUsage {
+    /// exchange 会話数。
+    pub exchanges: usize,
+    /// exchange プール容量。
+    pub exchanges_cap: usize,
+    /// セッション数(平文・予約含む)。
+    pub sessions: usize,
+    /// セッションテーブル容量。
+    pub sessions_cap: usize,
+    /// 進行中の PASE/CASE ハンドシェイク数。
+    pub handshakes: usize,
+    /// ハンドシェイク slot 容量。
+    pub handshakes_cap: usize,
+    /// 使用中の再送バッファ数。
+    pub tx_bufs: usize,
+    /// 再送バッファ容量。
+    pub tx_bufs_cap: usize,
+    /// 確立中/確立済みの購読数(設計 §16.6 診断)。
+    pub subscriptions: usize,
+    /// 購読テーブル容量。
+    pub subscriptions_cap: usize,
+    /// 進行中のチャンク中 Read / プライミング数。
+    pub reads: usize,
+    /// Read 継続 slot 容量。
+    pub reads_cap: usize,
+}
+
+#[derive(Debug, Clone)]
+struct GroupPeer {
+    fabric_idx: NonZeroU8,
+    node_id: u64,
+    window: PeerWindow,
+    last_use: u64,
+}
+
+/// groupcast 送信元カウンタテーブルの容量(満杯時は LRU 上書き)。
+const GROUP_PEERS: usize = 8;
+
+/// datagram の平文ヘッダを覗き、groupcast(Session Type = group)なら `true`。
+///
+/// PacketHeader のレイアウトは `flags(1) || session_id(2) || sec_flags(1) || ...`
+/// (`crate::transport::header`)。復号なしに 4 バイト目の Security Flags だけを見る。
+fn is_group_datagram(datagram: &[u8]) -> bool {
+    datagram.len() > 3 && SecFlags::from_bits(datagram[3]).is_group_session()
+}
+
+impl<
+        's,
+        C: Crypto,
+        R: Rng,
+        D: DataModel,
+        const NF: usize,
+        const SESSIONS: usize,
+        const EXCHANGES: usize,
+        const TX_BUFS: usize,
+        const HANDSHAKES: usize,
+        const READS: usize,
+        const SUBS: usize,
+        const PATHS: usize,
+    > MatterStack<'s, C, R, D, NF, SESSIONS, EXCHANGES, TX_BUFS, HANDSHAKES, READS, SUBS, PATHS>
+{
+    /// crypto 参照・構築済み [`SecureChannel`] と [`InteractionModel`] からスタックを組む。
+    ///
+    /// `sc` の `F` は [`SharedFabricCreds`](CASE 用 fabric ビュー)、`im` の `D` は
+    /// [`OpCredsCluster::new_shared`](crate::dm::clusters::OpCredsCluster::new_shared) で
+    /// **同一の** `RefCell<FabricTable>` を参照するデバイスであること(fabric 共有の前提)。
+    ///
+    /// `#[inline(always)]`: 非インライン版は戻り値(スタック全体)と引数のコピーで
+    /// `size_of::<Self>()` の 2 倍強のフレームを取り、呼び出し側のローカルと合わせて
+    /// タスクスタックを圧迫する(ESP32-S3 実測: 呼び出し側 55.7 KB + 本関数 47.8 KB →
+    /// インライン化で合計 64.1 KB)。
+    #[inline(always)]
+    pub fn new(
+        crypto: &'s C,
+        sc: Sc<'s, C, R, NF, HANDSHAKES>,
+        im: InteractionModel<D, READS, SUBS, PATHS>,
+    ) -> Self {
+        Self {
+            crypto,
+            sessions: SessionManager::new(),
+            mgr: ExchangeManager::new(ProtocolMux::new(sc, im)),
+            tx_pool: BufferPool::new(),
+            retrans_given_up: 0,
+            resp: [0u8; MAX_PACKET_SIZE],
+            group_keys: None,
+            group_peers: FixedVec::new(),
+        }
+    }
+
+    /// groupcast 復号鍵のリゾルバを設定する(`docs/design/group-messaging.md` §5.1)。
+    ///
+    /// 統合層が所有する `RefCell<GroupStore>` への参照を渡す(GroupKeyManagement /
+    /// Groups クラスタと同一のストア)。未設定(既定)の間、groupcast は全て drop される。
+    pub fn set_group_keys(&mut self, keys: &'s dyn GroupKeyResolver) {
+        self.group_keys = Some(keys);
+    }
+
+    /// セッションテーブルへの共有参照。
+    pub const fn sessions(&self) -> &SessionManager<SESSIONS> {
+        &self.sessions
+    }
+
+    /// IM エンジンへの共有参照(属性の読み取り等)。
+    pub fn im(&self) -> &InteractionModel<D, READS, SUBS, PATHS> {
+        &self.mgr.handler().im
+    }
+
+    /// IM エンジンへの可変参照(属性の変更・購読操作等)。
+    pub fn im_mut(&mut self) -> &mut InteractionModel<D, READS, SUBS, PATHS> {
+        &mut self.mgr.handler_mut().im
+    }
+
+    /// デバイス([`DataModel`])への共有参照。
+    pub fn device(&self) -> &D {
+        self.mgr.handler().im.data_model()
+    }
+
+    /// デバイス([`DataModel`])への可変参照(アプリからの状態変更)。
+    pub fn device_mut(&mut self) -> &mut D {
+        self.mgr.handler_mut().im.data_model_mut()
+    }
+
+    /// イベントを 1 件積む(IM エンジンのイベントログへ passthrough、設計 §12)。
+    ///
+    /// `write_data` は EventDataIB.Data の値要素を `tag`(anonymous)で書く。採番した
+    /// EventNumber を返す。
+    pub fn post_event(
+        &mut self,
+        endpoint: crate::dm::meta::EndpointId,
+        cluster: crate::dm::meta::ClusterId,
+        event: crate::dm::meta::EventId,
+        priority: u8,
+        now_ms: u64,
+        write_data: impl FnOnce(
+            &mut crate::tlv::TlvWriter<'_>,
+            &crate::tlv::TlvTag,
+        ) -> crate::error::Result<()>,
+    ) -> crate::error::Result<u64> {
+        self.mgr
+            .handler_mut()
+            .im
+            .post_event(endpoint, cluster, event, priority, now_ms, write_data)
+    }
+
+    /// BasicInformation(0x0028)の StartUp イベント(event 0x00、CRITICAL、
+    /// `{ softwareVersion: u32 }`)を積む(設計 §12)。デバイス起動直後に 1 回呼ぶ。
+    pub fn post_startup_event(
+        &mut self,
+        software_version: u32,
+        now_ms: u64,
+    ) -> crate::error::Result<u64> {
+        use crate::tlv::TlvTag;
+        self.post_event(
+            crate::dm::meta::EndpointId(0),
+            crate::dm::meta::ClusterId(0x0028),
+            crate::dm::meta::EventId(0),
+            crate::im::events::PRIORITY_CRITICAL,
+            now_ms,
+            |w, tag| {
+                w.start_struct(tag)?;
+                w.write_u32(&TlvTag::ContextSpecific(0), software_version)?;
+                w.end_container()
+            },
+        )
+    }
+
+    /// PASE 設定を差し替える(OpenCommissioningWindow の動的 verifier 注入。
+    /// `docs/design/admin-commissioning.md` §4)。
+    pub fn set_pase_config(&mut self, config: crate::sc::PaseConfig) {
+        self.mgr.handler_mut().sc.set_pase_config(config);
+    }
+
+    /// PASE 受理ゲートを切り替える(コミッショニング窓の開閉)。
+    ///
+    /// `false` の間、新規 PBKDFParamRequest には Busy StatusReport が返る。確立済み
+    /// セッションには影響しない。
+    pub fn set_pase_enabled(&mut self, enabled: bool) {
+        self.mgr.handler_mut().sc.set_pase_enabled(enabled);
+    }
+
+    /// 保持している CASE resumption レコード数(ログ・診断用。§7.4)。
+    pub fn resumption_count(&self) -> usize {
+        self.mgr.handler().sc.resumption_count()
+    }
+
+    /// CASE resumption ストアの世代番号(永続化トリガ判定用。secure-channel.md §7.4)。
+    ///
+    /// 統合層はこの値の変化を検知して [`save_resumptions_to`](Self::save_resumptions_to)
+    /// を呼ぶ([`FabricTable::generation`](crate::fabric::FabricTable::generation) と同じ
+    /// 分業: いつ・どこに保存するかはアプリ層、コアは export/import のみ)。
+    pub fn resumption_generation(&self) -> u32 {
+        self.mgr.handler().sc.resumption_generation()
+    }
+
+    /// CASE resumption ストアを `kvs` へ保存する(単一キー `b"rsmp"`。§7.4)。
+    pub fn save_resumptions_to<K: crate::kvs::Kvs>(&self, kvs: &mut K) -> crate::error::Result<()> {
+        self.mgr.handler().sc.save_resumptions_to(kvs)
+    }
+
+    /// CASE resumption ストアを `kvs` から復元し、復元件数を返す(空ストアにのみ呼べる)。
+    ///
+    /// fabric 復元直後に呼ぶこと(復元後の [`resumption_generation`](Self::resumption_generation)
+    /// を保存トリガの基準値に取る)。
+    pub fn load_resumptions_from<K: crate::kvs::Kvs>(
+        &mut self,
+        kvs: &mut K,
+    ) -> crate::error::Result<usize> {
+        self.mgr.handler_mut().sc.load_resumptions_from(kvs)
+    }
+
+    /// 各プールの使用量(診断用。実機で「Sigma1 を黙って捨てる」枯渇状態を
+    /// 見分けるためにログへ出す。2026-08-25 NanoC6 調査)。
+    pub fn pool_usage(&self) -> PoolUsage {
+        PoolUsage {
+            exchanges: self.mgr.len(),
+            exchanges_cap: EXCHANGES,
+            sessions: self.sessions.len(),
+            sessions_cap: SESSIONS,
+            handshakes: self.mgr.handler().sc.handshakes_in_use(),
+            handshakes_cap: HANDSHAKES,
+            tx_bufs: self.tx_pool.in_use(),
+            tx_bufs_cap: TX_BUFS,
+            subscriptions: self.mgr.handler().im.subscription_count(),
+            subscriptions_cap: SUBS,
+            reads: self.mgr.handler().im.active_read_count(),
+            reads_cap: READS,
+        }
+    }
+
+    /// 次に [`poll`](Self::poll) すべき最も早い絶対時刻(ミリ秒)。
+    ///
+    /// MRP 再送/ACK 期限([`ExchangeManager::next_deadline`])と IM 購読レポート期限
+    /// ([`InteractionModel::next_deadline`])を min する。SC ハンドシェイクタイムアウトと
+    /// fail-safe 期限は各 `handle_rx`/`poll` で掃引するため、ここには含めない(乖離、上記)。
+    pub fn next_deadline(&self, now_ms: u64) -> Option<u64> {
+        let a = self.mgr.next_deadline();
+        let b = self.mgr.handler().im.next_deadline(now_ms);
+        match (a, b) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (x, None) => x,
+            (None, y) => y,
+        }
+    }
+
+    /// セッションを明示的に閉じ、IM の購読/継続をそれに紐づけて破棄する。
+    ///
+    /// fabric 削除・CloseSession 受信などで用いる。存在しないセッションは無視する。
+    pub fn close_session(&mut self, session: SessionId) {
+        if self.sessions.close(session).is_none() {
+            return;
+        }
+        // 購読/継続に加えて、そのセッションの exchange と再送バッファも回収する。
+        self.reap_evicted_sessions();
+    }
+
+    /// 時間駆動の内部掃引(SC ハンドシェイクタイムアウト・IM 掃除・fail-safe 期限)。
+    fn drive_ticks(&mut self, now_ms: u64) {
+        // 期限切れハンドシェイクは予約セッションだけでなく **exchange も閉じる**
+        // (再送バッファも回収)。閉じないと相手が途中で消えた半端な CASE/PASE の
+        // responder exchange が残り、コントローラの再起動数回で exchange 枯渇 →
+        // 新規 Sigma1 を黙って捨てる(T5 実機で NanoC6 が「デバイス再起動まで応答しない」)。
+        while let Some(ex) = self
+            .mgr
+            .handler_mut()
+            .sc
+            .expire_one(&mut self.sessions, now_ms)
+        {
+            if let Some(freed) = self.mgr.close(ex) {
+                self.tx_pool.release(freed);
+            }
+        }
+        // 終端 StatusResponse が来ないまま固まった購読レポートを回収する(設計 §16.6 P1)。
+        // MRP ACK だけ届いて StatusResponse が来ない組合せでは `PollAction::Failed` が
+        // 上がらないため、放置すると購読が永久に due せず initiator exchange もリークする。
+        while let Some(ex) = self.mgr.handler_mut().im.expire_stale_reports(now_ms) {
+            if let Some(freed) = self.mgr.close(ex) {
+                self.tx_pool.release(freed);
+            }
+        }
+        self.mgr.handler_mut().im.on_tick(now_ms);
+        let _ = self.mgr.handler_mut().im.data_model_mut().on_tick(now_ms);
+        // fail-safe タイマ経過で fabric を巻き戻していたら(Core Spec §11.10)、その fabric の
+        // ACL エントリと全セッションを掃除する(タイマ経過には残すべき「現在のセッション」が
+        // 無いため keep=None で全て閉じる。ArmFailSafe(0) の invoke 経路は engine 内で処理)。
+        let removed = self
+            .mgr
+            .handler_mut()
+            .im
+            .data_model_mut()
+            .take_removed_fabric();
+        if let Some(idx) = removed {
+            self.mgr
+                .handler_mut()
+                .im
+                .purge_fabric(idx, None, &mut self.sessions);
+        }
+        self.reap_evicted_sessions();
+    }
+
+    /// 受信 datagram を処理し、送るべき応答があれば [`SendDirective`] を返す(sans-IO)。
+    ///
+    /// `datagram` は 1 datagram 全体(先頭が [`PacketHeader`])。`tx_out` は応答ワイヤバイト列を
+    /// 書き出す呼び出し側バッファ([`MAX_PACKET_SIZE`] 以上)。不正入力(復号失敗・未知
+    /// セッション・デコードエラー)は静かにドロップし `None` を返す(panic しない)。
+    pub fn handle_rx(
+        &mut self,
+        datagram: &mut [u8],
+        peer: PeerAddr,
+        now_ms: u64,
+        tx_out: &mut [u8],
+    ) -> Option<SendDirective> {
+        self.drive_ticks(now_ms);
+
+        // groupcast(Session Type = group)はユニキャスト経路(セッションテーブル /
+        // exchange / MRP)に入れず、専用経路で復号 → IM 配送する(応答なし)。
+        // `docs/design/group-messaging.md` §5.1。
+        if is_group_datagram(datagram) {
+            self.handle_group_rx(datagram, now_ms);
+            return None;
+        }
+
+        // 満杯なら、この受信で起こりうる退避(Unsecured セッション確保・ハンドシェイクの
+        // 予約)に備えて退避ヒントを付け直す(transport-exchange.md「マルチ admin 時の
+        // 容量と退避方針」)。
+        self.refresh_evict_hints();
+        self.ensure_unsecured_session(datagram, peer, now_ms);
+        self.make_exchange_room();
+
+        let result = self.mgr.recv(
+            &mut self.sessions,
+            self.crypto,
+            peer,
+            now_ms,
+            datagram,
+            &mut self.resp,
+        );
+        // 退避されたセッションの購読・exchange を掃除する(応答の成否に関わらず)。
+        self.reap_evicted_sessions();
+        let report = match result {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+
+        if let Some(freed) = report.freed_tx {
+            self.tx_pool.release(freed);
+        }
+
+        match report.action {
+            HandlerAction::None => None,
+            // 相手の終端メッセージを受理した(応答なし)。exchange を終端予約し、
+            // 未送 ACK が流れ次第 poll が slot を回収する。
+            HandlerAction::CloseSilent => {
+                if let Some(ex) = report.exchange {
+                    self.mgr.mark_closing(ex);
+                }
+                None
+            }
+            HandlerAction::Respond {
+                opcode,
+                proto_id,
+                reliable,
+                len,
+            } => {
+                let ex = report.exchange?;
+                self.stage_response(ex, proto_id, opcode, reliable, len, now_ms, tx_out)
+            }
+            // Close も Respond と同じく送出するが、会話は終端予約(mark_closing)する。
+            // 信頼送信の最終応答は ACK まで再送責務が残るため即時 close はせず、
+            // MRP 静穏後に ExchangeManager::poll が slot を回収する。
+            HandlerAction::Close {
+                opcode,
+                proto_id,
+                reliable,
+                len,
+            } => {
+                let ex = report.exchange?;
+                let dir = self.stage_response(ex, proto_id, opcode, reliable, len, now_ms, tx_out);
+                self.mgr.mark_closing(ex);
+                dir
+            }
+        }
+    }
+
+    /// 時間駆動の送出を 1 件返す(MRP 再送・standalone ACK・購読レポート)。
+    ///
+    /// [`SendDirective`] が `None`(= やることなし)になるまで繰り返し呼ぶ。`tx_out` は
+    /// [`MAX_PACKET_SIZE`] 以上。
+    pub fn poll(&mut self, now_ms: u64, tx_out: &mut [u8]) -> Option<SendDirective> {
+        self.drive_ticks(now_ms);
+
+        loop {
+            match self.mgr.poll(now_ms, now_ms as u8) {
+                PollAction::Retransmit { buf, len, addr, .. } => {
+                    let src = self.tx_pool.get(buf).ok()?;
+                    if len > tx_out.len() || len > src.len() {
+                        return None;
+                    }
+                    tx_out[..len].copy_from_slice(&src[..len]);
+                    return Some(SendDirective { addr, len });
+                }
+                PollAction::SendAck { exchange, ack_ctr } => {
+                    if let Some(d) = self.stage_standalone_ack(exchange, ack_ctr, now_ms, tx_out) {
+                        return Some(d);
+                    }
+                    // ACK 構築に失敗した場合は次の poll 対象へ進む。
+                }
+                PollAction::SendOrphanAck {
+                    session,
+                    exch_id,
+                    peer_is_initiator,
+                    ack_ctr,
+                } => {
+                    if let Some(d) = self.stage_orphan_ack(
+                        session,
+                        exch_id,
+                        !peer_is_initiator,
+                        ack_ctr,
+                        now_ms,
+                        tx_out,
+                    ) {
+                        return Some(d);
+                    }
+                    // 構築に失敗したら握り潰して次の poll 対象へ進む(会話は既に無い)。
+                }
+                PollAction::Failed {
+                    exchange, freed_tx, ..
+                } => {
+                    self.tx_pool.release(freed_tx);
+                    // 会話は除去済み。device 発の購読レポートだった場合は購読を破棄する
+                    // (設計 §6.3 liveness。ack しないピアへ max interval ごとにレポートを
+                    // 送り続けて exchange/tx バッファを浪費しないため)。
+                    self.mgr
+                        .handler_mut()
+                        .im
+                        .on_report_exchange_failed(exchange);
+                }
+                PollAction::Idle { .. } => break,
+            }
+        }
+
+        if let Some(d) = self.stage_subscription_report(now_ms, tx_out) {
+            return Some(d);
+        }
+        self.stage_deferred_invoke_response(now_ms, tx_out)
+    }
+
+    /// セッションテーブルが満杯のとき、各セッションの退避ヒントを付け直す。
+    ///
+    /// - 購読または生存 exchange を持つ → [`EvictHint::Protected`]
+    /// - 生存 exchange の無い Unsecured セッション(ハンドシェイク済みの残骸)→
+    ///   [`EvictHint::Disposable`]
+    /// - それ以外 → [`EvictHint::Normal`]
+    ///
+    /// 退避は受信処理(`handle_rx`)の中でしか起きないため、満杯時にその直前で 1 回
+    /// 計算すれば足りる(O(SESSIONS × (SUBS + EXCHANGES))、定常の非満杯時はゼロコスト)。
+    fn refresh_evict_hints(&mut self) {
+        if !self.sessions.is_full() {
+            return;
+        }
+        let mgr = &self.mgr;
+        self.sessions.set_hints(|s| {
+            let id = s.id();
+            if mgr.has_live_exchanges(id) || mgr.handler().im.has_subscription(id) {
+                EvictHint::Protected
+            } else if !s.is_encrypted() {
+                EvictHint::Disposable
+            } else {
+                EvictHint::Normal
+            }
+        });
+    }
+
+    /// 再送バッファが尽きていたら、ACK の来ない会話を 1 つあきらめて 1 枠空ける。
+    ///
+    /// 以前は空きが無いと応答を黙って捨てていた。ACK を返さずに終わるコントローラ
+    /// (失敗した smctl など)の応答が再送上限(約 95 秒)までバッファを持ち続け、その間
+    /// 次の要求に応答できなかった(2026-11-04 tab5-os の実機)。あきらめるのは `ex` 以外。
+    /// 応答は再送前でも対象、こちらから送った購読レポートは 1 度以上再送したものに限る
+    /// ([`ExchangeManager::give_up_stalest_retrans`])。扱いは再送上限に達したときと同じ
+    /// (購読レポートならその購読を破棄する)。
+    fn make_tx_room(&mut self, ex: ExchangeId) {
+        if self.tx_pool.in_use() < TX_BUFS {
+            return;
+        }
+        self.give_up_stalest_retrans(Some(ex));
+    }
+
+    /// 会話 slot が満杯なら、ACK の来ない会話を 1 つあきらめて 1 枠空ける(受信の直前に呼ぶ)。
+    ///
+    /// 満杯のままだと、新しい要求(Sigma1 や InvokeRequest)の会話を作れずに黙って捨てる。
+    /// 条件と扱いは [`make_tx_room`](Self::make_tx_room) と同じ。
+    fn make_exchange_room(&mut self) {
+        if !self.mgr.is_full() {
+            return;
+        }
+        self.give_up_stalest_retrans(None);
+    }
+
+    fn give_up_stalest_retrans(&mut self, keep: Option<ExchangeId>) {
+        if let Some((victim, buf)) = self.mgr.give_up_stalest_retrans(keep) {
+            self.tx_pool.release(buf);
+            self.mgr.handler_mut().im.on_report_exchange_failed(victim);
+            self.retrans_given_up = self.retrans_given_up.saturating_add(1);
+        }
+    }
+
+    /// 再送バッファを空けるために ACK の来ない会話をあきらめた回数(診断用)。
+    pub const fn retrans_given_up(&self) -> u32 {
+        self.retrans_given_up
+    }
+
+    /// 満杯退避・close で消えたセッションに紐づく購読・継続と exchange(再送バッファ)を回収する。
+    fn reap_evicted_sessions(&mut self) {
+        while let Some(id) = self.sessions.take_evicted() {
+            self.mgr.handler_mut().im.on_session_closed(id);
+            while let Some(freed) = self.mgr.close_one_for_session(id) {
+                if let Some(buf) = freed {
+                    self.tx_pool.release(buf);
+                }
+            }
+        }
+    }
+
+    /// 未確立の unsecured セッションが必要なら(平文パケット・未登録の peer)先に確保する。
+    ///
+    /// PASE / CASE の第 1 メッセージは session_id=0 の平文で届く。responder はそれを受けるための
+    /// unsecured セッションを 1 本持つ必要がある。既存があれば何もしない。
+    fn ensure_unsecured_session(&mut self, datagram: &[u8], peer: PeerAddr, now_ms: u64) {
+        // 平文ヘッダのみを覗く(復号しない)。`ParseBuf::new` は read-only 参照でよい。
+        let mut scratch = [0u8; PacketHeader::MAX_LEN];
+        let n = datagram.len().min(scratch.len());
+        scratch[..n].copy_from_slice(&datagram[..n]);
+        let mut pb = ParseBuf::new(&mut scratch[..n]);
+        let hdr = match PacketHeader::decode(&mut pb) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        if hdr.is_encrypted() {
+            return;
+        }
+        if let Some(session) = self.sessions.find_for_rx(peer, &hdr, now_ms) {
+            // 既存の平文セッションでもピア Node ID が未確定なら、受信ヘッダの
+            // source Node ID で確定させる(以降の応答の宛先 echo に使う)。
+            session.set_peer_node_id_if_unset(hdr.src_node_id);
+            // いま受信中のセッションは、この後のハンドシェイク予約で退避させない。
+            let id = session.id();
+            self.sessions.set_hint(id, EvictHint::Protected);
+            return;
+        }
+        // 送信カウンタは乱数で始める。固定値だと、再起動した後の応答
+        // (PBKDFParamResponse / Sigma2)が相手の古い受信窓に重複として捨てられる。
+        let tx_ctr_start = self.mgr.handler_mut().sc.initial_tx_ctr();
+        let mut init = SessionInit::plaintext(peer, 0, tx_ctr_start);
+        // イニシエータのエフェメラル source Node ID を記録し、応答時に宛先 Node ID
+        // として echo する(chip 側の非セキュアパケット検証が source/destination の
+        // いずれかを必須とするため)。
+        init.peer_node_id = hdr.src_node_id;
+        if let Ok(id) = self.sessions.insert(init, now_ms) {
+            self.sessions.set_hint(id, EvictHint::Protected);
+        }
+    }
+
+    /// groupcast datagram を復号して IM(invoke)へ配送する(応答なし。
+    /// `docs/design/group-messaging.md` §5.1)。
+    ///
+    /// 不正・未対応(P/C フラグ、鍵候補なし、MIC 不一致、リプレイ、IM InvokeRequest
+    /// 以外)は全て黙って drop する。
+    fn handle_group_rx(&mut self, datagram: &[u8], now_ms: u64) {
+        let Some(keys) = self.group_keys else {
+            return;
+        };
+        if datagram.len() > MAX_RX_PACKET_SIZE {
+            return;
+        }
+
+        // 1. ヘッダ検証(復号なしで覗く)。
+        let mut scratch = [0u8; PacketHeader::MAX_LEN];
+        let n = datagram.len().min(scratch.len());
+        scratch[..n].copy_from_slice(&datagram[..n]);
+        let mut pb = ParseBuf::new(&mut scratch[..n]);
+        let Ok(hdr) = PacketHeader::decode(&mut pb) else {
+            return;
+        };
+        // P(privacy)/ C(control)は非対応(設計 §9 の割り切り)。S フラグと
+        // group 宛先は必須(仕様 §4.6.2)。
+        if hdr.sec_flags.is_privacy() || hdr.sec_flags.is_control() {
+            return;
+        }
+        let Some(src_node_id) = hdr.src_node_id else {
+            return;
+        };
+        let DstNodeId::Group(gid) = hdr.dst else {
+            return;
+        };
+
+        // 2. 試行復号: GKH(= ワイヤ session id)と宛先 group id に紐づく鍵候補を
+        //    順に試す。復号は in-place のため、試行ごとに datagram をコピーし直す。
+        let mut idx = 0usize;
+        let (fabric, payload_hdr, payload_off, payload_len, work) = loop {
+            let Some((fabric, key)) = keys.key_candidate(hdr.session_id, gid, idx) else {
+                return; // 候補が尽きた(鍵不一致 or 未設定)。
+            };
+            idx += 1;
+
+            let mut work = [0u8; MAX_RX_PACKET_SIZE];
+            work[..datagram.len()].copy_from_slice(datagram);
+            let mut buf = ParseBuf::new(&mut work[..datagram.len()]);
+            let Ok(pkt) = PacketHeader::decode(&mut buf) else {
+                return;
+            };
+            match SecureCodec::decrypt(self.crypto, Some(&key), &pkt, src_node_id, &mut buf) {
+                Ok(phdr) => {
+                    // 平文 payload は復号済み work の「MIC を除いた末尾」に位置する。
+                    let payload_len = buf.as_slice().len();
+                    let payload_off = datagram.len() - AES_CCM_TAG_LEN - payload_len;
+                    break (fabric, phdr, payload_off, payload_len, work);
+                }
+                Err(_) => continue, // MIC 不一致 → 次の候補。
+            }
+        };
+
+        // 3. 送信元別カウンタ(trust-first)。未知ピアは受信値で窓を初期化して受理する。
+        if !self.accept_group_ctr(fabric, src_node_id, hdr.ctr, now_ms) {
+            return;
+        }
+
+        // 4. PayloadHeader 検証: IM InvokeRequest のみ受理。R フラグ(ACK 要求)付き
+        //    groupcast は仕様違反 → drop(chip 同様)。
+        if payload_hdr.proto_id != PROTO_ID_INTERACTION_MODEL
+            || payload_hdr.proto_opcode != ImOpCode::InvokeRequest as u8
+            || payload_hdr.is_reliable()
+        {
+            return;
+        }
+
+        // 5. IM へ配送(応答なし)。
+        let payload = &work[payload_off..payload_off + payload_len];
+        self.mgr
+            .handler_mut()
+            .im
+            .invoke_group(payload, gid, fabric, now_ms);
+    }
+
+    /// groupcast 送信元 `(fabric, node)` のカウンタを trust-first 方針で検査する。
+    ///
+    /// 未知ピアは受信カウンタで窓を初期化して受理(trust-first)。既知ピアは
+    /// [`PeerWindow::accept`]。テーブル満杯時は LRU を上書きする。
+    fn accept_group_ctr(&mut self, fabric: NonZeroU8, node_id: u64, ctr: u32, now_ms: u64) -> bool {
+        let existing = self
+            .group_peers
+            .iter()
+            .position(|p| p.fabric_idx == fabric && p.node_id == node_id);
+        if let Some(i) = existing {
+            let p = &mut self.group_peers[i];
+            p.last_use = now_ms;
+            return p.window.accept(ctr, true);
+        }
+        let peer = GroupPeer {
+            fabric_idx: fabric,
+            node_id,
+            window: PeerWindow::new(ctr),
+            last_use: now_ms,
+        };
+        if self.group_peers.is_full() {
+            // LRU を上書き。
+            let mut lru = 0usize;
+            let mut oldest = u64::MAX;
+            for (i, p) in self.group_peers.iter().enumerate() {
+                if p.last_use < oldest {
+                    oldest = p.last_use;
+                    lru = i;
+                }
+            }
+            self.group_peers[lru] = peer;
+        } else {
+            let _ = self.group_peers.push(peer);
+        }
+        true
+    }
+
+    /// ハンドラが `self.resp` に書いた応答 payload をワイヤ化して `tx_out` に置く。
+    #[allow(clippy::too_many_arguments)]
+    fn stage_response(
+        &mut self,
+        ex: ExchangeId,
+        proto_id: u16,
+        opcode: u8,
+        reliable: bool,
+        len: usize,
+        now_ms: u64,
+        tx_out: &mut [u8],
+    ) -> Option<SendDirective> {
+        if len > self.resp.len() {
+            return None;
+        }
+        // BTP セッションでは reliable → unreliable へ格下げ(R フラグなし・再送スロット
+        // 非登録)。信頼性は下位の BTP が担う(`docs/design/ble-btp.md` §3.3)。
+        let reliable = reliable
+            && self
+                .sessions
+                .get(ex.session())
+                .map(|s| s.allows_mrp())
+                .unwrap_or(true);
+        if reliable {
+            self.make_tx_room(ex);
+        }
+        let msg = Outgoing {
+            proto_id,
+            opcode,
+            payload: &self.resp[..len],
+        };
+        if reliable {
+            let sent = self
+                .mgr
+                .send_reliable(
+                    &mut self.sessions,
+                    self.crypto,
+                    &mut self.tx_pool,
+                    ex,
+                    &msg,
+                    SendTiming {
+                        now_ms,
+                        jitter_rand: now_ms as u8,
+                    },
+                )
+                .ok()?;
+            let src = self.tx_pool.get(sent.buf).ok()?;
+            if sent.len > tx_out.len() || sent.len > src.len() {
+                return None;
+            }
+            tx_out[..sent.len].copy_from_slice(&src[..sent.len]);
+            Some(SendDirective {
+                addr: sent.addr,
+                len: sent.len,
+            })
+        } else {
+            let headroom = PacketHeader::MAX_LEN + PayloadHeader::MAX_LEN;
+            let (addr, start, end) = {
+                let mut wb = WriteBuf::new(tx_out, headroom).ok()?;
+                let addr = self
+                    .mgr
+                    .send_unreliable(&mut self.sessions, self.crypto, ex, &msg, &mut wb, now_ms)
+                    .ok()?;
+                (addr, wb.start(), wb.end())
+            };
+            tx_out.copy_within(start..end, 0);
+            Some(SendDirective {
+                addr,
+                len: end - start,
+            })
+        }
+    }
+
+    /// standalone ACK(SC opcode 0x10)を組み立てて `tx_out` に置く。
+    fn stage_standalone_ack(
+        &mut self,
+        ex: ExchangeId,
+        ack_ctr: u32,
+        now_ms: u64,
+        tx_out: &mut [u8],
+    ) -> Option<SendDirective> {
+        let headroom = PacketHeader::MAX_LEN + PayloadHeader::MAX_LEN;
+        let (addr, start, end) = {
+            let mut wb = WriteBuf::new(tx_out, headroom).ok()?;
+            let addr = self
+                .mgr
+                .build_standalone_ack(
+                    &mut self.sessions,
+                    self.crypto,
+                    ex,
+                    ack_ctr,
+                    &mut wb,
+                    now_ms,
+                )
+                .ok()?;
+            (addr, wb.start(), wb.end())
+        };
+        tx_out.copy_within(start..end, 0);
+        Some(SendDirective {
+            addr,
+            len: end - start,
+        })
+    }
+
+    /// 会話を持たない重複への standalone ACK を組み立てて `tx_out` に置く(設計 §6.1)。
+    fn stage_orphan_ack(
+        &mut self,
+        session: SessionId,
+        exch_id: u16,
+        i_flag: bool,
+        ack_ctr: u32,
+        now_ms: u64,
+        tx_out: &mut [u8],
+    ) -> Option<SendDirective> {
+        let headroom = PacketHeader::MAX_LEN + PayloadHeader::MAX_LEN;
+        let (addr, start, end) = {
+            let mut wb = WriteBuf::new(tx_out, headroom).ok()?;
+            let addr = self
+                .mgr
+                .build_standalone_ack_raw(
+                    &mut self.sessions,
+                    self.crypto,
+                    session,
+                    exch_id,
+                    i_flag,
+                    ack_ctr,
+                    &mut wb,
+                    now_ms,
+                )
+                .ok()?;
+            (addr, wb.start(), wb.end())
+        };
+        tx_out.copy_within(start..end, 0);
+        Some(SendDirective {
+            addr,
+            len: end - start,
+        })
+    }
+
+    /// 期限到達 or dirty の購読を 1 件レポートする(device 発、設計 §6.3)。
+    fn stage_subscription_report(
+        &mut self,
+        now_ms: u64,
+        tx_out: &mut [u8],
+    ) -> Option<SendDirective> {
+        let due = self.mgr.handler_mut().im.poll_subscriptions(now_ms)?;
+        let ex = self.mgr.open_initiator(due.session).ok()?;
+        let len = match self.mgr.handler_mut().im.build_report(
+            due.subscription,
+            ex,
+            &mut self.resp,
+            now_ms,
+        ) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = self.mgr.close(ex);
+                return None;
+            }
+        };
+        self.make_tx_room(ex);
+        let msg = Outgoing {
+            proto_id: PROTO_ID_INTERACTION_MODEL,
+            opcode: ImOpCode::ReportData.to_u8(),
+            payload: &self.resp[..len],
+        };
+        let sent = match self.mgr.send_reliable(
+            &mut self.sessions,
+            self.crypto,
+            &mut self.tx_pool,
+            ex,
+            &msg,
+            SendTiming {
+                now_ms,
+                jitter_rand: now_ms as u8,
+            },
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = self.mgr.close(ex);
+                // セッション消滅(LRU 退避等)でパケットを組めない購読は破棄する(設計 §6.3。
+                // 残すと毎 poll due になり続け、他の購読のレポートも詰まる)。NoSpace
+                // (一時的な tx バッファ枯渇)は次の poll で再試行するため残す。
+                if matches!(e, crate::error::Error::NotFound) {
+                    self.mgr.handler_mut().im.on_report_failed(due.subscription);
+                } else {
+                    // 一時的エラー(tx バッファ枯渇等): in-flight 記録を解除して
+                    // 次の poll で再レポートさせる(設計 §6.3)。
+                    self.mgr
+                        .handler_mut()
+                        .im
+                        .on_report_send_failed(due.subscription);
+                }
+                return None;
+            }
+        };
+        let src = self.tx_pool.get(sent.buf).ok()?;
+        if sent.len > tx_out.len() || sent.len > src.len() {
+            return None;
+        }
+        tx_out[..sent.len].copy_from_slice(&src[..sent.len]);
+        Some(SendDirective {
+            addr: sent.addr,
+            len: sent.len,
+        })
+    }
+
+    /// 保留中の遅延 InvokeResponse を **元の responder exchange** に送出する(設計 §E7.2)。
+    ///
+    /// cluster が完了(または締切超過)していれば InvokeResponse を組み立てて `send_reliable`
+    /// し、`mark_closing` で終端予約する。まだ完了していなければ何もしない(次 poll で再試行)。
+    /// exchange が消えていればスロットを破棄する。再送保留中(`send_reliable` の InvalidState)は
+    /// ドロップせず後続の poll で再試行する。
+    fn stage_deferred_invoke_response(
+        &mut self,
+        now_ms: u64,
+        tx_out: &mut [u8],
+    ) -> Option<SendDirective> {
+        let ex = self.mgr.handler().im.poll_deferred_invoke(now_ms)?;
+        // 送出先 exchange が消えていたらスロット破棄(セッション/会話が先に死んだ)。
+        if !self.mgr.contains(ex) {
+            self.mgr.handler_mut().im.drop_deferred();
+            return None;
+        }
+        // 元応答の再送が保留中なら send_reliable は InvalidState。次 poll まで待つ
+        //(応答はまだ組み立てない=スロット保持)。
+        if self.mgr.is_retrans_pending(ex) {
+            return None;
+        }
+        // 応答を組み立てる(スロットはここでは消さない。送信成功後に drop する)。
+        let len = match self.mgr.handler_mut().im.build_deferred_invoke_response(
+            ex,
+            &mut self.resp,
+            now_ms,
+        ) {
+            Ok(Some(n)) => n,
+            // まだ完了していない(Pending かつ締切内)。
+            Ok(None) => return None,
+            // スロット不整合等。破棄して stall を避ける。
+            Err(_) => {
+                self.mgr.handler_mut().im.drop_deferred();
+                return None;
+            }
+        };
+        // 送出は即時応答と同じ `stage_response` に委譲する(BTP セッションでの
+        // reliable→unreliable 格下げを含む。BTP に MRP 再送スロットを登録すると
+        // ACK が来ず再送が閉じた BLE リンクへ飛ぶ)。失敗時はスロットを保持して
+        // 次 poll で再試行する。
+        let d = self.stage_response(
+            ex,
+            PROTO_ID_INTERACTION_MODEL,
+            ImOpCode::InvokeResponse.to_u8(),
+            true,
+            len,
+            now_ms,
+            tx_out,
+        )?;
+        // 送信成功。スロットを消し、exchange を終端予約する(ACK 静穏後に回収)。
+        self.mgr.handler_mut().im.drop_deferred();
+        self.mgr.mark_closing(ex);
+        Some(d)
+    }
+}
+
+// ==========================================================================
+// CASE 用の共有 fabric ビュー(FabricStore + NocResolver)
+// ==========================================================================
+
+/// CASE responder(SC の型引数 `F`)が参照する **共有 fabric ビュー**。
+///
+/// OpCreds クラスタと同一の外部所有 `RefCell<FabricTable>` を参照し、AddNOC で追加された fabric を
+/// Sigma2/Sigma3 で読む(モジュールドキュメント参照)。[`FabricStore`] / [`NocResolver`] を
+/// [`RefCell`] 越しに実装する(定常パスでヒープ確保しない)。
+pub struct SharedFabricCreds<'s, C: Crypto, const N: usize> {
+    fabrics: &'s RefCell<FabricTable<C, N>>,
+    crypto: &'s C,
+    now_secs: u32,
+}
+
+impl<'s, C: Crypto, const N: usize> SharedFabricCreds<'s, C, N> {
+    /// 共有 fabric テーブル・crypto・検証時刻(エポック秒)からビューを作る。
+    ///
+    /// `now_secs` は相手 NOC の有効期間検証に用いる([`NocResolver`])。
+    pub fn new(fabrics: &'s RefCell<FabricTable<C, N>>, crypto: &'s C, now_secs: u32) -> Self {
+        Self {
+            fabrics,
+            crypto,
+            now_secs,
+        }
+    }
+}
+
+/// [`SharedFabricCreds`] が返す 1 fabric のビュー(`RefCell` の借用ガードを保持)。
+pub struct SharedFabric<'a, C: Crypto, const N: usize> {
+    guard: Ref<'a, FabricTable<C, N>>,
+    index: NonZeroU8,
+}
+
+impl<C: Crypto, const N: usize> SharedFabric<'_, C, N> {
+    fn entry(&self) -> &FabricEntry<C> {
+        // 構築時に有効な index のみを渡し、CASE の同期処理中はテーブルを変更しないため必ず存在する。
+        self.guard
+            .get(self.index)
+            .expect("fabric index valid for lifetime of view")
+    }
+}
+
+impl<C: Crypto, const N: usize> Fabric for SharedFabric<'_, C, N> {
+    fn fabric_index(&self) -> NonZeroU8 {
+        self.index
+    }
+    fn fabric_id(&self) -> u64 {
+        self.entry().fabric_id()
+    }
+    fn node_id(&self) -> u64 {
+        self.entry().node_id()
+    }
+    fn ipk(&self) -> &[u8; 16] {
+        self.entry().ipk()
+    }
+    fn root_public_key(&self) -> &[u8; 65] {
+        self.entry().root_public_key()
+    }
+    fn noc(&self) -> &[u8] {
+        self.entry().noc()
+    }
+    fn icac(&self) -> Option<&[u8]> {
+        self.entry().icac()
+    }
+    fn sign(&self, msg: &[u8], out: &mut [u8; 64]) -> crate::error::Result<()> {
+        self.entry().sign(msg, out)
+    }
+}
+
+/// [`SharedFabricCreds::iter`] のイテレータ(index を先に集め、要素ごとに借用しなおす)。
+pub struct SharedFabricIter<'a, C: Crypto, const N: usize> {
+    cell: &'a RefCell<FabricTable<C, N>>,
+    idxs: [Option<NonZeroU8>; N],
+    count: usize,
+    pos: usize,
+}
+
+impl<'a, C: Crypto, const N: usize> Iterator for SharedFabricIter<'a, C, N> {
+    type Item = SharedFabric<'a, C, N>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.count {
+            return None;
+        }
+        let idx = self.idxs[self.pos]?;
+        self.pos += 1;
+        Some(SharedFabric {
+            guard: self.cell.borrow(),
+            index: idx,
+        })
+    }
+}
+
+impl<'s, C: Crypto, const N: usize> FabricStore for SharedFabricCreds<'s, C, N> {
+    type Fabric<'a>
+        = SharedFabric<'a, C, N>
+    where
+        Self: 'a;
+
+    fn iter(&self) -> impl Iterator<Item = SharedFabric<'_, C, N>> {
+        let mut idxs = [None; N];
+        let mut count = 0;
+        {
+            let g = self.fabrics.borrow();
+            for e in g.iter() {
+                if count < N {
+                    idxs[count] = Some(e.fabric_index());
+                    count += 1;
+                }
+            }
+        }
+        SharedFabricIter {
+            cell: self.fabrics,
+            idxs,
+            count,
+            pos: 0,
+        }
+    }
+
+    fn get(&self, idx: NonZeroU8) -> Option<SharedFabric<'_, C, N>> {
+        if self.fabrics.borrow().get(idx).is_some() {
+            Some(SharedFabric {
+                guard: self.fabrics.borrow(),
+                index: idx,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl<'s, C: Crypto, const N: usize> NocResolver for SharedFabricCreds<'s, C, N> {
+    fn verify_peer_noc(
+        &self,
+        fabric_index: NonZeroU8,
+        noc_tlv: &[u8],
+        icac_tlv: Option<&[u8]>,
+    ) -> crate::error::Result<PeerIdentity> {
+        let guard = self.fabrics.borrow();
+        let creds = FabricCredentials::new(&guard, self.crypto, self.now_secs);
+        creds.verify_peer_noc(fabric_index, noc_tlv, icac_tlv)
+    }
+}
+
+/// 標準プロファイル(数コントローラ + 並行 exchange)。設計 §8.1 の `DefaultStack`。
+///
+/// サイジング: fabric=5 / session=4 / exchange=4 / TX バッファ=3 / handshake=1 /
+/// read=2 / subscribe=3 / paths=16。
+///
+/// paths は chip-tool のコミッショニング時 ReadCommissioningInfo が 1 リクエストで
+/// 10 本前後の属性パスを送るため、余裕を持って 16 とする。
+pub type DefaultStack<'s, C, R, D> = MatterStack<'s, C, R, D, 5, 4, 4, 3, 1, 2, 3, 16>;
+
+/// マルチ admin デバイス向けプロファイル(複数エコシステムの常時接続コントローラを同時に
+/// 収容する)。`docs/design/transport-exchange.md`「マルチ admin 時の容量と退避方針」。
+///
+/// サイジング: fabric=5 / session=10 / exchange=6 / TX バッファ=3 / handshake=3 /
+/// read=3 / subscribe=6 / paths=16。[`DefaultStack`] との RAM 差は同節の実測表を参照。
+pub type MultiAdminStack<'s, C, R, D> = MatterStack<'s, C, R, D, 5, 10, 6, 3, 3, 3, 6, 16>;
+
+/// 極小プロファイル(単一コントローラ・RAM 最小)。設計 §8.1 の `MinimalStack`。
+///
+/// paths=12 は chip-tool でのコミッショニングが通る下限に余裕を足した値。
+pub type MinimalStack<'s, C, R, D> = MatterStack<'s, C, R, D, 2, 3, 3, 2, 1, 1, 2, 12>;
+
+#[cfg(all(test, feature = "rustcrypto"))]
+mod tests;

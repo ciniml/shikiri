@@ -478,6 +478,13 @@
   - 原因: 購読 ID は機器ごとの採番で、Light と Door がどちらも 15（次も 16）を返した。controller は、レポートと購読切れのノードを ID だけで引いていた。そのため Door のレポートが Light に付いて捨てられ、片方が切れるともう片方の watch も張り直しになった。
   - 直し: 購読は（セッション、ID）で引く。購読切れは（ノード、ID）で `watch` に渡す。`matter.subscription_lost` に node を足した。
   - 実機: Light と Door が同じ ID 16 のまま、HA の自動化での続けての変化が両方届いた。
+- **市販デバイス（Lapis、VID 5002）を BLE で入れた**:
+  - `pairble NODE CODE`: 11 桁（または 10 桁）のコードの 4 ビットの discriminator で BLE を探し、最初に見つかった機器を入れる。mtreq の OP 34 + 256 × NODE。
+  - `netcred` がなければ、Tab5 自身の網（設定の `wifi.ssid` と `wifi.psk`、doc/50）を渡す。パスフレーズは客の要求を通らない（mtreq は要求をログに出す）。matter に `svc:cfg/r:wifi.` と `svc:cfg/secret:wifi.` を足した。
+  - 最初は Echo Show が MSS で先に入れていた（192.168.2.x、`CM=0`）。Echo Show を止め、Lapis を起動し直してから試した。
+  - attestation で `CdVidPidMismatch`。CD に `dac_origin_vendor_id`/`dac_origin_product_id`（タグ 9、10）があると、DAC はそれと、CD の `vendor_id`/`product_id_array` は Basic Information と照合する（Core §6.2.3.1）。simple-matter 1544fae はタグ 9、10 を見ず、DAC をいつも CD の `vendor_id` と照合していた。third_party/simple-matter-1544fae に写して直し、`[patch]` で差し替えた（本体の直しは simple-matter に頼む）。
+  - 失敗の理由を `matter.pair_failed`（`CommissionError` の名前）に出す。失敗したコミッショニングのトランザクションとハンドシェイクを解く（`abort_op`、`abort_handshake`）。attestation で失敗した後、すべての購読が `why=start` で始められなくなっていた。
+  - 実機: 直した後、node 4 として 31 秒で入った（PASE、attestation、Wi-Fi の設定、CASE）。ほかの購読は切れなかった。
 - **残り**:
   - Tab5 から AirQ の fdde のアドレスへの IPv6（PASE、CASE）に返事がない（原因は不明）。PC からの ping は届く。AirQ の IPv4 が変わると、つなぎ直せないかもしれない。
   - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89。上のとおり、今は 1 本にまとめている）。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。

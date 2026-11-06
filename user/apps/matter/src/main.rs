@@ -47,7 +47,7 @@ use simple_matter::discovery::onboarding;
 use simple_matter::transport::net::PeerAddr;
 use t5_rt::net::{iface, link};
 use t5_rt::log::FmtBuf;
-use t5_rt::{Channel, Error, FsError, Handle, Listener, Net, chan, event, matter, sleep_ms, time_ns, wait};
+use t5_rt::{Channel, Config, Error, FsError, Handle, Listener, Net, chan, event, matter, sleep_ms, time_ns, wait};
 
 t5_rt::entry!(main);
 
@@ -351,12 +351,18 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, wat
             }
             return false;
         }
-        "pairble" => match (num(w.next()), num(w.next()), num(w.next())) {
-            (Some(node), Some(passcode), Some(d)) if !ctrl.busy() => {
-                ble.central_start(d as u16, now).and_then(|_| ctrl.pair_ble(node, passcode as u32, now))
+        // `pairble NODE CODE`: a manual pairing code (its 4 bits of the
+        // discriminator; the first device advertising them).
+        "pairble" => match (num(w.next()), w.next(), num(w.next())) {
+            _ if ctrl.busy() => Err("busy"),
+            (Some(node), Some(code), None) if code.len() > 8 => match manual_code(code) {
+                Some((passcode, short)) => own_network(ctrl).and_then(|_| ble.central_start(short as u16, true, now)).and_then(|_| ctrl.pair_ble(node, passcode, now)),
+                None => Err("not a valid 11-digit pairing code"),
+            },
+            (Some(node), Some(passcode), Some(d)) if let Some(passcode) = num(Some(passcode)) => {
+                ble.central_start(d as u16, false, now).and_then(|_| ctrl.pair_ble(node, passcode as u32, now))
             }
-            (Some(_), Some(_), Some(_)) => Err("busy"),
-            _ => Err("pairble NODE PASSCODE DISCRIMINATOR"),
+            _ => Err("pairble NODE PASSCODE DISCRIMINATOR | pairble NODE CODE"),
         },
         // Attributes kept subscribed, and their last values (a panel's).
         "watch" | "unwatch" => {
@@ -480,7 +486,7 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, wat
             Some(node) => ctrl.start(node, Op::Revoke, now),
             None => Err("revoke NODE"),
         },
-        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | paircode NODE CODE | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]] | watch NODE EP CLUSTER ATTR | unwatch NODE EP CLUSTER ATTR | values | relocate NODE | ocw NODE [SECONDS] | revoke NODE | eps | epdel N | endpoint KIND [LABEL]"),
+        _ => Err("status | nodes | pair NODE PASSCODE DISCRIMINATOR | paircode NODE CODE | pairaddr NODE PASSCODE IP PORT | pairble NODE PASSCODE DISCRIMINATOR | pairble NODE CODE | netcred [SSID PASSPHRASE] | forget NODE | on|off|toggle NODE | read NODE EP CLUSTER ATTR | invoke NODE EP CLUSTER CMD [ARG...] | write NODE EP CLUSTER ATTR VALUE | sub NODE EP CLUSTER ATTR [MIN_S [MAX_S]] | subev NODE EP CLUSTER EVENT [MIN_S [MAX_S]] | watch NODE EP CLUSTER ATTR | unwatch NODE EP CLUSTER ATTR | values | relocate NODE | ocw NODE [SECONDS] | revoke NODE | eps | epdel N | endpoint KIND [LABEL]"),
     };
     match started {
         Ok(()) => true,
@@ -499,6 +505,22 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, wat
 /// 11-digit manual pairing code (Core spec §5.1.4.1), or `None` if it is
 /// not one or its check digit is wrong. 10 digits are taken as the code
 /// without its check digit (`mtreq` can pass only numbers that fit 32 bits).
+/// Without `netcred`, a device commissioned over BLE is given the
+/// Tab5's own network (the settings' `wifi.ssid` and `wifi.psk`, doc/50):
+/// the passphrase need not go through a client's request (`mtreq` logs it).
+fn own_network(ctrl: &mut Controller) -> Result<(), &'static str> {
+    if ctrl.has_wifi() {
+        return Ok(());
+    }
+    let c = Config::connect_within(1000).map_err(|_| "no settings service (netcred SSID PASSPHRASE)")?;
+    let (mut ssid, mut psk) = ([0u8; 32], [0u8; 64]);
+    let s = c.get("wifi.ssid", &mut ssid).ok().flatten().filter(|v| v.len > 0).ok_or("no network in the settings (netcred SSID PASSPHRASE)")?;
+    let p = c.get("wifi.psk", &mut psk).ok().flatten().map_or(0, |v| v.len);
+    ctrl.set_wifi(Some((&ssid[..s.len], &psk[..p])))?;
+    event!(Info, "matter.netcred", source = "settings");
+    Ok(())
+}
+
 fn manual_code(s: &str) -> Option<(u32, u8)> {
     let mut d = [0u8; 11];
     let mut n = 0;

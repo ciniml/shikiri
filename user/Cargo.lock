@@ -929,7 +929,6 @@ dependencies = [
 [[package]]
 name = "simple-matter"
 version = "0.1.0"
-source = "git+https://github.com/ciniml/simple_matter.git?rev=1544fae#1544fae23fe2abd2d62074d6f7a8a9727af7590b"
 dependencies = [
  "aes",
  "ccm",

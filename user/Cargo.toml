@@ -15,3 +15,7 @@ panic = "abort"
 # stays in the past after the last router solicitation.
 [patch.crates-io]
 smoltcp = { path = "../third_party/smoltcp-0.14.0" }
+
+# The CD's dac_origin (doc/49 §25; third_party/README).
+[patch."https://github.com/ciniml/simple_matter.git"]
+simple-matter = { path = "../third_party/simple-matter-1544fae" }

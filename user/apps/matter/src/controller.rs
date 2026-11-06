@@ -538,6 +538,10 @@ impl Controller {
         Ok(())
     }
 
+    pub fn has_wifi(&self) -> bool {
+        self.wifi.is_some()
+    }
+
     /// Commissions the device that `blelink` finds over BLE (its
     /// `central_start`, by the caller) as node `node`.
     pub fn pair_ble(&mut self, node: u64, passcode: u32, now: u64) -> Result<(), &'static str> {
@@ -581,8 +585,18 @@ impl Controller {
                 _ => 0,
             };
             self.comm = None;
+            self.abandon_pairing();
             self.finish(Outcome::PairFailed { stage, reason: why });
         }
+    }
+
+    /// A commissioning that failed or was given up may leave its
+    /// transaction and handshake in the stack: the IM client takes one
+    /// transaction at a time, and every subscribe after a failed attestation
+    /// over BLE failed to start (doc/49 §25).
+    fn abandon_pairing(&mut self) {
+        self.stack.abort_op();
+        self.stack.abort_handshake();
     }
 
     /// `blelink`: a message from the device over BLE.
@@ -1052,8 +1066,12 @@ impl Controller {
                     self.finish(Outcome::Commissioned { node, ms: now - since });
                     return;
                 }
-                Phase::Failed { stage, .. } => {
+                Phase::Failed { stage, reason } => {
+                    let mut why = FmtBuf::<64>::new();
+                    let _ = core::fmt::Write::write_fmt(&mut why, format_args!("{reason:?}"));
+                    event!(Info, "matter.pair_failed", node = node, stage = stage as u32, why = why.as_str());
                     self.comm = None;
+                    self.abandon_pairing();
                     if addr.is_none() {
                         self.ble_close = true;
                     }

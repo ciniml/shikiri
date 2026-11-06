@@ -103,6 +103,8 @@ pub struct BleLink {
     /// address type and address, the Matter service's index, a C1 write is
     /// out, since when.
     want: u16,
+    /// `want` is the top 4 bits only (a manual pairing code's).
+    want_short: bool,
     peer: [u8; 7],
     service: Option<u8>,
     writing: bool,
@@ -130,6 +132,7 @@ impl BleLink {
             asked_at: 0,
             alive_at: 0,
             want: 0,
+            want_short: false,
             peer: [0; 7],
             service: None,
             writing: false,
@@ -165,7 +168,7 @@ impl BleLink {
     /// The controller's side: finds the commissionable device with
     /// `discriminator`, connects and sets up BTP; `Controller::ble_linked`
     /// once it is up, `ble_failed` if not.
-    pub fn central_start(&mut self, discriminator: u16, now: u64) -> Result<(), &'static str> {
+    pub fn central_start(&mut self, discriminator: u16, short: bool, now: u64) -> Result<(), &'static str> {
         if self.state != State::Idle {
             return Err("BLE busy");
         }
@@ -174,7 +177,7 @@ impl BleLink {
         }
         self.drop_link();
         self.btp = Btp::new(BtpRole::Central);
-        (self.want, self.service, self.c1, self.c2, self.started) = (discriminator, None, 0, 0, now);
+        (self.want, self.want_short, self.service, self.c1, self.c2, self.started) = (discriminator, short, None, 0, 0, now);
         let mut req = [ble::SCAN, SCAN_S, 0, 0, 0, 0, 0];
         req[3..5].copy_from_slice(&100u16.to_le_bytes());
         req[5..7].copy_from_slice(&30u16.to_le_bytes());
@@ -227,7 +230,8 @@ impl BleLink {
         match (m[0], self.state) {
             (ble::ADV, State::Scan) if n >= 11 => {
                 let data = &m[11..n.min(11 + m[10] as usize)];
-                if service_data(data).is_some_and(|a| a.discriminator == self.want) {
+                let (want, short) = (self.want, self.want_short);
+                if service_data(data).is_some_and(|a| if short { a.discriminator >> 8 == want } else { a.discriminator == want }) {
                     self.peer.copy_from_slice(&m[1..8]);
                     event!(Info, "matter.ble_found", addr = &m[2..8], rssi = m[9] as i8 as i32);
                     self.send(&[ble::STOP], now);
