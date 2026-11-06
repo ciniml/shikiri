@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel cfg cfgctl
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel cfg cfgctl c6ota
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -22,7 +22,7 @@ PERMIT_net    := --permit cpu:net --permit shm --permit netdev:eth0 --permit net
 PERMIT_nettest := --permit svc:net/udp:any --permit svc:net/tcp-listen:any --permit svc:net/tcp-connect \
                   --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --stack 32768
 PERMIT_wifi   := --permit cpu:net --permit wlan:ctl --permit listen:wifi --permit svc:net/link --permit svc:cfg/r:wifi. \
-                 --permit svc:cfg/w:wifi. --permit svc:cfg/secret:wifi. --permit ready:bt --stack 16384
+                 --permit svc:cfg/w:wifi. --permit svc:cfg/secret:wifi. --permit ready:bt --stack 24576
 PERMIT_netctl := --permit svc:netctl --permit svc:fs/rw:T5OS/NET.RUL --stack 32768
 PERMIT_init   := --permit proc:spawn --permit svc:fs/rw:T5OS/START.CFG --stack 16384
 PERMIT_keylog := --permit kbd
@@ -38,6 +38,7 @@ PERMIT_mtpanel := --permit display --permit touch --permit svc:matter/endpoint -
 PERMIT_cfg    := --permit listen:cfg --permit flash:cfg --permit random --permit svc:fs/rw:T5OS/CONFIG.A \
                  --permit svc:fs/rw:T5OS/CONFIG.B --stack 16384
 PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w:wifi.
+PERMIT_c6ota  := --permit svc:net/tcp-connect --permit svc:wifi/ota
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
                  --permit svc:ble/scan --permit svc:ble/central --permit svc:ble/peripheral \
@@ -108,7 +109,7 @@ APP_KEY       ?= $(HOME)/.config/tab5-os/app-ed25519.key
 APP_PUB       := keys/app-ed25519.pub
 # Signed with the system key (DEV_KEY): the services and the apps that need
 # strong permissions. The rest get APP_KEY.
-SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench
+SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota
 KEY_OF         = $(if $(filter $(1),$(SYSTEM_APPS)),$(DEV_KEY),$(APP_KEY))
 # A key the kernel does not trust, for the rejection test. Not a secret.
 UNTRUSTED_KEY := $(BUILD)/keys/untrusted.key

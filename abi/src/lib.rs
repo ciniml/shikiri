@@ -456,9 +456,22 @@ pub mod wifi {
     pub const REVERT: u8 = 6;
     pub const SAVED: u8 = 7;
     /// `[DENIED, request]`: the client's grants (doc/52 §3.3) do not allow
-    /// the request: `svc:wifi/status` allows `STATUS`, `svc:wifi/join`
-    /// (system key only) everything.
+    /// the request: `svc:wifi/status` allows `STATUS`, `svc:wifi/ota` the
+    /// `OTA_*` ones, `svc:wifi/join` (system key only) everything.
     pub const DENIED: u8 = 8;
+    /// Request `[OTA_BEGIN, size: u32 LE]` (doc/58 R5, `svc:wifi/ota`): a
+    /// new firmware for the chip (esp_hosted's OTA) follows in `OTA_DATA`
+    /// requests `[OTA_DATA, bytes…]`, in order and unanswered, then
+    /// `[OTA_END]`. BEGIN and END are answered `[OTA_STATUS, ok, step,
+    /// esp_err: i32 LE]`. After a good END the chip boots the new firmware
+    /// in about 5 s; the board is restarted to take it up.
+    pub const OTA_BEGIN: u8 = 9;
+    pub const OTA_DATA: u8 = 10;
+    pub const OTA_END: u8 = 11;
+    pub const OTA_STATUS: u8 = 12;
+    /// The largest image: the chip's OTA partition (esp_hosted 0.0.6's
+    /// table on the P4 EVB's C6, 1536 KiB).
+    pub const OTA_MAX: usize = 1536 << 10;
     pub const SSID_MAX: usize = 32;
     pub const PSK_MAX: usize = 64;
 }

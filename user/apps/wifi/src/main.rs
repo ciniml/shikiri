@@ -53,6 +53,18 @@ const ESP_ERR_INVALID_STATE: i32 = 0x103;
 /// 262, 1674-1685): feature 1 = Bluetooth; command 1 = BT init, 3 = BT
 /// enable. The response's field 1 is an esp_err_t.
 const REQ_FEATURE_CONTROL: u32 = 387;
+/// esp_hosted's OTA (esp_hosted_rpc.proto:119-121, the same in 0.0.6).
+const REQ_OTA_BEGIN: u32 = 272;
+const REQ_OTA_WRITE: u32 = 273;
+const REQ_OTA_END: u32 = 274;
+/// Firmware bytes per `Req_OTAWrite`.
+const OTA_CHUNK: usize = 1024;
+/// `Req_OTABegin` erases the whole partition first (esp_ota_begin with
+/// OTA_SIZE_UNKNOWN, 0.0.6's slave_control.c:353): seconds.
+const OTA_RESPONSE_NS: u64 = 30_000_000_000;
+/// An ESP image's first byte, and its chip id (bytes 12-13) for the C6.
+const IMAGE_MAGIC: u8 = 0xE9;
+const CHIP_ID_C6: u16 = 0x0D;
 const FEATURE_BLUETOOTH: u64 = 1;
 const FEATURE_BT_INIT: u64 = 1;
 const FEATURE_BT_ENABLE: u64 = 3;
@@ -155,7 +167,7 @@ impl<'a> Pb<'a> {
 
     /// A nested message, built by `f`.
     fn msg(&mut self, field: u32, f: impl FnOnce(&mut Pb)) {
-        let mut tmp = [0u8; 256];
+        let mut tmp = [0u8; OTA_CHUNK + 16];
         let mut inner = Pb::new(&mut tmp);
         f(&mut inner);
         let n = inner.n;
@@ -268,14 +280,14 @@ impl Rpc {
     /// Sends request `id` with the payload `body` builds.
     fn send(&mut self, id: u32, body: impl FnOnce(&mut Pb)) -> Result<(), Error> {
         self.uid += 1;
-        let mut rpc = [0u8; 512];
+        let mut rpc = [0u8; OTA_CHUNK + 64];
         let mut p = Pb::new(&mut rpc);
         p.uint(1, REQ);
         p.uint(2, id as u64);
         p.uint(3, self.uid);
         p.msg(id, body);
         let data = p.done();
-        let mut out = [0u8; 600];
+        let mut out = [0u8; OTA_CHUNK + 96];
         let mut n = 0;
         for part in [&[TLV_EPNAME, EP_REQUEST.len() as u8, 0][..], EP_REQUEST, &[TLV_DATA, data.len() as u8, (data.len() >> 8) as u8], data] {
             out[n..n + part.len()].copy_from_slice(part);
@@ -327,8 +339,13 @@ impl Rpc {
     /// come in between. Returns the response's `resp` (field `resp_field`)
     /// as an error if it is not 0.
     fn call(&mut self, id: u32, resp_field: u32, body: impl FnOnce(&mut Pb)) -> Result<Msg, u32> {
+        self.call_within(id, resp_field, RESPONSE_NS, body)
+    }
+
+    /// `call`, waiting up to `timeout_ns` for the response.
+    fn call_within(&mut self, id: u32, resp_field: u32, timeout_ns: u64, body: impl FnOnce(&mut Pb)) -> Result<Msg, u32> {
         self.send(id, body).map_err(|_| id)?;
-        let end = time_ns() + RESPONSE_NS;
+        let end = time_ns() + timeout_ns;
         loop {
             let now = time_ns();
             if now >= end {
@@ -631,6 +648,8 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
     let mut joining: Option<u64> = None;
     // The network of the last JOIN, until it is saved or left.
     let mut joined: Option<Network> = None;
+    // A firmware update under way (doc/58 R5).
+    let mut ota: Option<Ota> = None;
     loop {
         let now = time_ns();
         let until = match (retry_at, joining) {
@@ -640,7 +659,10 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
         let timeout = until.map_or(t5_rt::FOREVER, |t| t.saturating_sub(now).max(1));
         let mut hs = [rpc.ctl.raw(); 3];
         let mut n = 1;
-        if let Some(l) = &listener {
+        // Another client waits until this one goes: with the listener in
+        // the set, its pending connection would end every wait at once
+        // (and the old client's closing would never be seen, doc/58 R5).
+        if let (Some(l), None) = (&listener, &client) {
             hs[n] = l.0.raw();
             n += 1;
         }
@@ -708,9 +730,10 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
             grants = c.peer_grants();
             client = Some(c);
         }
-        let mut req = [0u8; 4 + wifi::SSID_MAX + wifi::PSK_MAX];
+        let mut req = [0u8; chan::MSG_MAX];
         while let Some(Ok(k)) = client.as_ref().map(|c| c.0.read(&mut req)) {
-            let allowed = grants.has(b"join") || (req[0] == wifi::STATUS && grants.has(b"status"));
+            let is_ota = matches!(req[0], wifi::OTA_BEGIN | wifi::OTA_DATA | wifi::OTA_END);
+            let allowed = grants.has(b"join") || (req[0] == wifi::STATUS && grants.has(b"status")) || (is_ota && grants.has(b"ota"));
             if !allowed {
                 event!(Warn, "wifi.denied", request = req[0]);
                 answer(&client, &[wifi::DENIED, req[0]]);
@@ -762,10 +785,107 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
                         joining = Some(time_ns() + JOIN_NS);
                     }
                 }
+                wifi::OTA_BEGIN => {
+                    let size = req.get(1..5).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+                    let r = if size == 0 || size > wifi::OTA_MAX {
+                        Err((1, 0))
+                    } else {
+                        event!(Warn, "wifi.ota_begin", bytes = size as u32);
+                        ota_call(rpc, REQ_OTA_BEGIN, |_| {}).map(|_| {
+                            ota = Some(Ota { size, sent: 0, have: 0, buf: [0; OTA_CHUNK], failed: None });
+                        })
+                    };
+                    ota_answer(&client, r);
+                }
+                wifi::OTA_DATA => {
+                    let Some(o) = ota.as_mut() else { continue };
+                    o.take(rpc, &req[1..k]);
+                }
+                wifi::OTA_END => {
+                    let r = match ota.take() {
+                        None => Err((1, 0)),
+                        Some(mut o) => o.finish(rpc),
+                    };
+                    event!(Warn, "wifi.ota_end", ok = r.is_ok(), step = r.err().map_or(0, |e| e.0), esp_err = r.err().map_or(0, |e| e.1));
+                    ota_answer(&client, r);
+                }
                 _ => answer(&client, &[wifi::FAILED, 0, 0]),
             }
         }
     }
+}
+
+/// A firmware image on its way to the chip: `size` bytes, `sent` of them
+/// written, `have` gathered in `buf` for the next write.
+struct Ota {
+    size: usize,
+    sent: usize,
+    have: usize,
+    buf: [u8; OTA_CHUNK],
+    /// The first failure: (step, esp_err).
+    failed: Option<(u8, i32)>,
+}
+
+impl Ota {
+    fn take(&mut self, rpc: &mut Rpc, mut data: &[u8]) {
+        while !data.is_empty() && self.failed.is_none() {
+            let n = data.len().min(OTA_CHUNK - self.have);
+            self.buf[self.have..self.have + n].copy_from_slice(&data[..n]);
+            self.have += n;
+            data = &data[n..];
+            if self.have == OTA_CHUNK {
+                self.write(rpc);
+            }
+        }
+    }
+
+    fn write(&mut self, rpc: &mut Rpc) {
+        // The image must be the C6's and not overrun what BEGIN said.
+        let chip = u16::from_le_bytes([self.buf[12], self.buf[13]]);
+        if self.sent == 0 && (self.have < 16 || self.buf[0] != IMAGE_MAGIC || chip != CHIP_ID_C6) {
+            self.failed = Some((2, 0));
+        } else if self.sent + self.have > self.size {
+            self.failed = Some((3, 0));
+        } else {
+            let chunk = &self.buf[..self.have];
+            match ota_call(rpc, REQ_OTA_WRITE, |p| p.bytes(1, chunk)) {
+                Ok(()) => self.sent += self.have,
+                Err(e) => self.failed = Some(e),
+            }
+        }
+        self.have = 0;
+    }
+
+    /// The last piece, then `Req_OTAEnd` (the chip checks the image and
+    /// boots it next) if every byte went.
+    fn finish(&mut self, rpc: &mut Rpc) -> Result<(), (u8, i32)> {
+        if self.have > 0 {
+            self.write(rpc);
+        }
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        if self.sent != self.size {
+            return Err((4, 0));
+        }
+        ota_call(rpc, REQ_OTA_END, |_| {})
+    }
+}
+
+/// An OTA request; Err((5, esp_err)) if the chip refused it, (6, 0) if it
+/// did not answer.
+fn ota_call(rpc: &mut Rpc, id: u32, body: impl FnOnce(&mut Pb)) -> Result<(), (u8, i32)> {
+    rpc.last_err = 0;
+    rpc.call_within(id, 1, OTA_RESPONSE_NS, body).map(|_| ()).map_err(|_| if rpc.last_err != 0 { (5, rpc.last_err) } else { (6, 0) })
+}
+
+fn ota_answer(client: &Option<Channel>, r: Result<(), (u8, i32)>) {
+    let (ok, step, err) = match r {
+        Ok(()) => (1, 0, 0),
+        Err((step, err)) => (0, step, err),
+    };
+    let e = err.to_le_bytes();
+    answer(client, &[wifi::OTA_STATUS, ok, step, e[0], e[1], e[2], e[3]]);
 }
 
 /// After each association: `net` reports its multicast groups again, and,

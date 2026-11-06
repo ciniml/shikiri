@@ -464,8 +464,36 @@
     - echo は Wi-Fi の空中を両方向で分け合うので変わらない。
     - 転送（PC → EVB → 外）は、端どうしの TCP の窓で決まるので、この変更とは関係しない。転送の約 20 Mbps は、C6 のファームウェアの設定と電波の状態が効いているとみる（推測）。
   - **さらに上げるなら**: C6 のファームウェアを性能向けの設定で作り直す（EVB の C6 の更新は許可済み）。esp_hosted の資料では TCP 30 Mbps 前後。
+- **R5 その 8: EVB の C6 のファームウェアを esp_hosted 2.12.7 に（OTA）**（2026-11-06）:
+  - **前の状態**: EVB v1.5.2 の C6 は出荷時の esp_hosted v0.0.6（esp_hosted の資料 `docs/esp32_p4_function_ev_board.md`）。`wifi` は 2.12.7（Tab5 の C6 と同じ）に合わせてあり、Wi-Fi と AP は動いていたが、Bluetooth は `wifi.bt_failed` だった。
+  - **利用者の判断**: 書き込みは P4 からの OTA（「P4 から OTA（推奨）」）。
+  - **先に試したこと**: Wi-Fi のバッファの数（`wifi` が `Req_WifiInit` で渡す、0.0.6 もその値を使う）を性能向けの値（静的受信 16、動的受信と送信 64、受信の窓 32）にした。速さはばらつきの中で変わらなかったので戻した。
+  - **ファームウェアの作り方**（ESP-IDF v5.5.5、esp_hosted 2.12.7 の `slave`）:
+    - `sdkconfig.defaults.esp32c6` に、esp_hosted の資料 `docs/performance_optimization.md` の値を C6 の名前で足す: `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16`、`CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64`、`CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=64`、`CONFIG_ESP_WIFI_RX_BA_WIN=32`。
+    - `idf.py set-target esp32c6 && idf.py build`。依存の部品は Espressif の部品の登録所から取る。
+    - SDIO はストリーミングのモード（既定、Tab5 の C6 と同じ）。像は 1,225,232 バイト。0.0.6 の区画表は OTA の区画が 1536 KiB ずつで、OTA は区画表を書き換えないので、像はそれに収まる必要がある。
+  - **OTA の作り**:
+    - `wifi`: `svc:wifi/ota` の要求 `OTA_BEGIN`（大きさ）、`OTA_DATA`（中身）、`OTA_END`（`t5_abi::wifi`）。1 KiB ずつ esp_hosted の `Req_OTAWrite` にする（`Req_OTABegin`/`Write`/`End` は 0.0.6 も同じ番号）。像の頭（0xE9、チップの ID 13 = C6）と大きさを確かめる。`Req_OTABegin` は区画を消すので、OTA の要求は 30 秒待つ。
+    - `c6ota`（新しいアプリ）: `run c6ota IP PORT` で `http://IP:PORT/c6.bin` を取り、同じ確かめをしてから `wifi` に渡す。許可は `svc:net/tcp-connect` と `svc:wifi/ota`。`svc:wifi/ota` は、システムの鍵の像だけが持てる許可（`t5a::strong`）に足した。
+    - `wifi` の不具合を直した: 客（`matter`）がいる間に別の客がつなごうとすると、待ちの集合の受け口がいつも準備済みになり、`wifi` が 1 コアを使い切って回っていた（客の終わりも見えなかった）。客がいる間は受け口を待たない。次の客は、今の客が去ってからつながる。
+  - **実機での手順**（PC の USB Ethernet に `python3 -m http.server 8070 --bind 192.168.10.1`、EVB は `netctl 10`、`wifi` の客の席をふさぐ `matter` を止めてから）:
+    1. C6 でない像（P4 のカーネル）: `c6ota.bad_image`、何も送らない。
+    2. 本物の像の先頭 64 KiB だけ: 最後の `Req_OTAEnd` で C6 が `ESP_ERR_OTA_VALIDATE_FAILED`（5379）を返した。起動する区画は変わらない。道の全体（区画の消去、書き込み）を確かめた。
+    3. 本物の像: 1,225,232 バイトを 12 秒で書き、`Req_OTAEnd` が通った。C6 は 5 秒後に新しい版で起動した。
+  - **結果**:
+    - 起動の後 `wlan.fw_version major=2 minor=12 patch=7`。Wi-Fi（`iotap`）、DHCP、Bluetooth（`wifi.bt_started`。0.0.6 では失敗していた）、AP と STA の同時（`run wifi 9` で `t5evb-ap`）が動いた。
+    - 速さはほぼ同じ:
+
+      | | 0.0.6 | 2.12.7 |
+      |---|---|---|
+      | TCP、PC → EVB | 22.5〜24.8 Mbps | 24.4〜25.1 Mbps |
+      | TCP、EVB → PC | 25.6〜28.5 Mbps | 26.8〜27.5 Mbps |
+      | UDP、PC → EVB の上限 | 44.0 Mbps | 44.2〜44.6 Mbps |
+
+    - UDP の上限（約 44 Mbps）は、esp_hosted の資料の開けた所の値（約 49 Mbps）の 9 割で、ファームウェアでは変わらなかった。電波（2.4 GHz、チャネル 11、家の中）が効いているとみる（推測）。
+    - 0.0.6 に戻すには、同じ OTA で 0.0.6 の像を送る（像は Espressif の部品の登録所の 0.0.6 から作れる）。C6 が起動しなくなったときは、PROG_C6 の端子から書く。
   - **残り（R5 の続き）**:
-    - 洪水の間の取りこぼし（DMA の手前で選り分けられない）。C6 のファームウェアの設定。
+    - 洪水の間の取りこぼし（DMA の手前で選り分けられない）。`wifi` の客は 1 つずつ（`matter` が席を持ち続ける）。
 - **R1b（チップ v3、v1.6.0）の調べ**（ESP-IDF の hw_ver1 と hw_ver3 のヘッダを全部突き合わせた）:
   - **レジスタの配置はほぼ同じ**。違うのは次のとおり。
     - 乱数（v3 は LP_TRNG の 0x5012_6004 と有効化）
