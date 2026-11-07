@@ -487,7 +487,8 @@
   - 実機: 直した後、node 4 として 31 秒で入った（PASE、attestation、Wi-Fi の設定、CASE）。ほかの購読は切れなかった。
 - **Lapis を HA にも入れ、mtdash に出した**:
   - Tab5 から `ocw 4` で窓を開け、AirQ のセッションが HA の `matter/commission` で入れた（Nature Remo Lapis、ブリッジの下に温度と湿度）。その後も Tab5 から読める（VendorName、PartsList [1, 2, 3]、温度 30.70 ℃）。
-  - `watch 4 2 0x402 0` と `watch 4 3 0x405 0`。2 本目は Lapis が IM 0x89 で断った（購読はあとから足した項目だけで張っていた）。`watch` で項目を足したら、そのノードの項目をまとめて購読し直す（KeepSubscriptions=false で前の購読は機器が捨てる）。実機では matter を起動し直して 1 本にまとめた（足したときの張り直しは、まだ実機で見ていない）。温度 30.85 ℃、湿度 34.37 %。
+  - `watch 4 2 0x402 0` と `watch 4 3 0x405 0`。2 本目は Lapis が IM 0x89 で断った（購読はあとから足した項目だけで張っていた）。`watch` で項目を足したら、そのノードの項目をまとめて購読し直す（KeepSubscriptions=false で前の購読は機器が捨てる）。実機では matter を起動し直して 1 本にまとめた。温度 30.85 ℃、湿度 34.37 %。
+  - 利用者が Lapis をセットアップし直した（前の fabric は消えた）。Tab5 の node 4 は 30 秒ごとに CASE と mDNS（10 秒）を試し、そのたびに controller がふさがった。`forget 4` の後、`paircode 4`（同じコード）でネットワーク越しに 12.5 秒で入れ直した。温度を watch し、湿度を足すと 2 つのパスの 1 本に張り直し、Lapis は受けた（足したときの張り直しを実機で確かめた）。
 - **残り**:
   - Tab5 から AirQ の fdde のアドレスへの IPv6（PASE、CASE）に返事がない（原因は不明）。PC からの ping は届く。AirQ の IPv4 が変わると、つなぎ直せないかもしれない。
   - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89。上のとおり、今は 1 本にまとめている）。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。
