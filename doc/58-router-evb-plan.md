@@ -555,6 +555,19 @@
   - **原因**: `~/esp-idf/6.0` は 2025-11 の release/v6.0（v6.0-beta1-624）で、v3.2 の ROM（eco7、2026-01）より古い。AR2026-004 は v6.0 系の最小を 6.0.1 としている。何が USB を止めたのかまでは見ていない（推測: v3.2 の ROM との食い違い）。
   - **直し**: `make boot-v3` は `IDF_PATH_V3`（既定は `~/esp-idf/6.0.2`）で作る。Tab5（v1.x）の `make boot` は 6.0 のまま。
   - **残り**: ストア（全体を書き戻したので空、`selftest.missing_app`）とアプリ、Ethernet、Wi-Fi。
+- **R1b その 3: 最初のプロセスで止まった・リセットの自動化（EVB v1.6.0、2026-11-08）**:
+  - **リセットの自動化**: 外付けの USB-UART（nodemcu 形式、CH9102、1a86:55d4 シリアル 5567028046）の DTR/RTS を EN（TP23）と IO35（TP22）に、TX/RX を U0RX/U0TX（J1）につないだ（利用者）。
+    - 回路図（v1.6 は公開されておらず、v1.52 の 3 枚目）で確かめた: EN は TP23（10 kΩ で引き上げ、0.1 µF）、IO35 は TP22（10 kΩ で引き上げ、BOOT ボタン）。IO35 は Ethernet の RMII_TXD1 も兼ねる（R135）ので、外から下げるのはリセットの間だけ。
+    - esptool の UART の既定のリセットで EN からダウンロードモード、`--after hard-reset` で通常の起動（`rst:0x1 POWERON`）。UART0 に ROM の表示が出る。esptool 5.6.0 の stub で 921600 bps、ストア（4.4 MB）を 25 秒で書けた。
+  - **USB-Serial/JTAG のポートを開くだけでダウンロードモードへリセットされる**（Linux の pyserial は開くときに DTR/RTS を立てる）。うちのカーネルの後では、ROM がキャッシュの書き戻し（`Cache_WriteBack_All` 相当、CACHE_SYNC_CTRL 0x3FF1_0098 の SYNC_DONE を待つ、0x4FC1_12BA）で止まり、書き戻しは SYNC_ERR_CODE 2 で終わっていた。USB の受け側も読まれず esptool は `Write timeout`。v6.0.2 のブートローダにした後に見た `Write timeout` と、OpenOCD のリセットの後に USB が戻らなかったのは、これと同じ形。
+    - L2 のラインを 64 バイトにしても変わらなかった（戻した）。カーネルの `reboot`（ROM のソフトウェアリセット、`rst` は CORE_SW）なら起動し直せる。原因は未確認。USJ のポートは開かない。
+  - **最初のプロセスで止まった**: 自己試験の hello を `proc.start` したところで止まり、MWDT のコアリセット（LP_CLKRST_RESET_CAUSE 0x07）になった。
+    - JTAG で見ると、core 0 は hello の入口（mepc 0x4800_0000）で割り込み 21（IPI の線）を受け続け、1 命令も進まなかった。core 1 は wfi で寝ていた。
+    - 割り込みマトリクスで、IPI（FROM_CPU_INTR0）のほかに UART0 の割り込みも線 21 に向いていた。カーネルは UART0 に触れない。ROM が UART0 の受信割り込み（INT_ENA=1）を線 5 に向けたまま残し、外付けの USB-UART をつないだので立ちっぱなしになった。
+    - 直し: 初期化で、各コアの割り込みマトリクスの全部の行き先を外してから、使うものだけ向ける（v1.x は 128 個、v3.x は 136 個）。
+    - あわせて、TIMG の WDT は EN だけでなく FLASHBOOT_MOD_EN も落とし、CONF_UPDATE_EN で反映させる（ESP-IDF の mwdt_ll と同じ）。実機では WDTCONFIG0 が 2 つとも 0 になった。MWDT が動いた理由そのものは確かめていない。
+  - **実機（EVB v1.6.0）**: 自己試験が全部通り（`selftest.result failures=0 pass=true`）、RTT の `ps`・`kinfo` に答えた。カーネルの `reboot` の後も起動した。
+  - **残り**: USJ からのリセットで ROM が止まる原因、ストアの残り（Ethernet、Wi-Fi）。
 - **R5 その 10: ルーターを替えたら Tab5 がつなぎ直さなかった**（2026-11-07）:
   - 症状: デモの前（10:05 ごろ）に matter-test のルーターを替えた後、Tab5 がネットワークに戻らなかった。`wifi` は動いていたが、40 秒の間イベントを 1 つも出さなかった。
   - 原因: `wifi` は、C6 から切断のイベントが来たときだけ次の再接続を予約する（1 秒を 2 回、その後 5 秒ごと、回数の上限はない）。ルーターがない間の再接続の要求に C6 が何も返さず、次の予約が入らないまま止まった。

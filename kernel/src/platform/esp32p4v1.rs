@@ -125,6 +125,10 @@ const TIMG_WDTCONFIG0: usize = 0x48;
 const TIMG_WDTWPROTECT: usize = 0x64;
 const TIMG_WDT_WKEY: u32 = 0x50D8_3AA1;
 const TIMG_WDT_EN: u32 = 1 << 31;
+const TIMG_WDT_FLASHBOOT_MOD_EN: u32 = 1 << 14;
+/// WDTCONFIG0.WDT_CONF_UPDATE_EN: the MWDT takes a changed configuration
+/// only when this is set (mwdt_ll.h).
+const TIMG_WDT_CONF_UPDATE_EN: u32 = 1 << 22;
 
 // SYSTIMER (doc/10 §2): systimer_reg.h, hal/esp32p4/include/hal/systimer_ll.h.
 // Unit 0 counts at 16 MHz from reset (esp_hw_support/port/esp32p4/systimer.c);
@@ -163,6 +167,22 @@ const SYSTIMER_COMP1_LOAD: usize = SYSTIMER_BASE + 0x54;
 const SYSTIMER_TARGET1_INT: u32 = 1 << 1;
 const SYSTIMER_TARGET1_SOURCE: usize = 54;
 const INTMTX_CORE1_BASE: usize = 0x500D_6800;
+/// Map registers per core (interrupt_core0_reg.h: the last is +0x1FC on
+/// v1.x, +0x21C on v3.x).
+#[cfg(not(feature = "chip-v3"))]
+const INTR_SOURCES: usize = 128;
+#[cfg(feature = "chip-v3")]
+const INTR_SOURCES: usize = 136;
+
+/// Unroutes every source from this core's lines. The ROM leaves UART0's
+/// receive interrupt routed to line 5, the IPI's: with something on UART0
+/// (the EV-Board v1.6's external USB-UART), core 0 took it for an IPI
+/// forever and the first process never ran (doc/58 R1b).
+unsafe fn intmtx_clear(base: usize) {
+    for src in 0..INTR_SOURCES {
+        unsafe { wr(base + 4 * src, 0) };
+    }
+}
 /// CPU interrupt line used for the scheduler tick.
 const TIMER_CPU_LINE: usize = 1;
 const CLIC_EXT_INTR_NUM_OFFSET: usize = 16;
@@ -570,6 +590,7 @@ impl Platform for Esp32p4v1 {
         unsafe {
             // Core1's alarm (comparator 1, one-shot on unit 0) to its CLIC,
             // on the line core 0's uses; let every enabled level through.
+            intmtx_clear(INTMTX_CORE1_BASE);
             wr(SYSTIMER_CONF, rd(SYSTIMER_CONF) & !SYSTIMER_TARGET1_WORK_EN);
             wr(SYSTIMER_INT_CLR, SYSTIMER_TARGET1_INT);
             wr(SYSTIMER_TARGET1_CONF, 0);
@@ -607,11 +628,18 @@ impl Platform for Esp32p4v1 {
             // timeout to ~4 s and reset only the HP system on expiry, so LP
             // SRAM survives a lock-up; the scheduler feeds it (doc/12 L3).
             Self::arm_watchdog();
+            // Off, flash boot protection too, and latched with CONF_UPDATE_EN
+            // (as ESP-IDF's mwdt_ll). On chip v3.2 an MWDT core reset
+            // followed the first process (doc/58 R1b); why the MWDT ran was
+            // not confirmed.
             for base in TIMG_BASES {
                 wr(base + TIMG_WDTWPROTECT, TIMG_WDT_WKEY);
-                wr(base + TIMG_WDTCONFIG0, rd(base + TIMG_WDTCONFIG0) & !TIMG_WDT_EN);
+                wr(base + TIMG_WDTCONFIG0, rd(base + TIMG_WDTCONFIG0) & !(TIMG_WDT_EN | TIMG_WDT_FLASHBOOT_MOD_EN));
+                wr(base + TIMG_WDTCONFIG0, rd(base + TIMG_WDTCONFIG0) | TIMG_WDT_CONF_UPDATE_EN);
                 wr(base + TIMG_WDTWPROTECT, 0);
             }
+
+            intmtx_clear(INTMTX_CORE0_BASE);
 
             // Alarm 0: one-shot on unit 0, routed to CPU line 1 at priority 1.
             // A threshold of 0 lets every enabled level through; U-mode runs
