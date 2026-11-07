@@ -82,9 +82,14 @@ impl Relay {
                 self.dropped += 1;
             }
         }
-        let mut msg = [0u8; MSG_MAX];
         let down = down_set.get_mut::<udp::Socket>(self.down);
         let up = up_set.get_mut::<udp::Socket>(self.up);
+        // Nothing come: no buffer to clear (this runs every pass, doc/58
+        // R1b).
+        if !down.can_recv() && !up.can_recv() {
+            return;
+        }
+        let mut msg = [0u8; MSG_MAX];
         while let Ok((n, meta)) = down.recv_slice(&mut msg) {
             let (Some(server), true) = (server, n >= 12) else {
                 self.dropped += 1;

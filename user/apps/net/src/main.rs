@@ -95,6 +95,10 @@ pub fn link_local(mac: [u8; 6]) -> IpCidr {
 /// echo away (doc/34). After `wait` the main loop takes the time `wait`
 /// returns (doc/58 R5: two `TIME`s a pass were 9% of net's time).
 static mut CLOCK_NS: u64 = 0;
+/// `CLOCK_NS` in µs for `now`, divided once a pass: the 64-bit division
+/// (`__udivdi3`) at each of `now`'s many callers was 2% of net's time
+/// (doc/58 R1b).
+static mut CLOCK_US: i64 = 0;
 
 /// Reads the time for the pass that begins.
 pub fn tick() -> u64 {
@@ -104,7 +108,10 @@ pub fn tick() -> u64 {
 }
 
 fn set_clock(t: u64) {
-    unsafe { CLOCK_NS = t };
+    unsafe {
+        CLOCK_NS = t;
+        CLOCK_US = (t / 1000) as i64;
+    }
 }
 
 pub fn clock_ns() -> u64 {
@@ -112,7 +119,7 @@ pub fn clock_ns() -> u64 {
 }
 
 pub fn now() -> Instant {
-    Instant::from_micros((clock_ns() / 1000) as i64)
+    Instant::from_micros(unsafe { CLOCK_US })
 }
 
 // ---- socket storage (static: there is no allocator) ----
@@ -206,6 +213,8 @@ pub struct EthLink {
     dns6: Option<u128>,
     /// While it has no address: when to log the counters next.
     report_at: u64,
+    /// When `log_ipv6` (with the temporary addresses' upkeep) runs next.
+    v6_check_at: u64,
     /// Its address changed: the interfaces' addresses are to be redone.
     changed: bool,
     /// The global IPv6 address last logged (SLAAC).
@@ -265,6 +274,7 @@ impl EthLink {
             dns_server: None,
             dns6: None,
             report_at: clock_ns() + 5_000_000_000,
+            v6_check_at: 0,
             changed: true,
             v6_logged: None,
             v6_routes_logged: 0,
@@ -461,7 +471,13 @@ impl EthLink {
     /// Applies what DHCP says (address, default route, DNS servers).
     fn dhcp(&mut self) {
         let name = LINK_NAMES[self.dev.link];
-        self.log_ipv6();
+        // Every 100 ms, not every pass: walking the addresses and routes
+        // was 3% of net's time under load (doc/58 R1b). SLAAC and the
+        // temporary addresses change in seconds.
+        if clock_ns() >= self.v6_check_at {
+            self.v6_check_at = clock_ns() + 100_000_000;
+            self.log_ipv6();
+        }
         if self.dev.own.is_none() && clock_ns() >= self.report_at {
             self.report_at = clock_ns() + 5_000_000_000;
             link::log_counters(name, &self.dev);

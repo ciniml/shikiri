@@ -77,6 +77,11 @@ impl Server {
     /// `dns`: the DNS server to give.
     pub fn poll(&mut self, sockets: &mut SocketSet<'static>, own: (u32, u8), dns: u32) {
         let s = sockets.get_mut::<udp::Socket>(self.sock);
+        // Nothing come: no buffers to clear (this runs every pass, doc/58
+        // R1b).
+        if !s.can_recv() {
+            return;
+        }
         let mut msg = [0u8; MSG_MAX];
         let mut out = [0u8; MSG_MAX];
         while let Ok((n, _)) = s.recv_slice(&mut msg) {
