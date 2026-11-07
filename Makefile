@@ -84,6 +84,11 @@ all: kernel-virt image-p4 boot
 
 IDF_PATH_6 ?= $(HOME)/esp-idf/6.0
 IDF        := . $(IDF_PATH_6)/export.sh >/dev/null && idf.py
+# Chip v3.2 (ROM eco7) needs ESP-IDF 6.0.1 or later: the bootloader from the
+# 6.0-beta tree above made USB-Serial/JTAG vanish before it loaded the app
+# (doc/58 R1b).
+IDF_PATH_V3 ?= $(HOME)/esp-idf/6.0.2
+IDF_V3     := . $(IDF_PATH_V3)/export.sh >/dev/null && idf.py
 PORT       ?= /dev/ttyACM0
 PRETTY     := $(T5LOG) decode --pretty --schemas $(SCHEMAS)
 
@@ -266,9 +271,10 @@ kupdate-test-kernels: image-p4
 boot:
 	cd boot && bash -c '$(IDF) -B ../$(BUILD)/boot bootloader partition-table'
 
-# The same for chip v3.x (boot/sdkconfig.v3.defaults), in build/boot-v3.
+# The same for chip v3.x (boot/sdkconfig.v3.defaults), in build/boot-v3, with
+# ESP-IDF 6.0.2.
 boot-v3:
-	cd boot && bash -c '$(IDF) -B ../$(BUILD)/boot-v3 -D SDKCONFIG=../$(BUILD)/boot-v3/sdkconfig \
+	cd boot && bash -c '$(IDF_V3) -B ../$(BUILD)/boot-v3 -D SDKCONFIG=../$(BUILD)/boot-v3/sdkconfig \
 	    -D SDKCONFIG_DEFAULTS=sdkconfig.v3.defaults bootloader partition-table'
 
 # --- Targets below touch the device. Run them only deliberately. ---
