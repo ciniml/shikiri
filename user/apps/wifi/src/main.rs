@@ -103,6 +103,11 @@ const JOIN_NS: u64 = 20_000_000_000;
 const BT_READY: &str = "ready:bt";
 /// Retries 1 s after a disconnection before waiting 5 s.
 const QUICK_RETRIES: u32 = 2;
+/// Disconnected and nothing scheduled (the chip said nothing to a
+/// connect: no disconnection event when the access point is not found):
+/// try again this long after. The router was replaced on 2026-11-07 and
+/// the Tab5 stayed off the network (doc/58).
+const SILENT_RETRY_NS: u64 = 30_000_000_000;
 /// How long to wait for the settings service at start.
 const CFG_MS: u64 = 3000;
 /// wifi_err_reason_t WIFI_REASON_ASSOC_LEAVE: the station left (our own
@@ -653,6 +658,9 @@ fn idle(rpc: &mut Rpc, mut home: Network) -> Result<(), u32> {
     let mut ota: Option<Ota> = None;
     loop {
         let now = time_ns();
+        if !rpc.connected && rpc.ssid_len > 0 && retry_at.is_none() && joining.is_none() && ota.is_none() {
+            retry_at = Some(now + SILENT_RETRY_NS);
+        }
         let until = match (retry_at, joining) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
