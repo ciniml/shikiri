@@ -568,6 +568,12 @@
     - あわせて、TIMG の WDT は EN だけでなく FLASHBOOT_MOD_EN も落とし、CONF_UPDATE_EN で反映させる（ESP-IDF の mwdt_ll と同じ）。実機では WDTCONFIG0 が 2 つとも 0 になった。MWDT が動いた理由そのものは確かめていない。
   - **実機（EVB v1.6.0）**: 自己試験が全部通り（`selftest.result failures=0 pass=true`）、RTT の `ps`・`kinfo` に答えた。カーネルの `reboot` の後も起動した。
   - **残り**: USJ からのリセットで ROM が止まる原因、ストアの残り（Ethernet、Wi-Fi）。
+- **R1b その 4: Ethernet と Wi-Fi（EVB v1.6.0、2026-11-08）**:
+  - `fs` と `init` の自動起動の版を RTT で入れた（`install`、v1.5.2 の R1 と同じ）。起動すると `init` は START.CFG なしの既定の組（cfg、wifi、net、netctl、font、term、matter）を起こした。
+  - **SD**: `sd.absent`（応答なし）。カードの有無は未確認。そのため `netctl`（`NET.RUL` なし）、`matter`（SD のストアなし）、`term`（画面なし）は見張りがあきらめた（v1.5.2 と同じ形）。
+  - **Ethernet**: PHY はアドレス 1（ID 0x0243/0x0C54）、100 Mbit/s 全二重。PC の USB Ethernet（192.168.10.1/24、DHCP なし）につながっていた。`run netctl 10`（eth0 を 192.168.10.254/24 に）の後、PC からの ping は 10 回中 10 回、0.3〜0.6 ms。試験の後は `reboot`。
+  - **Wi-Fi**: C6 は SDIO で応え（chip_id 13）、`iotap` に 3 回目でつながった（1 回目 reason 202、2 回目 205、authmode 7）。DHCP で 192.168.2.112/24。`wifi.bt_failed step=init` と `request_failed esp_err=12290` は v1.5.2 の出荷時の C6 と同じ。
+  - **残り**: SD、C6 のファームウェアの更新（v1.5.2 と同じく esp_hosted 2.12.7 へ）、USJ からのリセットで ROM が止まる原因。
 - **R5 その 10: ルーターを替えたら Tab5 がつなぎ直さなかった**（2026-11-07）:
   - 症状: デモの前（10:05 ごろ）に matter-test のルーターを替えた後、Tab5 がネットワークに戻らなかった。`wifi` は動いていたが、40 秒の間イベントを 1 つも出さなかった。
   - 原因: `wifi` は、C6 から切断のイベントが来たときだけ次の再接続を予約する（1 秒を 2 回、その後 5 秒ごと、回数の上限はない）。ルーターがない間の再接続の要求に C6 が何も返さず、次の予約が入らないまま止まった。
