@@ -265,7 +265,21 @@ fn request(line: &str, c: &Channel, dev: &mut Device, ctrl: &mut Controller, wat
     let mut text = FmtBuf::<120>::new();
     let started = match cmd {
         "status" => {
-            let _ = write!(text, "device: fabrics {}, on {}; controller: nodes {}", dev.fabrics(), dev.on(), ctrl.nodes().count());
+            let u = ctrl.pools();
+            let _ = write!(
+                text,
+                "device: fabrics {}, on {}; controller: nodes {}, busy {}, exchanges {}, sessions {}/{}, tx {}, subs {}, txn {}",
+                dev.fabrics(),
+                dev.on(),
+                ctrl.nodes().count(),
+                ctrl.busy(),
+                u.exchanges,
+                u.sessions,
+                u.sessions_cap,
+                u.tx_bufs,
+                u.subscriptions,
+                u.reads
+            );
             reply(c, text.as_str());
             end(c, true);
             return false;

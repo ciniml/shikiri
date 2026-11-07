@@ -41,8 +41,10 @@ use t5_rt::log::FmtBuf;
 
 type Backend = RustCrypto<KernelRng>;
 type Creds = ControllerCreds<'static, Backend>;
-/// Sessions, exchanges, transmit buffers, result bytes (cffi's sizing).
-type Stack = ControllerStack<'static, Backend, KernelRng, Creds, 6, 8, 3, 1280>;
+/// Sessions, exchanges, transmit buffers, result bytes. Sessions: one CASE
+/// per node and the handshakes; with 6, the fourth node's CASE pushed out
+/// the Light's session, and its subscription with it (doc/49 §25).
+type Stack = ControllerStack<'static, Backend, KernelRng, Creds, 12, 8, 3, 1280>;
 type Comm = Commissioner<'static, Backend>;
 
 const MAX_NODES: usize = 8;
@@ -617,10 +619,13 @@ impl Controller {
         let addr = self.nodes[i].addr;
         if let Some(session) = self.nodes[i].session {
             let mut scratch = [0u8; MAX_PACKET_SIZE];
-            if let Ok(d) = self.issue(session, op, now, &mut scratch) {
-                self.queue_directive(&scratch, d);
-                self.activity = Activity::AwaitOp { node, op };
-                return Ok(());
+            match self.issue(session, op, now, &mut scratch) {
+                Ok(d) => {
+                    self.queue_directive(&scratch, d);
+                    self.activity = Activity::AwaitOp { node, op };
+                    return Ok(());
+                }
+                Err(e) => self.start_failed(node, e),
             }
             // The session went stale: CASE again.
             self.nodes[i].session = None;
@@ -630,6 +635,32 @@ impl Controller {
         self.queue_directive(&scratch, d);
         self.activity = Activity::Connecting { node, addr, op, relocated: false };
         Ok(())
+    }
+
+    pub fn pools(&self) -> simple_matter::stack::PoolUsage {
+        self.stack.pool_usage()
+    }
+
+    /// Why a request could not start, and the stack's pools.
+    /// A start that failed after the IM client took the transaction (the
+    /// session was gone) left it and its exchange: every request after
+    /// failed with NoSpace (doc/49 §25). Let go of them.
+    fn start_failed(&mut self, node: u64, e: simple_matter::error::Error) {
+        let mut why = FmtBuf::<48>::new();
+        let _ = core::fmt::Write::write_fmt(&mut why, format_args!("{e:?}"));
+        let u = self.stack.pool_usage();
+        event!(
+            Warn,
+            "matter.start_failed",
+            node = node,
+            why = why.as_str(),
+            exchanges = u.exchanges as u32,
+            sessions = u.sessions as u32,
+            tx_bufs = u.tx_bufs as u32,
+            subscriptions = u.subscriptions as u32,
+            txn = u.reads as u32
+        );
+        self.stack.abort_op();
     }
 
     fn issue(&mut self, session: SessionId, op: Op, now: u64, scratch: &mut [u8]) -> simple_matter::error::Result<SendDirective> {
@@ -799,7 +830,11 @@ impl Controller {
             return;
         }
         let mut scratch = [0u8; MAX_PACKET_SIZE];
-        if let Some(d) = self.stack.poll(now, &mut scratch) {
+        let d = self.stack.poll(now, &mut scratch);
+        // Losses are found here (keep-alives missing), as reports in
+        // `handle_rx`.
+        self.take_reports();
+        if let Some(d) = d {
             self.queue_directive(&scratch, d);
             return;
         }
@@ -963,7 +998,10 @@ impl Controller {
                             self.queue_directive(&scratch, d);
                             self.activity = Activity::AwaitOp { node, op };
                         }
-                        Err(_) => self.finish(Outcome::Failed { why: "start", status: 0 }),
+                        Err(e) => {
+                            self.start_failed(node, e);
+                            self.finish(Outcome::Failed { why: "start", status: 0 })
+                        }
                     }
                 }
                 // The node may have another address now (DHCP, a new

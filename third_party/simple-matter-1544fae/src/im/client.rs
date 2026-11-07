@@ -67,7 +67,7 @@ pub const DEFAULT_RESULT_LEN: usize = 1280;
 ///
 /// const generic にしない判断: 型パラメータ追加は `ControllerStack` / example まで
 /// シグネチャが波及する。CLI 用途(`smctl subscribe`)には固定 4 で足りる。
-pub const MAX_CLIENT_SUBSCRIPTIONS: usize = 4;
+pub const MAX_CLIENT_SUBSCRIPTIONS: usize = 8;
 
 /// maxInterval 超過をロスト(keep-alive 途絶)と判定するまでの猶予(ミリ秒、§4.5.3)。
 ///
@@ -223,6 +223,10 @@ pub struct ImClient<const RESULT: usize = DEFAULT_RESULT_LEN> {
     sub_truncated: bool,
     /// 購読系イベントの 1 深度 slot(txn イベントと分離。取り出し前の上書きは最新優先)。
     sub_event: Option<ImEvent>,
+    /// 取り出されていない SubscriptionLost。`on_tick` は同じ tick で切れた購読を全部外すので、
+    /// 1 枠(`sub_event`)だと最後の 1 件しか残らず、ほかの購読は利用者から見て生きたままになった
+    /// (tab5-os doc/49 §25: Light と Door が同時に切れた)。
+    lost_events: FixedVec<ImEvent, MAX_CLIENT_SUBSCRIPTIONS>,
     /// timed invoke/write の 2 相目(InvokeRequest/WriteRequest payload)の退避長。
     ///
     /// [`Self::start_invoke_timed`] / [`Self::start_write_timed`] が後続リクエストを `result` に
@@ -261,6 +265,7 @@ impl<const RESULT: usize> ImClient<RESULT> {
             sub_event_result_len: 0,
             sub_truncated: false,
             sub_event: None,
+            lost_events: FixedVec::new(),
             pending_invoke_len: None,
             last_cluster_status: None,
         }
@@ -288,7 +293,10 @@ impl<const RESULT: usize> ImClient<RESULT> {
     /// トランザクション系イベントを優先し、無ければ購読系イベント
     /// ([`ImEvent::SubscriptionReport`] / [`ImEvent::SubscriptionLost`])を返す(§4.5.4)。
     pub fn take_event(&mut self) -> Option<ImEvent> {
-        self.event.take().or_else(|| self.sub_event.take())
+        self.event
+            .take()
+            .or_else(|| self.sub_event.take())
+            .or_else(|| (!self.lost_events.is_empty()).then(|| self.lost_events.swap_remove(0)))
     }
 
     /// トランザクション系イベント(Read / Invoke / Write / Subscribe の完了・失敗)だけを取り出す。
@@ -696,7 +704,7 @@ impl<const RESULT: usize> ImClient<RESULT> {
             };
             let sub = self.subs.swap_remove(i);
             self.drop_report_rx_of(sub.session, sub.id);
-            self.sub_event = Some(ImEvent::SubscriptionLost {
+            let _ = self.lost_events.push(ImEvent::SubscriptionLost {
                 session: sub.session,
                 subscription_id: sub.id,
             });

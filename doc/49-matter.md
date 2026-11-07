@@ -489,6 +489,12 @@
   - Tab5 から `ocw 4` で窓を開け、AirQ のセッションが HA の `matter/commission` で入れた（Nature Remo Lapis、ブリッジの下に温度と湿度）。その後も Tab5 から読める（VendorName、PartsList [1, 2, 3]、温度 30.70 ℃）。
   - `watch 4 2 0x402 0` と `watch 4 3 0x405 0`。2 本目は Lapis が IM 0x89 で断った（購読はあとから足した項目だけで張っていた）。`watch` で項目を足したら、そのノードの項目をまとめて購読し直す（KeepSubscriptions=false で前の購読は機器が捨てる）。実機では matter を起動し直して 1 本にまとめた。温度 30.85 ℃、湿度 34.37 %。
   - 利用者が Lapis をセットアップし直した（前の fabric は消えた）。Tab5 の node 4 は 30 秒ごとに CASE と mDNS（10 秒）を試し、そのたびに controller がふさがった。`forget 4` の後、`paircode 4`（同じコード）でネットワーク越しに 12.5 秒で入れ直した。温度を watch し、湿度を足すと 2 つのパスの 1 本に張り直し、Lapis は受けた（足したときの張り直しを実機で確かめた）。
+- **Light の購読と toggle がまた止まった（セッションの表、購読の表、切れた購読の知らせ）**:
+  - 症状: Door は動くが、Light の購読が値を出さず、mtdash のタップの toggle も失敗した（`failed: start`）。
+  - `status` にスタックのプール（exchange、セッション、送信バッファ、購読、IM のトランザクション）を出し、始められなかったときに `matter.start_failed`（理由とプール）を出すようにして見た。セッションは 6/6 で埋まり、4 台目（Lapis）の CASE が Light のセッションを押し出していた。Light の購読のレポートは知らないセッションに来て捨てられ、toggle は `NotFound`。押し出されたセッションで IM クライアントがトランザクションを取ったまま失敗し（`txn 1`）、その後の要求はすべて `NoSpace` だった。
+  - 直し: セッションを 6 → 12。始められなかったら `abort_op` でトランザクションと exchange を解く。
+  - simple-matter（写し）の `ImClient::on_tick`: 同じ tick で切れた購読の SubscriptionLost が最後の 1 件しか残らず、ほかの購読は Tab5 から見て生きたままだった（Light と Door が 44 分値を出さなかった）。切れた購読を積むようにし、`poll` の後にもイベントを取り出す。購読の表を 4 → 8（AirQ と Lapis の 0x89 は、Tab5 自身の表が 4 で埋まっていたためだった可能性が高い）。写しの lib の試験 625 件は通った。
+  - 実機: セッションは 8/12 を使う。Light の toggle 2 回とも status 0、そのたびに OnOff のレポート（true、false）が届いた。
 - **残り**:
   - Tab5 から AirQ の fdde のアドレスへの IPv6（PASE、CASE）に返事がない（原因は不明）。PC からの ping は届く。AirQ の IPv4 が変わると、つなぎ直せないかもしれない。
   - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89。上のとおり、今は 1 本にまとめている）。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。
