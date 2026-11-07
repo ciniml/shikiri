@@ -588,6 +588,13 @@ impl Platform for Esp32p4v1 {
 
     fn init_secondary() {
         unsafe {
+            // Up: clear the entry the ROM jumped to. A reset that does not go
+            // through `reset` (USB-Serial/JTAG's, a probe's, a watchdog's)
+            // otherwise sends core 1 straight back into this kernel while
+            // the ROM and the bootloader on core 0 set the caches up: the
+            // ROM then waited for ever on a cache sync (doc/58 R1b).
+            let set_boot: unsafe extern "C" fn(u32) = core::mem::transmute(ROM_SET_APPCPU_BOOT_ADDR);
+            set_boot(0);
             // Core1's alarm (comparator 1, one-shot on unit 0) to its CLIC,
             // on the line core 0's uses; let every enabled level through.
             intmtx_clear(INTMTX_CORE1_BASE);

@@ -567,7 +567,7 @@
     - 直し: 初期化で、各コアの割り込みマトリクスの全部の行き先を外してから、使うものだけ向ける（v1.x は 128 個、v3.x は 136 個）。
     - あわせて、TIMG の WDT は EN だけでなく FLASHBOOT_MOD_EN も落とし、CONF_UPDATE_EN で反映させる（ESP-IDF の mwdt_ll と同じ）。実機では WDTCONFIG0 が 2 つとも 0 になった。MWDT が動いた理由そのものは確かめていない。
   - **実機（EVB v1.6.0）**: 自己試験が全部通り（`selftest.result failures=0 pass=true`）、RTT の `ps`・`kinfo` に答えた。カーネルの `reboot` の後も起動した。
-  - **残り**: USJ からのリセットで ROM が止まる原因、ストアの残り（Ethernet、Wi-Fi）。
+  - **残り**: USJ からのリセットで ROM が止まる原因（→ その 5）、ストアの残り（Ethernet、Wi-Fi → その 4）。
 - **R1b その 4: Ethernet と Wi-Fi（EVB v1.6.0、2026-11-08）**:
   - `fs` と `init` の自動起動の版を RTT で入れた（`install`、v1.5.2 の R1 と同じ）。起動すると `init` は START.CFG なしの既定の組（cfg、wifi、net、netctl、font、term、matter）を起こした。
   - **SD**: `sd.absent`（応答なし）。カードの有無は未確認。そのため `netctl`（`NET.RUL` なし）、`matter`（SD のストアなし）、`term`（画面なし）は見張りがあきらめた（v1.5.2 と同じ形）。
@@ -577,7 +577,18 @@
   - **C6 のファームウェア**: R5 その 8 と同じ像（esp_hosted 2.12.7、1,225,232 バイト）を同じ手順（PC の `http.server`、`netctl 10`、`run c6ota 3232238081 8070`）で OTA した。12 秒で書け、`wifi.ota_end ok=true`。EN で起動し直すと `wlan.fw_version 2.12.7`、`wifi.bt_started`、`iotap` に 2 回目でつながり DHCP。
     - 試験の後の `reboot` を、スクリプトの誤り（trap の中の引数）で飛ばした。気づいてすぐ起動し直した（`netctl 10` の間は数分）。
   - **probe の `--reset` を使わない**: t5log の `--reset` の後、少しして MWDT のコアリセットになり、ROM が USJ のときと同じキャッシュの書き戻しで止まった。EVB v1.6.0 の起動し直しは、外付けの USB-UART の EN か、カーネルの `reboot` で行う。
-  - **残り**: コアリセット（USJ、MWDT）の後に ROM が止まる原因。
+  - **残り**: コアリセット（USJ、MWDT）の後に ROM が止まる原因（→ その 5 で直した）。
+- **R1b その 5: コアリセットの後に ROM が止まった原因（EVB v1.6.0、2026-11-08）**:
+  - **症状**（その 3、その 4）: USJ のポートを開く（DTR/RTS のリセット）、esptool の USJ のリセット、probe の `--reset`（MWDT のコアリセット）の後、ROM がキャッシュの同期（CACHE_SYNC_CTRL の SYNC_DONE、0x4FC1_12BA）を待ち続けた。EN のリセットとカーネルの `reboot` では起きない。
+  - **見たこと**:
+    - ROM のキャッシュの関数の表（0x4FFB_FFD8 → 0x4FC1_FCF0）の +16 が同期の本体（0x4FC1_1284）。止まった所では、その前の書き戻し（MAP 0x30、ADDR 0x4FC0_0000、SIZE 0x40）が SYNC_ERR_CODE 2 で終わり、次の要求（全体の無効化）が受け付けられないまま DONE を待っていた。EN のリセットからのダウンロードモードでは、同じ書き戻しが終わる。
+    - キャッシュのレジスタ（0x3FF1_0000〜0x3FF1_03FF）は、同期の結果のほかは止まった時とよい時で同じ。
+  - **切り分け**（どれも試しの版、コミットしていない）:
+    - L2 のラインを 64 バイト（設定は 0x8 を確かめた）、PSRAM の autoload を止める、idle のたびに L1 D と L2 を書き戻す、PSRAM を使わない: どれも止まった。
+    - `kmain` の頭、`Current::init` の後、`pmp::reset` の後で止めて回すと止まらず、`smp::start` の後で止めると止まった。
+  - **原因**: core 1 の入口。カーネルは ROM の `ets_set_appcpu_boot_addr` で core 1 の入口を渡し、そのまま残していた。`reset` を通らないリセットの後、core 1 は ROM でその入口を見て、ブートローダがキャッシュとフラッシュを整える前の古いカーネルへ飛び込み、core 0 の ROM のキャッシュの同期が終わらなくなった（推測を含む: core 1 が何をしたかまでは見ていない）。カーネルの `reset` は前から入口を消していたので、`reboot` では起きなかった。
+  - **直し**: core 1 が上がったらすぐ（`init_secondary` の頭で）入口を 0 に戻す。
+  - **実機（EVB v1.6.0）**: USJ のポートを開く（`reset_cause=23`）、esptool の USJ からのダウンロードモードと watchdog-reset、probe の `--reset`（`reset_cause=24`）の後、どれもカーネルが起動し直した。
 - **R5 その 10: ルーターを替えたら Tab5 がつなぎ直さなかった**（2026-11-07）:
   - 症状: デモの前（10:05 ごろ）に matter-test のルーターを替えた後、Tab5 がネットワークに戻らなかった。`wifi` は動いていたが、40 秒の間イベントを 1 つも出さなかった。
   - 原因: `wifi` は、C6 から切断のイベントが来たときだけ次の再接続を予約する（1 秒を 2 回、その後 5 秒ごと、回数の上限はない）。ルーターがない間の再接続の要求に C6 が何も返さず、次の予約が入らないまま止まった。
