@@ -70,4 +70,5 @@
   - 機器の側: `Platform::display_show(fb)`（GDMA のリストの 16 項目の送り元を書き替える。止まった後の起動し直しも表示中の 1 枚から）、`gfx_start(req, fb)`。`capture` は前の 1 枚を写す。
   - ホストの制御コマンド `focus PID`（`t5_abi::ctl::cmd::FOCUS` = 36）。
 - **試験**（p4emu-run-27）: ホストから `paint` を 2 つ。1 つ目が前（first）、2 つ目は背後（`seat_behind`）。タップは前の `paint` だけが受け、`focus 102` の後の写しは 2 つ目の画面（白い角があり、タップの所は背景の色）。逆に `focus 101` に戻した写しにはタップの四角がある。わざと違う色を期待すると落ちることも確かめた。前の `paint` を `kill` すると、もう一方が前に戻る（`reason=closed`）。
-- **まだ**: 実機（Tab5）。`kbd` の行き先はエミュレータの試験に入れていない。
+- **実機（Tab5、2026-11-08、利用者が画面で確認）**: カーネルを `good.t5k` で入れた（自己試験は通り、`kupdate.confirmed`）。`term`（pid 108）が前のまま、ホストから `run mtdash` で背後に入り（`screen.seat_behind pid=120 front=108`）、`focus 120` で `mtdash` の画面に替わった（「うごいてそう」）。`focus 108` で `term` に戻した。
+- **まだ**: `kbd` の行き先の試験（エミュレータと実機）、`shell` から `run mtdash` で前に出ること（子孫の規則）の実機での確かめ。
