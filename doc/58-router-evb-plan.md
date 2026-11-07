@@ -539,6 +539,10 @@
     - RTS のリセット（`--after hard-reset`、DTR を離して RTS だけを振っても）では ROM がダウンロードモードに戻った（`rst:0x17, boot:0x104`）。esptool の PR #1201（Linux で DTR が残る）と同じ形。
     - PR #1200 の強制ダウンロードのビット（0x5011_0008 の bit 2）は 0 だった。
     - `--after watchdog-reset` ならフラッシュから起動する。
+    - **stub が止まるのは esptool 5.3.1 が持つ stub（esp-flasher-stub v1.0.0）の不具合**（2026-11-08）。v3.2 では stub の版 2 の `esp32p4.json` が使われる。
+      - 止まった間、OpenOCD では CPU が止められなかった（`Unable to halt`、dmstatus は 2 コアとも running）。ウォッチドッグのリセットではなく、バスで待ち続けている形。LP_WDT は esptool が止め、TIMG の WDT は EN が 0（FLASHBOOT_MOD_EN だけ 1）なので、誰もリセットしない。
+      - esptool 5.6.0（stub v1.4.1）では、同じカーネル（211 KB）も 2 MB の乱数（ota_1、書いた後に消した）も stub で書け、ハッシュも合った（1.5 Mbit/s）。
+      - 間の P4 の直しは、stub v1.1.0 の「CPLL の root mux の選び方」と v1.2.2 の「PMU の latch があれば ROM のフラッシュの XPD を飛ばす」。どちらが効いたかは確かめていない。
   - **切り分け**（どれも `--no-stub` で書き、watchdog-reset で起動）:
 
 | フラッシュ | 結果 |
