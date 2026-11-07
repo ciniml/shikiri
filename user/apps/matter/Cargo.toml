@@ -7,5 +7,5 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 t5-rt = { path = "../../rt" }
 mtport = { path = "../../mtport" }
-simple-matter = { git = "https://github.com/ciniml/simple_matter.git", rev = "1544fae", default-features = false, features = ["rustcrypto", "controller", "ble"] }
+simple-matter = { git = "https://github.com/ciniml/simple_matter.git", rev = "9ac954e", default-features = false, features = ["rustcrypto", "controller", "ble"] }
 heapless = "0.9"

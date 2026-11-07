@@ -482,7 +482,7 @@
   - `pairble NODE CODE`: 11 桁（または 10 桁）のコードの 4 ビットの discriminator で BLE を探し、最初に見つかった機器を入れる。mtreq の OP 34 + 256 × NODE。
   - `netcred` がなければ、Tab5 自身の網（設定の `wifi.ssid` と `wifi.psk`、doc/50）を渡す。パスフレーズは客の要求を通らない（mtreq は要求をログに出す）。matter に `svc:cfg/r:wifi.` と `svc:cfg/secret:wifi.` を足した。
   - 最初は Echo Show が MSS で先に入れていた（192.168.2.x、`CM=0`）。Echo Show を止め、Lapis を起動し直してから試した。
-  - attestation で `CdVidPidMismatch`。CD に `dac_origin_vendor_id`/`dac_origin_product_id`（タグ 9、10）があると、DAC はそれと、CD の `vendor_id`/`product_id_array` は Basic Information と照合する（Core §6.2.3.1）。simple-matter 1544fae はタグ 9、10 を見ず、DAC をいつも CD の `vendor_id` と照合していた。third_party/simple-matter-1544fae に写して直し、`[patch]` で差し替えた（本体の直しは simple-matter に頼む）。
+  - attestation で `CdVidPidMismatch`。CD に `dac_origin_vendor_id`/`dac_origin_product_id`（タグ 9、10）があると、DAC はそれと、CD の `vendor_id`/`product_id_array` は Basic Information と照合する（Core §6.2.3.1）。simple-matter 1544fae はタグ 9、10 を見ず、DAC をいつも CD の `vendor_id` と照合していた。third_party/simple-matter-1544fae に写して直し、`[patch]` で差し替えた（後に本体へ入り、9ac954e で写しを外した）。
   - 失敗の理由を `matter.pair_failed`（`CommissionError` の名前）に出す。失敗したコミッショニングのトランザクションとハンドシェイクを解く（`abort_op`、`abort_handshake`）。attestation で失敗した後、すべての購読が `why=start` で始められなくなっていた。
   - 実機: 直した後、node 4 として 31 秒で入った（PASE、attestation、Wi-Fi の設定、CASE）。ほかの購読は切れなかった。
 - **Lapis を HA にも入れ、mtdash に出した**:
@@ -495,6 +495,7 @@
   - 直し: セッションを 6 → 12。始められなかったら `abort_op` でトランザクションと exchange を解く。
   - simple-matter（写し）の `ImClient::on_tick`: 同じ tick で切れた購読の SubscriptionLost が最後の 1 件しか残らず、ほかの購読は Tab5 から見て生きたままだった（Light と Door が 44 分値を出さなかった）。切れた購読を積むようにし、`poll` の後にもイベントを取り出す。購読の表を 4 → 8（AirQ と Lapis の 0x89 は、Tab5 自身の表が 4 で埋まっていたためだった可能性が高い）。写しの lib の試験 625 件は通った。
   - 実機: セッションは 8/12 を使う。Light の toggle 2 回とも status 0、そのたびに OnOff のレポート（true、false）が届いた。
+- **simple-matter を 9ac954e に**: 本体に dac_origin（b4a3dc9）、SubscriptionLost を積む・購読の表 8（7844561）、IM の start_* が送信で失敗したらトランザクションと exchange を解く（9ac954e）が入った。matter・mtbench・mtport の rev を上げ、third_party の写しと `[patch]` を外した。実機で 4 台の購読と Light の toggle（2 回ともレポート）を確かめた。virt・p4emu・abi が通った。
 - **残り**:
   - Tab5 から AirQ の fdde のアドレスへの IPv6（PASE、CASE）に返事がない（原因は不明）。PC からの ping は届く。AirQ の IPv4 が変わると、つなぎ直せないかもしれない。
   - AirQ は 1 fabric あたり 3 本までしか購読を受けない（IM 0x89。上のとおり、今は 1 本にまとめている）。Tab5 を起動し直すと、古い購読が切れるまでの間、新しい購読が断られる（`watch` は試し続ける）。
