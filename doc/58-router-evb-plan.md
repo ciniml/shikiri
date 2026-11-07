@@ -573,7 +573,11 @@
   - **SD**: `sd.absent`（応答なし）。カードの有無は未確認。そのため `netctl`（`NET.RUL` なし）、`matter`（SD のストアなし）、`term`（画面なし）は見張りがあきらめた（v1.5.2 と同じ形）。
   - **Ethernet**: PHY はアドレス 1（ID 0x0243/0x0C54）、100 Mbit/s 全二重。PC の USB Ethernet（192.168.10.1/24、DHCP なし）につながっていた。`run netctl 10`（eth0 を 192.168.10.254/24 に）の後、PC からの ping は 10 回中 10 回、0.3〜0.6 ms。試験の後は `reboot`。
   - **Wi-Fi**: C6 は SDIO で応え（chip_id 13）、`iotap` に 3 回目でつながった（1 回目 reason 202、2 回目 205、authmode 7）。DHCP で 192.168.2.112/24。`wifi.bt_failed step=init` と `request_failed esp_err=12290` は v1.5.2 の出荷時の C6 と同じ。
-  - **残り**: SD、C6 のファームウェアの更新（v1.5.2 と同じく esp_hosted 2.12.7 へ）、USJ からのリセットで ROM が止まる原因。
+  - **SD**（利用者がカードを挿した後）: SK32G（32 GB）が 4 ビット、40 MHz で応え、`fs.ready`、`init` は `T5OS/START.CFG` を読んだ。`netctl` は守りの規則（`rules=6`）、`matter` は SD のストアで起動した。
+  - **C6 のファームウェア**: R5 その 8 と同じ像（esp_hosted 2.12.7、1,225,232 バイト）を同じ手順（PC の `http.server`、`netctl 10`、`run c6ota 3232238081 8070`）で OTA した。12 秒で書け、`wifi.ota_end ok=true`。EN で起動し直すと `wlan.fw_version 2.12.7`、`wifi.bt_started`、`iotap` に 2 回目でつながり DHCP。
+    - 試験の後の `reboot` を、スクリプトの誤り（trap の中の引数）で飛ばした。気づいてすぐ起動し直した（`netctl 10` の間は数分）。
+  - **probe の `--reset` を使わない**: t5log の `--reset` の後、少しして MWDT のコアリセットになり、ROM が USJ のときと同じキャッシュの書き戻しで止まった。EVB v1.6.0 の起動し直しは、外付けの USB-UART の EN か、カーネルの `reboot` で行う。
+  - **残り**: コアリセット（USJ、MWDT）の後に ROM が止まる原因。
 - **R5 その 10: ルーターを替えたら Tab5 がつなぎ直さなかった**（2026-11-07）:
   - 症状: デモの前（10:05 ごろ）に matter-test のルーターを替えた後、Tab5 がネットワークに戻らなかった。`wifi` は動いていたが、40 秒の間イベントを 1 つも出さなかった。
   - 原因: `wifi` は、C6 から切断のイベントが来たときだけ次の再接続を予約する（1 秒を 2 回、その後 5 秒ごと、回数の上限はない）。ルーターがない間の再接続の要求に C6 が何も返さず、次の予約が入らないまま止まった。
