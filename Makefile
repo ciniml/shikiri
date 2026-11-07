@@ -367,7 +367,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 
@@ -640,6 +640,19 @@ p4emu-run-26:
 	    --expect-event matter.report --expect-event matter.event \
 	    --expect-event matter.ep_attached --expect-event mtep.set --expect-event matter.ep_onoff \
 	    --expect-event mtep.state \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-27:
+	@# Seats (doc/60 F1): two paints from the host. The first is in front;
+	@# the second, not its child, goes behind. The tap reaches the front one
+	@# only; after `focus` the capture shows the second's screen: its white
+	@# corner, but the background where the tap was (it never saw it).
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run paint 0 20" --ctl "wait-ms 1500" --ctl "run paint 0 20" --ctl "wait-ms 1500" \
+	    --ctl "serial tap 600 400" --ctl "wait-ms 500" --ctl "focus 102" --ctl "wait-ms 200" --ctl "serial capture" \
+	    --capture-out $(BUILD)/emu-capture-seats.png --expect-pixel 600,400,18c4 --expect-pixel 20,20,ffff \
+	    --expect-event paint.ready --expect-event screen.seat_behind --expect-event screen.focus \
+	    --expect-event touch.injected --expect-event capture.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

@@ -1,7 +1,9 @@
 //! The screen as apps see it (M6c, doc/17 §6): the orientation, the touch
 //! points (read by the kernel while someone has `touch` open, or given by
-//! the host with `tap`/`swipe`, doc/54) and who owns the display. The
-//! hardware behind it is the platform's.
+//! the host with `tap`/`swipe`, doc/54) and the seats (doc/60): each
+//! process with `display` open has a seat and a framebuffer of its own, the
+//! front seat's is shown, and the keyboard and touch go to the front seat's
+//! process. The hardware behind it is the platform's.
 
 use t5_abi::{Error, event};
 
@@ -110,6 +112,7 @@ pub fn poll() {
             t.points[0] = p;
             t.seq = t.seq.wrapping_add(1);
         }
+        release_hold();
         return;
     }
     let mut raw = [TouchPoint::default(); 5];
@@ -131,6 +134,16 @@ pub fn poll() {
     if n != t.n || pts[..n] != t.points[..n] {
         t.n = n;
         t.points = pts;
+        t.seq = t.seq.wrapping_add(1);
+    }
+    release_hold();
+}
+
+/// Lifts the hold of a seat change (doc/60 §4) once no finger is down.
+fn release_hold() {
+    let t = touch();
+    if t.n == 0 && seats().hold_touch {
+        seats().hold_touch = false;
         t.seq = t.seq.wrapping_add(1);
     }
 }
@@ -167,34 +180,53 @@ pub fn inject(x0: u32, y0: u32, x1: u32, y1: u32, ms: u32) -> Result<u32, &'stat
 
 /// A handle on `touch`.
 pub struct TouchHandle {
+    pid: u32,
     seen: u32,
+    /// The number of points last reported: a process that loses the input
+    /// is told once that every finger is up (doc/60 §4).
+    reported: usize,
 }
 
 impl TouchHandle {
-    pub fn open() -> Result<TouchHandle, Error> {
+    pub fn open(pid: u32) -> Result<TouchHandle, Error> {
         if Current::touch_read(&mut [TouchPoint::default(); 5]).is_err() {
             return Err(Error::NoDevice);
         }
         let t = touch();
         t.users += 1;
-        Ok(TouchHandle { seen: t.seq })
+        Ok(TouchHandle { pid, seen: t.seq, reported: 0 })
+    }
+
+    /// The points this process sees: none while the input is another's or
+    /// held after a seat change.
+    fn visible(&self) -> usize {
+        if input_for(self.pid) && !seats().hold_touch { touch().n } else { 0 }
     }
 
     /// The `wait` event: CHANGED with the number of points.
     pub fn poll(&mut self) -> Option<(usize, usize)> {
         let t = touch();
-        (t.seq != self.seen).then(|| {
-            self.seen = t.seq;
-            (t5_abi::touch::CHANGED, t.n)
-        })
+        if t.seq == self.seen {
+            return None;
+        }
+        self.seen = t.seq;
+        let n = self.visible();
+        // Nothing to tell someone who sees no fingers and was told so.
+        if n == 0 && self.reported == 0 {
+            return None;
+        }
+        self.reported = n;
+        Some((t5_abi::touch::CHANGED, n))
     }
 
     /// The current points, `POINT_SIZE` bytes each.
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, Error> {
         let t = touch();
         self.seen = t.seq;
+        let n = self.visible();
+        self.reported = n;
         let mut len = 0;
-        for p in &t.points[..t.n] {
+        for p in &t.points[..n] {
             let Some(o) = out.get_mut(len..len + t5_abi::touch::POINT_SIZE) else { break };
             for (k, v) in [p.x, p.y, p.id, p.size].iter().enumerate() {
                 o[2 * k..2 * k + 2].copy_from_slice(&v.to_le_bytes());
@@ -215,32 +247,116 @@ impl Drop for TouchHandle {
     }
 }
 
-// ---- display ----
+// ---- seats and the display (doc/60) ----
 
-static mut DISPLAY_OWNED: bool = false;
+/// Seats: as many framebuffers as the display's memory holds (doc/60 §4).
+pub const SEATS: usize = 2;
 
-/// The handle on `display`; only one exists at a time.
+struct Seats {
+    /// The process in each seat.
+    pid: [Option<u32>; SEATS],
+    front: Option<usize>,
+    /// After a change, the new front sees no touch until every finger is up.
+    hold_touch: bool,
+}
+
+static mut SEAT: Seats = Seats { pid: [None; SEATS], front: None, hold_touch: false };
+
+fn seats() -> &'static mut Seats {
+    // Under the kernel lock.
+    unsafe { &mut *core::ptr::addr_of_mut!(SEAT) }
+}
+
+/// Seat `i`'s framebuffer.
+fn seat_fb(i: usize) -> Option<usize> {
+    Current::display_buffer().map(|(fb, len)| fb + i * len)
+}
+
+/// The framebuffer shown (`capture` sends it).
+pub fn shown_fb() -> Option<usize> {
+    seat_fb(seats().front.unwrap_or(0))
+}
+
+/// Whether the keyboard and touch go to `pid`: the front seat's process,
+/// or anyone while no process has a seat.
+pub fn input_for(pid: u32) -> bool {
+    let st = seats();
+    match st.front {
+        Some(i) => st.pid[i] == Some(pid),
+        None => st.pid.iter().all(Option::is_none),
+    }
+}
+
+/// Puts seat `to` in front (or none): shows its framebuffer, tells the
+/// process leaving the front that every key and finger is up.
+fn set_front(to: Option<usize>, reason: &'static str) {
+    let st = seats();
+    if st.front == to {
+        return;
+    }
+    let from = st.front.and_then(|i| st.pid[i]);
+    st.front = to;
+    if let Some(fb) = to.and_then(seat_fb) {
+        Current::display_show(fb);
+    }
+    if let Some(p) = from {
+        crate::kbd::released(p);
+    }
+    let t = touch();
+    st.hold_touch = t.n > 0;
+    t.seq = t.seq.wrapping_add(1);
+    event!(Info, "screen.focus", from = from.unwrap_or(0), to = to.and_then(|i| st.pid[i]).unwrap_or(0), reason = reason);
+}
+
+/// The `focus` command: puts the seat of `pid` in front.
+pub fn focus(pid: u32) -> Result<u32, &'static str> {
+    let st = seats();
+    let i = st.pid.iter().position(|&p| p == Some(pid)).ok_or("no seat for that process")?;
+    set_front(Some(i), "host");
+    Ok(pid)
+}
+
+/// A handle on `display`: the process's seat.
 pub struct DisplayHandle {
+    seat: usize,
     seen_frames: u32,
     /// 2D requests (finished, failed) the process has been told about.
     seen_done: (u32, u32),
 }
 
 impl DisplayHandle {
-    pub fn open() -> Result<DisplayHandle, Error> {
-        if Current::display_buffer().is_none() {
-            return Err(Error::NoDevice);
-        }
-        if unsafe { DISPLAY_OWNED } {
+    pub fn open(pid: u32) -> Result<DisplayHandle, Error> {
+        let (fb, len) = Current::display_buffer().ok_or(Error::NoDevice)?;
+        let st = seats();
+        // One seat per process.
+        if st.pid.contains(&Some(pid)) {
             return Err(Error::Busy);
         }
-        unsafe { DISPLAY_OWNED = true };
-        Ok(DisplayHandle { seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
+        let seat = st.pid.iter().position(Option::is_none).ok_or(Error::Busy)?;
+        st.pid[seat] = Some(pid);
+        // Not the previous holder's picture.
+        let base = fb + seat * len;
+        unsafe { core::ptr::write_bytes(base as *mut u8, 0, len) };
+        Current::display_flush(base, len);
+        // In front if no one is, or if the front process started this one
+        // (`term` -> `shell` -> `run mtdash`); else behind.
+        let front_pid = st.front.and_then(|i| st.pid[i]);
+        match front_pid {
+            None => set_front(Some(seat), "first"),
+            Some(f) if crate::ident::descends_from(pid, f) => set_front(Some(seat), "child"),
+            Some(_) => event!(Info, "screen.seat_behind", pid = pid, front = front_pid.unwrap_or(0)),
+        }
+        Ok(DisplayHandle { seat, seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
+    }
+
+    fn fb(&self) -> Result<usize, Error> {
+        seat_fb(self.seat).ok_or(Error::NoDevice)
     }
 
     pub fn ctl(&mut self, op: usize, arg: u64) -> Result<usize, Error> {
         use t5_abi::display::*;
-        let (fb, len) = Current::display_buffer().ok_or(Error::NoDevice)?;
+        let (_, len) = Current::display_buffer().ok_or(Error::NoDevice)?;
+        let fb = self.fb()?;
         let (w, h) = Current::display_size().ok_or(Error::NoDevice)?;
         match op {
             INFO => Ok(w as usize | (h as usize) << 16),
@@ -260,7 +376,8 @@ impl DisplayHandle {
         }
     }
 
-    /// A 2D request (`t5_abi::display::op`, doc/44): starts it.
+    /// A 2D request (`t5_abi::display::op`, doc/44) on the seat's
+    /// framebuffer: starts it.
     pub fn write(&mut self, req: &[u8]) -> Result<usize, Error> {
         use t5_abi::display::op;
         let mut v = [0u16; 7];
@@ -276,7 +393,8 @@ impl DisplayHandle {
         if Current::gfx_busy() {
             return Err(Error::Busy);
         }
-        Current::gfx_start(gfx).map_err(|why| {
+        let fb = self.fb()?;
+        Current::gfx_start(gfx, fb).map_err(|why| {
             event!(Debug, "display.gfx_refused", error = why);
             Error::Invalid
         })?;
@@ -303,6 +421,18 @@ impl DisplayHandle {
 
 impl Drop for DisplayHandle {
     fn drop(&mut self) {
-        unsafe { DISPLAY_OWNED = false };
+        let st = seats();
+        let pid = st.pid[self.seat].take();
+        if st.front == Some(self.seat) {
+            // The other seat, if someone holds it.
+            let next = st.pid.iter().position(Option::is_some);
+            // `set_front` names who left; the seat is already empty.
+            st.front = None;
+            if next.is_some() {
+                set_front(next, "closed");
+            } else {
+                event!(Info, "screen.focus", from = pid.unwrap_or(0), to = 0u32, reason = "closed");
+            }
+        }
     }
 }

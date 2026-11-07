@@ -633,6 +633,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::I2cScan => Current::i2c_scan(),
         Command::Display => Current::display_stats(),
         Command::Rotate { degrees } => screen::set_orientation(degrees),
+        Command::Focus { pid } => screen::focus(pid),
         Command::Capture => capture::start(),
         Command::TouchInject { x0, y0, x1, y1, ms } => screen::inject(x0, y0, x1, y1, ms),
         Command::SdInfo => Current::sd_info(),

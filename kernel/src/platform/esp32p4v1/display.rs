@@ -222,7 +222,10 @@ const RING: usize = 16;
 static mut LLI: [Lli; RING] = [const { Lli([0; 16]) }; RING];
 
 struct State {
+    /// The display's memory (the first seat's framebuffer).
     fb: usize,
+    /// The framebuffer the list items point at (doc/60).
+    shown: usize,
     frames: u32,
     underruns: u32,
     /// Times the DMA ran into an invalid item and was restarted.
@@ -681,7 +684,7 @@ pub fn init(panel: Panel, fb: usize) -> Result<(), &'static str> {
     event!(Info, "display.panel_ready");
     test_pattern(fb);
     unsafe {
-        *core::ptr::addr_of_mut!(STATE) = Some(State { fb, frames: 0, underruns: 0, restarts: 0, started: Esp32p4v1::now() });
+        *core::ptr::addr_of_mut!(STATE) = Some(State { fb, shown: fb, frames: 0, underruns: 0, restarts: 0, started: Esp32p4v1::now() });
         wr(INTMTX_CORE0_BASE + 4 * GDMA_SOURCE, IRQ as u32);
         wr(CLIC_CTRL_BASE + 4 * IRQ, CLIC_CTRL);
     }
@@ -725,7 +728,7 @@ pub fn service() {
         // Too late after all: the channel waits at an invalid item.
         s.restarts = s.restarts.wrapping_add(1);
         stop();
-        start(s.fb);
+        start(s.shown);
     } else {
         revalidate();
     }
@@ -776,7 +779,17 @@ pub fn pause() -> bool {
 
 pub fn resume() {
     if let Some(s) = state() {
-        start(s.fb);
+        start(s.shown);
+    }
+}
+
+/// Points every list item at the framebuffer `fb` (doc/60 §4): the DMA
+/// sends it from the next item on, the frame in flight ends as it began.
+pub fn show(fb: usize) {
+    let Some(s) = state() else { return };
+    s.shown = fb;
+    for i in 0..RING {
+        unsafe { core::ptr::write_volatile(lli_uncached(i), fb as u32) };
     }
 }
 

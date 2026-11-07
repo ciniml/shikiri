@@ -99,8 +99,8 @@ impl Object {
     fn open(name: &[u8], pid: u32) -> Result<(Object, usize), Error> {
         match name {
             n if n == timer::NAME.as_bytes() => Ok((Object::Timer(Timer::default()), rights::CTL | rights::WAIT)),
-            n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open()?), rights::CTL | rights::WAIT | rights::WRITE)),
-            n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open()?), rights::READ | rights::WAIT)),
+            n if n == display::NAME.as_bytes() => Ok((Object::Display(DisplayHandle::open(pid)?), rights::CTL | rights::WAIT | rights::WRITE)),
+            n if n == touch::NAME.as_bytes() => Ok((Object::Touch(TouchHandle::open(pid)?), rights::READ | rights::WAIT)),
             n if n == netdev::HOST.as_bytes() => {
                 Ok((Object::NetDev(crate::hostlink::NetDev::open()?), rights::READ | rights::WRITE | rights::WAIT))
             }
@@ -120,7 +120,7 @@ impl Object {
             )),
             n if n == bt::HCI.as_bytes() => Ok((Object::BtHci(crate::wlan::BtHci::open()?), rights::READ | rights::WRITE | rights::WAIT)),
             n if n == sd::NAME.as_bytes() => Ok((Object::Sd(SdHandle::open()?), rights::READ | rights::WRITE | rights::CTL)),
-            n if n == kbd::NAME.as_bytes() => Ok((Object::Kbd(crate::kbd::KbdHandle::open()?), rights::READ | rights::WAIT)),
+            n if n == kbd::NAME.as_bytes() => Ok((Object::Kbd(crate::kbd::KbdHandle::open(pid)?), rights::READ | rights::WAIT)),
             n if n == spawn::NAME.as_bytes() => {
                 let any = crate::ident::get(pid).is_some_and(|e| t5_abi::t5a::permits_all(e.permissions(), n));
                 Ok((Object::Spawn(crate::spawn::SpawnHandle { pid, any, restart: false }), rights::WRITE | rights::CTL))

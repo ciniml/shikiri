@@ -173,6 +173,9 @@ pub trait Platform {
     /// Makes `len` bytes of the framebuffer from `addr` visible to the
     /// display (writes them back from the cache).
     fn display_flush(_addr: usize, _len: usize) {}
+    /// Shows the framebuffer at `fb` (`display_buffer`'s size) from the next
+    /// frame on: the front seat's (doc/60 §4).
+    fn display_show(_fb: usize) {}
     /// Frames sent to the panel so far.
     fn display_frames() -> u32 {
         0
@@ -209,8 +212,9 @@ pub trait Platform {
         }
         Ok(buf as u32)
     }
-    /// Starts a 2D request on the display's framebuffer (doc/44).
-    fn gfx_start(_req: Gfx) -> Result<(), &'static str> {
+    /// Starts a 2D request on the framebuffer at `fb` (doc/44; a seat's,
+    /// doc/60).
+    fn gfx_start(_req: Gfx, _fb: usize) -> Result<(), &'static str> {
         Err("no 2d hardware")
     }
     /// 2D requests finished so far, and how many of them failed.

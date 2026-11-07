@@ -919,8 +919,8 @@ impl Platform for Esp32p4v1 {
         membench::ppa_bench(buf)
     }
 
-    fn gfx_start(req: super::Gfx) -> Result<(), &'static str> {
-        let fb = display::buffer().ok_or("no display")?;
+    fn gfx_start(req: super::Gfx, fb: usize) -> Result<(), &'static str> {
+        display::buffer().ok_or("no display")?;
         let (w, h) = (display::WIDTH as u32, display::HEIGHT as u32);
         let at = |x: u16, y: u16| ppa::Block { base: fb, width: w, height: h, x: x as u32, y: y as u32 };
         // Whole rows: the rows the hardware reads are written back; the
@@ -1137,6 +1137,10 @@ impl Platform for Esp32p4v1 {
 
     fn display_flush(addr: usize, len: usize) {
         display::flush(addr, len);
+    }
+
+    fn display_show(fb: usize) {
+        display::show(fb);
     }
 
     fn display_frames() -> u32 {

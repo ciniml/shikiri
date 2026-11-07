@@ -54,7 +54,8 @@ pub fn start() -> Result<u32, &'static str> {
     if c.active {
         return Err("capture in progress");
     }
-    let (fb, _) = Current::display_buffer().ok_or("no display")?;
+    // The front seat's (doc/60).
+    let fb = crate::screen::shown_fb().ok_or("no display")?;
     let size = Current::display_size().ok_or("no display")?;
     c.id = c.id.wrapping_add(1);
     c.active = true;

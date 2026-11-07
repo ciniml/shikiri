@@ -75,7 +75,7 @@ fn paint(seconds: u64) -> Result<(), u32> {
 
 fn self_test() -> Result<(), u32> {
     let mut d = Display::open().map_err(|_| 10u32)?;
-    // One owner at a time.
+    // One seat per process (doc/60).
     check(Handle::open(display::NAME, rights::CTL | rights::WAIT).err() == Some(Error::Busy), 11)?;
     check((d.fb_w, d.fb_h) == (720, 1280), 12)?;
     // The mapped framebuffer is writable: a grey band along the top.

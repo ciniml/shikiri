@@ -97,6 +97,9 @@ pub mod cmd {
     /// `u32 pid | u32 partition` (`t5_abi::cpu`): moves a running process
     /// to another partition, for experiments (doc/57; QNX's `aps join`).
     pub const PARTITION: u8 = 35;
+    /// `u32 pid`: puts that process's seat (its `display`) in front
+    /// (doc/60).
+    pub const FOCUS: u8 = 36;
 }
 
 /// `Command::Prof` operations.
@@ -154,6 +157,7 @@ pub enum Command<'a> {
     TouchInject { x0: u32, y0: u32, x1: u32, y1: u32, ms: u32 },
     Partitions { on: bool },
     Partition { pid: u32, partition: u32 },
+    Focus { pid: u32 },
 }
 
 impl Command<'_> {
@@ -193,6 +197,7 @@ impl Command<'_> {
             Command::Capture => "capture",
             Command::Partitions { .. } => "partitions",
             Command::Partition { .. } => "partition",
+            Command::Focus { .. } => "focus",
             Command::TouchInject { .. } => "touch_inject",
         }
     }
@@ -220,6 +225,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::CAPTURE if args.is_empty() => Command::Capture,
         cmd::PARTITIONS if args.len() == 4 => Command::Partitions { on: u32_at(args, 0)? != 0 },
         cmd::PARTITION if args.len() == 8 => Command::Partition { pid: u32_at(args, 0)?, partition: u32_at(args, 4)? },
+        cmd::FOCUS if args.len() == 4 => Command::Focus { pid: u32_at(args, 0)? },
         cmd::TOUCH_INJECT if args.len() == 20 => Command::TouchInject {
             x0: u32_at(args, 0)?,
             y0: u32_at(args, 4)?,
@@ -311,6 +317,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Capture => put(&[cmd::CAPTURE])?,
         Command::Partitions { .. } => put(&[cmd::PARTITIONS])?,
         Command::Partition { .. } => put(&[cmd::PARTITION])?,
+        Command::Focus { .. } => put(&[cmd::FOCUS])?,
         Command::TouchInject { .. } => put(&[cmd::TOUCH_INJECT])?,
     }
     put(&id.to_le_bytes())?;
@@ -323,6 +330,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Clock { mhz } => put(&mhz.to_le_bytes())?,
         Command::Touch { seconds } => put(&seconds.to_le_bytes())?,
         Command::Rotate { degrees } => put(&degrees.to_le_bytes())?,
+        Command::Focus { pid } => put(&pid.to_le_bytes())?,
         Command::SdRead { lba } => put(&lba.to_le_bytes())?,
         Command::Pvt { on } => put(&(*on as u32).to_le_bytes())?,
         Command::Entropy { on } | Command::Partitions { on } => put(&(*on as u32).to_le_bytes())?,
@@ -438,6 +446,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
             Some("pause") => Command::Membench { pause: true },
             _ => return Err("membench [pause]"),
         },
+        Some("focus") => Command::Focus { pid: num(Some(w.next().ok_or("focus PID")?))? },
         Some("partition") => {
             let pid = num(Some(w.next().ok_or("partition PID system|net|apps")?))?;
             let name = w.next().ok_or("partition PID system|net|apps")?;
@@ -471,7 +480,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
                  flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench | rngdump [raw [US]] | entropy on|off | \
-                 capture | tap X Y [MS] | swipe X0 Y0 X1 Y1 [MS] | partitions on|off | partition PID system|net|apps");
+                 capture | tap X Y [MS] | swipe X0 Y0 X1 Y1 [MS] | partitions on|off | partition PID system|net|apps | focus PID");
         }
     };
     if w.next().is_some() {
@@ -500,7 +509,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "nvserase", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3", "capture", "tap 10 20", "swipe 1 2 3 4 500", "partitions off", "partitions on", "partition 105 net"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "nvserase", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3", "capture", "tap 10 20", "swipe 1 2 3 4 500", "partitions off", "partitions on", "partition 105 net", "focus 108"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();

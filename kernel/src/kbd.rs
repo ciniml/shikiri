@@ -1,5 +1,6 @@
 //! `kbd` (doc/39): the keyboard's events, read by the kernel every
-//! service round while a process has it open.
+//! service round while a process has it open. While processes hold seats
+//! (doc/60), the events reach the holder only when its seat is in front.
 
 use t5_abi::{Error, event, kbd};
 
@@ -7,13 +8,15 @@ use crate::platform::{Current, Platform};
 
 struct Queue {
     open: bool,
+    /// The process that has it open.
+    pid: u32,
     events: [[u8; kbd::EVENT_SIZE]; kbd::QUEUE],
     head: usize,
     count: usize,
     dropped: u32,
 }
 
-static mut Q: Queue = Queue { open: false, events: [[0; kbd::EVENT_SIZE]; kbd::QUEUE], head: 0, count: 0, dropped: 0 };
+static mut Q: Queue = Queue { open: false, pid: 0, events: [[0; kbd::EVENT_SIZE]; kbd::QUEUE], head: 0, count: 0, dropped: 0 };
 
 fn q() -> &'static mut Queue {
     // Under the kernel lock.
@@ -26,26 +29,44 @@ pub fn poll() {
     if !q.open {
         return;
     }
+    let to_owner = crate::screen::input_for(q.pid);
     let _ = Current::kbd_poll(&mut |modifier, usage| {
-        if q.count == kbd::QUEUE {
-            q.head = (q.head + 1) % kbd::QUEUE;
-            q.count -= 1;
-            q.dropped += 1;
+        // Read either way: another seat's keys are not kept for later.
+        if !to_owner {
+            return;
         }
-        q.events[(q.head + q.count) % kbd::QUEUE] = [modifier, usage];
-        q.count += 1;
+        push(q, [modifier, usage]);
     });
+}
+
+fn push(q: &mut Queue, ev: [u8; kbd::EVENT_SIZE]) {
+    if q.count == kbd::QUEUE {
+        q.head = (q.head + 1) % kbd::QUEUE;
+        q.count -= 1;
+        q.dropped += 1;
+    }
+    q.events[(q.head + q.count) % kbd::QUEUE] = ev;
+    q.count += 1;
+}
+
+/// `pid`'s seat left the front (doc/60 §4): every key is up for it, so that
+/// no key repeats while it is behind.
+pub fn released(pid: u32) {
+    let q = q();
+    if q.open && q.pid == pid {
+        push(q, [0, 0]);
+    }
 }
 
 pub struct KbdHandle;
 
 impl KbdHandle {
-    pub fn open() -> Result<KbdHandle, Error> {
+    pub fn open(pid: u32) -> Result<KbdHandle, Error> {
         let q = q();
         if q.open {
             return Err(Error::Busy);
         }
-        *q = Queue { open: true, events: q.events, head: 0, count: 0, dropped: 0 };
+        *q = Queue { open: true, pid, events: q.events, head: 0, count: 0, dropped: 0 };
         Ok(KbdHandle)
     }
 

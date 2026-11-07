@@ -98,7 +98,7 @@ DSI での ID の読み出し（ILI9881C: page1 の 00/01 = 98 81、ST7123: F4 =
 
 ## 11. M6c の実装の記録（2026-10-31）
 - ABI 0.7: `t5_abi::display`（`INFO`、`MAP`、`FLUSH`、`ORIENTATION`、wait の `FRAME`）と `t5_abi::touch`（`read` で 1 点 8 バイト × 最大 5、wait の `CHANGED`）。制御コマンド `rotate 0|90|180|270`。
-- カーネル: `screen.rs`（向き、タッチの状態、display の持ち主）。`display` を開けるのは 1 つだけ（2 つ目は `Busy`）。`ctl(MAP)` で、そのプロセスの PMP にフレームバッファの RW の領域（エントリ 5〜6 の TOR）を足す。ハンドルを閉じるかプロセスが終わると外れる。`touch` を開いているプロセスがいる間だけ、カーネルは 16ms ごとにタッチを読み、向きに合わせた座標にして渡す。
+- カーネル: `screen.rs`（向き、タッチの状態、display の持ち主）。`display` を開けるのは 1 つだけ（2 つ目は `Busy`。2026-11-08 から席が 2 つ、doc/60）。`ctl(MAP)` で、そのプロセスの PMP にフレームバッファの RW の領域（エントリ 5〜6 の TOR）を足す。ハンドルを閉じるかプロセスが終わると外れる。`touch` を開いているプロセスがいる間だけ、カーネルは 16ms ごとにタッチを読み、向きに合わせた座標にして渡す。
 - `t5-rt`: `Display`（`open` で開いて写像し、`put`/`rect`/`fill` はユーザから見た座標で描く。向きの変換はタッチの逆）、`Touch`、`rgb`。
 - アプリ `paint`（`--permit display --permit touch`）: モード 0 は、上端（ユーザから見た上）に青い帯と左上の白い四角を描き、指の下に四角を描く。モード 1 は自己試験（2 つ目の open が `Busy`、写像したフレームバッファに書ける、`FLUSH` の範囲の検査、`FRAME` が 3 つ来る、`touch` が読める、`touch` への `write` は `Denied`）。
 - 自己試験 M6c: `paint` の自己試験と、`display` を開いていない `fault` がフレームバッファに書くと store access fault になること。表示がない（QEMU）か `paint` がストアにないときは飛ばす。
