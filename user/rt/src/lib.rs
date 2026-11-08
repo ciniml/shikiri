@@ -844,8 +844,23 @@ impl Files {
     }
 
     /// Calls `each(name, size, is_dir)` for the entries of directory `path`
-    /// ("" = root); returns how many there are.
+    /// ("" = root); returns how many there are. Long names where there are
+    /// some (doc/63), else the 8.3 names.
     pub fn list(&self, path: &str, mut each: impl FnMut(&str, u32, bool)) -> Result<u32, FsError> {
+        match self.call(fs::op::LIST_LONG, 0, 0, 0, path) {
+            Ok((n, total)) => {
+                for k in 0..n as usize {
+                    let rec = &self.slice[k * fs::LONG_ENTRY_SIZE..(k + 1) * fs::LONG_ENTRY_SIZE];
+                    let name_len = rec[..fs::LONG_NAME].iter().position(|&b| b == 0).unwrap_or(fs::LONG_NAME);
+                    let name = core::str::from_utf8(&rec[..name_len]).unwrap_or("?");
+                    each(name, fs::u32_at(rec, fs::LONG_NAME), rec[fs::LONG_NAME + 4] & fs::ATTR_DIR != 0);
+                }
+                return Ok(total);
+            }
+            // An older service.
+            Err(FsError::Status(fs::status::BAD_REQUEST)) => {}
+            Err(e) => return Err(e),
+        }
         let (n, total) = self.call(fs::op::LIST, 0, 0, 0, path)?;
         for k in 0..n as usize {
             let rec = &self.slice[k * fs::ENTRY_SIZE..(k + 1) * fs::ENTRY_SIZE];

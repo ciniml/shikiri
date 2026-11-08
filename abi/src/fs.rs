@@ -3,7 +3,11 @@
 //! which file data and directory listings travel. Requests and replies are
 //! channel messages:
 //!
-//! - request: `u8 op | u8 flags | u16 0 | u32 a | u32 b | path (UTF-8, '/'-separated, 8.3 names)`
+//! - request: `u8 op | u8 flags | u16 0 | u32 a | u32 b | path (UTF-8, '/'-separated)`
+//!
+//! A path's parts are 8.3 names or long names (doc/63), matched without
+//! regard to (ASCII) case. Long names can be used for what exists already;
+//! files and directories are made with 8.3 names only (`BAD_NAME`).
 //! - reply: `u32 status | u32 v0 | u32 v1`
 //!
 //! | op | a | b | path | v0 / v1 |
@@ -14,6 +18,7 @@
 //! | SEEK | file id | offset | – | – |
 //! | CLOSE | file id | – | – | – |
 //! | LIST | – | – | directory ("" = root) | entries written (`ENTRY_SIZE` each) / entries in all |
+//! | LIST_LONG | – | – | directory | entries written (`LONG_ENTRY_SIZE` each) / entries in all |
 //! | DELETE | – | – | file | – |
 //! | MKDIR | – | – | directory | – |
 //!
@@ -39,6 +44,9 @@ pub mod op {
     pub const LIST: u8 = 6;
     pub const DELETE: u8 = 7;
     pub const MKDIR: u8 = 8;
+    /// LIST with long names (doc/63). An older service answers
+    /// `BAD_REQUEST`: use LIST.
+    pub const LIST_LONG: u8 = 9;
 }
 
 /// OPEN flags.
@@ -72,6 +80,12 @@ pub mod status {
 pub const ENTRY_SIZE: usize = 20;
 pub const ENTRY_NAME: usize = 13;
 pub const ATTR_DIR: u8 = 0x10;
+
+/// One LIST_LONG entry: name (NUL-padded UTF-8: the long name if there is
+/// one, cut at `LONG_NAME` bytes on a character boundary, else "NAME.EXT"),
+/// u32 size, attributes, 3 bytes 0.
+pub const LONG_ENTRY_SIZE: usize = 128;
+pub const LONG_NAME: usize = 120;
 
 pub fn request(op: u8, flags: u8, a: u32, b: u32, path: &str, out: &mut [u8; crate::chan::MSG_MAX]) -> Option<usize> {
     let n = REQUEST_HEADER + path.len();

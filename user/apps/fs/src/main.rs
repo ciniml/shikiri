@@ -7,14 +7,18 @@
 //! and replies are channel messages (`t5_abi::fs`). Each client may use
 //! its own folder and the paths its grants name (doc/52, `t5_abi::fs`);
 //! the rest is refused (`fs.denied`). Open files belong to the client that
-//! opened them.
+//! opened them. Long names (doc/63) work for what exists: each part of a
+//! path is looked up by its long or 8.3 name, either case, and used by its
+//! 8.3 name; new names must be 8.3.
 //!
 //! Built with `--permit sd --permit shm --permit listen:fs`.
 
 use core::cell::RefCell;
 use core::ops::ControlFlow;
 
-use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx, Mode, RawDirectory, RawFile, RawVolume, TimeSource, Timestamp, VolumeIdx, VolumeManager};
+use embedded_sdmmc::{
+    Block, BlockCount, BlockDevice, BlockIdx, LfnBuffer, Mode, RawDirectory, RawFile, RawVolume, TimeSource, Timestamp, VolumeIdx, VolumeManager,
+};
 use t5_rt::{Channel, Error, FOREVER, Grants, Handle, Listener, Shm, chan, event, rights, sd, t5a, wait_raw};
 use t5_rt::fs::{self as proto, flag, op, status};
 
@@ -238,27 +242,89 @@ struct Service<'a> {
     files: [Option<Open>; FILES],
 }
 
+/// An entry's 8.3 name, as embedded-sdmmc takes it ("NAME.EXT").
+#[derive(Clone, Copy)]
+struct Short {
+    buf: [u8; 12],
+    len: usize,
+}
+
+impl Short {
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+/// The last name `parent` found: an existing entry's 8.3 name, or the
+/// path's last part as given (its length; it ends the path).
+enum Name {
+    Short(Short),
+    Given(usize),
+}
+
+impl Name {
+    fn as_str<'a>(&'a self, path: &'a str) -> &'a str {
+        match self {
+            Name::Short(s) => s.as_str(),
+            Name::Given(n) => {
+                let path = path.trim_matches('/');
+                &path[path.len() - n..]
+            }
+        }
+    }
+}
+
+/// A buffer for any long name (255 UTF-16 units, 3 bytes each at most).
+const LFN_BYTES: usize = 255 * 3;
+
 impl Service<'_> {
+    /// The 8.3 name of the entry in `dir` called `part` (doc/63): its long
+    /// name or its 8.3 name, either case. `None` if there is none (`part`
+    /// may then be a new 8.3 name).
+    fn lookup(&self, dir: RawDirectory, part: &str) -> Option<Short> {
+        let mut storage = [0u8; LFN_BYTES];
+        let mut lfn = LfnBuffer::new(&mut storage);
+        let mut found = None;
+        let _ = self.vm.iterate_dir_lfn(dir, &mut lfn, |e, long| {
+            let mut s = Short { buf: [0; 12], len: 0 };
+            let mut w = Writer { buf: &mut s.buf, n: 0 };
+            let _ = core::fmt::write(&mut w, format_args!("{}", e.name));
+            s.len = w.n;
+            if long.is_some_and(|l| l.eq_ignore_ascii_case(part)) || s.as_str().eq_ignore_ascii_case(part) {
+                found = Some(s);
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+        found
+    }
+
     /// Opens the directory that holds the last component of `path`, and
-    /// returns it with that last name. The caller closes the directory.
-    fn parent<'p>(&self, path: &'p str) -> Result<(RawDirectory, &'p str), u32> {
+    /// returns it with that last name: the existing entry's 8.3 name, or
+    /// the name as given. The caller closes the directory.
+    fn parent(&self, path: &str) -> Result<(RawDirectory, Name), u32> {
         let path = path.trim_matches('/');
         let mut dir = self.vm.open_root_dir(self.volume).map_err(|e| status_of(&e))?;
         let mut parts = path.split('/').peekable();
         while let Some(part) = parts.next() {
+            let short = self.lookup(dir, part);
             if parts.peek().is_none() {
-                return Ok((dir, part));
+                return Ok((dir, short.map_or(Name::Given(part.len()), Name::Short)));
             }
-            let next = self.vm.open_dir(dir, part);
+            let next = match short {
+                Some(s) => self.vm.open_dir(dir, s.as_str()),
+                None => Err(embedded_sdmmc::Error::NotFound),
+            };
             let _ = self.vm.close_dir(dir);
             dir = next.map_err(|e| status_of(&e))?;
         }
-        Ok((dir, ""))
+        Ok((dir, Name::Given(0)))
     }
 
     /// The directory at `path` ("" = root).
     fn dir(&self, path: &str) -> Result<RawDirectory, u32> {
         let (parent, last) = self.parent(path)?;
+        let last = last.as_str(path);
         if last.is_empty() {
             return Ok(parent);
         }
@@ -286,7 +352,7 @@ impl Service<'_> {
     fn make_dirs(&self, path: &str) {
         for (i, _) in path.match_indices('/').map(|(i, s)| (i, s)).chain(core::iter::once((path.len(), ""))) {
             if let Ok((dir, name)) = self.parent(&path[..i]) {
-                let _ = self.vm.make_dir_in_dir(dir, name);
+                let _ = self.vm.make_dir_in_dir(dir, name.as_str(&path[..i]));
                 let _ = self.vm.close_dir(dir);
             }
         }
@@ -326,7 +392,7 @@ impl Service<'_> {
                 };
                 let slot = self.files.iter().position(Option::is_none).ok_or(status::TOO_MANY_OPEN)?;
                 let (dir, name) = self.parent(path)?;
-                let f = self.vm.open_file_in_dir(dir, name, mode);
+                let f = self.vm.open_file_in_dir(dir, name.as_str(path), mode);
                 let _ = self.vm.close_dir(dir);
                 let file = f.map_err(|e| status_of(&e))?;
                 let len = self.vm.file_length(file).unwrap_or(0);
@@ -364,6 +430,48 @@ impl Service<'_> {
                 self.vm.close_file(f).map_err(|e| status_of(&e))?;
                 Ok((0, 0))
             }
+            op::LIST_LONG => {
+                if !c.may(path.as_bytes(), false) {
+                    return Err(denied("list"));
+                }
+                let d = self.dir(path)?;
+                let (mut written, mut total) = (0usize, 0u32);
+                let mut storage = [0u8; LFN_BYTES];
+                let mut lfn = LfnBuffer::new(&mut storage);
+                let r = self.vm.iterate_dir_lfn(d, &mut lfn, |e, long| {
+                    // Not the volume label, nor `.` and `..`.
+                    if e.attributes.is_volume() {
+                        return ControlFlow::Continue(());
+                    }
+                    total += 1;
+                    let o = written * proto::LONG_ENTRY_SIZE;
+                    if o + proto::LONG_ENTRY_SIZE <= mem.len() {
+                        let rec = &mut mem[o..o + proto::LONG_ENTRY_SIZE];
+                        rec.fill(0);
+                        match long {
+                            Some(l) => {
+                                // Cut on a character boundary.
+                                let mut n = l.len().min(proto::LONG_NAME);
+                                while !l.is_char_boundary(n) {
+                                    n -= 1;
+                                }
+                                rec[..n].copy_from_slice(&l.as_bytes()[..n]);
+                            }
+                            None => {
+                                let mut w = Writer { buf: &mut rec[..proto::LONG_NAME], n: 0 };
+                                let _ = core::fmt::write(&mut w, format_args!("{}", e.name));
+                            }
+                        }
+                        rec[proto::LONG_NAME..proto::LONG_NAME + 4].copy_from_slice(&e.size.to_le_bytes());
+                        rec[proto::LONG_NAME + 4] = if e.attributes.is_directory() { proto::ATTR_DIR } else { 0 };
+                        written += 1;
+                    }
+                    ControlFlow::Continue(())
+                });
+                let _ = self.vm.close_dir(d);
+                r.map_err(|e| status_of(&e))?;
+                Ok((written as u32, total))
+            }
             op::LIST => {
                 if !c.may(path.as_bytes(), false) {
                     return Err(denied("list"));
@@ -393,7 +501,7 @@ impl Service<'_> {
                     return Err(denied("delete"));
                 }
                 let (dir, name) = self.parent(path)?;
-                let r = self.vm.delete_entry_in_dir(dir, name);
+                let r = self.vm.delete_entry_in_dir(dir, name.as_str(path));
                 let _ = self.vm.close_dir(dir);
                 r.map_err(|e| status_of(&e))?;
                 Ok((0, 0))
@@ -403,7 +511,7 @@ impl Service<'_> {
                     return Err(denied("mkdir"));
                 }
                 let (dir, name) = self.parent(path)?;
-                let r = self.vm.make_dir_in_dir(dir, name);
+                let r = self.vm.make_dir_in_dir(dir, name.as_str(path));
                 let _ = self.vm.close_dir(dir);
                 r.map_err(|e| status_of(&e))?;
                 Ok((0, 0))
