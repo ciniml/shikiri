@@ -367,7 +367,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img
 
@@ -751,6 +751,22 @@ p4emu-run-33:
 	MTOOLS_SKIP_CHECK=1 mdir -i $(BUILD)/sd-test-after.img@@1M :: | grep -q "NOTESF~2 TXT .*Notes From Emulator.txt"
 	! MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M "::/Long File Name.txt" >/dev/null 2>&1
 	python3 tools/fatcheck.py $(BUILD)/sd-test-after.img
+
+# Apps installed over their valid versions in p4emu-run-34: each keeps its
+# old version, more than the catalog (63 entries) holds.
+CATALOG_FILL := hello keylog ticker spin blescan timers hcitest bleecho mtreq paint mtep blegatt cfgctl echo fstest netctl c6ota mtpanel nettest hello-strong hello-xip term shell cfg wifi mtdash init
+
+p4emu-run-34:
+	@# A full catalog (doc/65): 27 apps installed over their valid
+	@# versions keep 27 old versions beside 37 entries; the old versions of
+	@# other apps go (store.previous_dropped) instead of `catalog full`.
+	$(T5EMU) --max-ms 120000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    $(foreach a,$(CATALOG_FILL),--ctl "install $(if $(filter init,$(a)),$(AUTO_DIR),$(APPS_DIR))/$(a).t5a") --ctl "run hello" \
+	    --expect-event store.installed --expect-event store.previous_dropped \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-catalog.txt 2>&1 || { tail -20 $(BUILD)/emu-catalog.txt; false; }
+	@# Every install went in, the last too.
+	! grep -q "cmd=install_end ok=false" $(BUILD)/emu-catalog.txt
+	grep -q "store.installed name=init " $(BUILD)/emu-catalog.txt
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

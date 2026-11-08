@@ -11,6 +11,11 @@
 //! as `Previous` and puts the new one in as `PendingVerify`. Its first run
 //! decides: a normal end (or 2 s of running) confirms it and drops the old
 //! one; a fault brings the old one back.
+//!
+//! An app that is not run keeps both. When the catalog (63 entries) or the
+//! extents run out, the kept old versions of other apps go, those that do
+//! not start by themselves first; their new versions count as confirmed
+//! (`store.previous_dropped`, doc/65).
 
 use t5_abi::store::{self, Catalog, Entry, State};
 use t5_abi::t5a;
@@ -122,8 +127,19 @@ impl Store {
             return Err("bad length");
         }
         let count = store::extents_for(length);
-        let in_use = busy.iter().map(|&(first, count)| Entry { extent_first: first, extent_count: count, ..EMPTY });
-        let first = store::find_free(self.entries().chain(in_use), count).ok_or("store full")?;
+        // Old versions kept for going back give their extents up, one at a
+        // time, until there is room.
+        let first = loop {
+            let in_use = busy.iter().map(|&(first, count)| Entry { extent_first: first, extent_count: count, ..EMPTY });
+            if let Some(first) = store::find_free(self.entries().chain(in_use), count) {
+                break first;
+            }
+            let (victims, n) = self.victims(1, |_| true);
+            if n == 0 {
+                return Err("store full");
+            }
+            self.commit_dropping(|_| true, [None, None], &victims[..n], "store full", &mut flash::Stats::default())?;
+        };
         event!(Info, "store.install_begin", length = length, extent_first = first, extents = count, busy = busy.len() as u32);
         self.install = Some(Install { first, count, length, next: 0, stats: flash::Stats::default(), started: Current::now() });
         Ok(first as u32)
@@ -259,15 +275,63 @@ impl Store {
         Ok(seq)
     }
 
+    /// Up to `n` apps (names) whose kept old versions can go (doc/65): those
+    /// `keep` accepts, the ones that do not start by themselves first.
+    /// Returns them and how many.
+    fn victims(&self, n: usize, keep: impl Fn(&Entry) -> bool) -> ([[u8; 32]; VICTIMS], usize) {
+        let autostart = |e: &Entry| e.flags & t5a::tlv::FLAG_AUTOSTART as u8 != 0;
+        let mut out = [[0u8; 32]; VICTIMS];
+        let mut k = 0;
+        for pass_autostart in [false, true] {
+            for e in self.entries().filter(|e| e.state == State::Previous && keep(e) && autostart(e) == pass_autostart) {
+                if k == n.min(VICTIMS) {
+                    return (out, k);
+                }
+                out[k] = e.name;
+                k += 1;
+            }
+        }
+        (out, k)
+    }
+
     /// Writes a catalog of the entries `keep` accepts plus those in `add`, with the
     /// next sequence number, into the sector not in force; returns the new
-    /// sequence number.
+    /// sequence number. If they do not fit, other apps' kept old versions go
+    /// (doc/65).
     fn commit(&mut self, keep: impl Fn(&Entry) -> bool, add: [Option<Entry>; 2], stats: &mut flash::Stats) -> Result<u32, &'static str> {
+        let total = self.entries().filter(|e| keep(e)).count() + add.iter().flatten().count();
+        let over = total.saturating_sub(store::MAX_ENTRIES);
+        let (victims, n) = self.victims(over, &keep);
+        if n < over {
+            return Err("catalog full");
+        }
+        self.commit_dropping(keep, add, &victims[..n], "catalog full", stats)
+    }
+
+    /// `commit` without the kept old versions of the apps in `victims`, whose
+    /// new versions become valid.
+    fn commit_dropping(
+        &mut self,
+        keep: impl Fn(&Entry) -> bool,
+        add: [Option<Entry>; 2],
+        victims: &[[u8; 32]],
+        why: &'static str,
+        stats: &mut flash::Stats,
+    ) -> Result<u32, &'static str> {
         let seq = self.catalog.map_or(1, |c| c.seq.wrapping_add(1));
         let target = if self.active == Some(0) { 1 } else { 0 };
         let buf = unsafe { &mut *core::ptr::addr_of_mut!(SECTOR_BUF) };
-        if !store::build_sector(seq, self.entries().filter(|e| keep(e)).chain(add.into_iter().flatten()), buf) {
+        let victim = |e: &Entry| victims.contains(&e.name);
+        let entries = self
+            .entries()
+            .filter(|e| keep(e) && !(victim(e) && e.state == State::Previous))
+            .map(|e| if victim(&e) && e.state == State::PendingVerify { Entry { state: State::Valid, ..e } } else { e });
+        if !store::build_sector(seq, entries.chain(add.into_iter().flatten()), buf) {
             return Err("catalog full");
+        }
+        for v in victims {
+            let e = Entry { name: *v, ..EMPTY };
+            event!(Info, "store.previous_dropped", name = e.name(), reason = why);
         }
         let at = store::APPMETA_OFFSET + target * store::SECTOR_SIZE as u32;
         flash::erase_sector(at, stats)?;
@@ -326,6 +390,10 @@ impl Store {
         if ok { Ok(at) } else { Err("read back differs") }
     }
 }
+
+/// Kept old versions dropped in one catalog write at most (two entries
+/// come in at a time).
+const VICTIMS: usize = 8;
 
 /// A blank entry, for describing extents in use.
 const EMPTY: Entry = Entry {
