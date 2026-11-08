@@ -15,7 +15,9 @@
 //! An app that is not run keeps both. When the catalog (63 entries) or the
 //! extents run out, the kept old versions of other apps go, those that do
 //! not start by themselves first; their new versions count as confirmed
-//! (`store.previous_dropped`, doc/65).
+//! (`store.previous_dropped`, doc/65). When there are extents enough but
+//! not in a row, apps are moved to make a run (`store.moved`), never one a
+//! running process executes from flash (XIP).
 
 use t5_abi::store::{self, Catalog, Entry, State};
 use t5_abi::t5a;
@@ -127,11 +129,16 @@ impl Store {
             return Err("bad length");
         }
         let count = store::extents_for(length);
-        // Old versions kept for going back give their extents up, one at a
-        // time, until there is room.
+        // Room in a row: moving apps if there are extents enough, else
+        // old versions kept for going back give theirs up, one at a time.
         let first = loop {
             let in_use = busy.iter().map(|&(first, count)| Entry { extent_first: first, extent_count: count, ..EMPTY });
             if let Some(first) = store::find_free(self.entries().chain(in_use), count) {
+                break first;
+            }
+            if self.free_extents(busy) >= count as u32
+                && let Some(first) = self.compact(count, busy)?
+            {
                 break first;
             }
             let (victims, n) = self.victims(1, |_| true);
@@ -143,6 +150,83 @@ impl Store {
         event!(Info, "store.install_begin", length = length, extent_first = first, extents = count, busy = busy.len() as u32);
         self.install = Some(Install { first, count, length, next: 0, stats: flash::Stats::default(), started: Current::now() });
         Ok(first as u32)
+    }
+
+    /// Extents neither an entry nor a running XIP process (`busy`) uses.
+    fn free_extents(&self, busy: &[(u16, u16)]) -> u32 {
+        let mut used = [false; store::EXTENTS as usize];
+        let spans = self.entries().map(|e| (e.extent_first, e.extent_count)).chain(busy.iter().copied());
+        for (first, count) in spans {
+            for k in first as usize..(first as usize + count as usize).min(used.len()) {
+                used[k] = true;
+            }
+        }
+        used.iter().filter(|&&u| !u).count() as u32
+    }
+
+    /// Makes `count` free extents in a row by moving apps out of the run
+    /// that holds the fewest (doc/65): each is copied to free extents
+    /// elsewhere, then the catalog points at the copy (a cut-off move
+    /// leaves the old catalog, and the app where it was). Not a run with an
+    /// extent of a running XIP process (`busy`). `None` if no run can be
+    /// emptied.
+    fn compact(&mut self, count: u16, busy: &[(u16, u16)]) -> Result<Option<u16>, &'static str> {
+        let overlaps = |first: u16, n: u16, s: u16| first < s + count && s < first + n;
+        let mut best: Option<(u32, u16)> = None;
+        for s in 0..=(store::EXTENTS as u16 - count) {
+            if busy.iter().any(|&(f, n)| overlaps(f, n, s)) {
+                continue;
+            }
+            let cost: u32 = self.entries().filter(|e| overlaps(e.extent_first, e.extent_count, s)).map(|e| e.extent_count as u32).sum();
+            if best.is_none_or(|(c, _)| cost < c) {
+                best = Some((cost, s));
+            }
+        }
+        let Some((_, s)) = best else { return Ok(None) };
+        // The run itself is not a destination.
+        let run = Entry { extent_first: s, extent_count: count, ..EMPTY };
+        while let Some(e) = self.entries().find(|e| overlaps(e.extent_first, e.extent_count, s)) {
+            let in_use = busy.iter().map(|&(first, n)| Entry { extent_first: first, extent_count: n, ..EMPTY });
+            let Some(dest) = store::find_free(self.entries().chain(in_use).chain(core::iter::once(run)), e.extent_count) else {
+                return Ok(None);
+            };
+            self.move_app(&e, dest)?;
+        }
+        Ok(Some(s))
+    }
+
+    /// Copies `e`'s image to extent `dest`, checks it, and points the
+    /// catalog at the copy.
+    fn move_app(&mut self, e: &Entry, dest: u16) -> Result<(), &'static str> {
+        let mut stats = flash::Stats::default();
+        let started = Current::now();
+        let src = e.offset();
+        let dst = store::APPS_OFFSET + dest as u32 * store::EXTENT_SIZE;
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(SECTOR_BUF) };
+        for at in (0..e.length).step_by(store::SECTOR_SIZE) {
+            let n = (e.length - at).min(store::SECTOR_SIZE as u32) as usize;
+            buf[..n].copy_from_slice(self.bytes(src + at, n));
+            flash::erase_sector(dst + at, &mut stats)?;
+            flash::write(dst + at, &buf[..n.next_multiple_of(4)], &mut stats)?;
+        }
+        if self.bytes(dst, e.length as usize) != self.bytes(src, e.length as usize) {
+            event!(Error, "store.move_failed", name = e.name(), to = dest);
+            return Err("move: copy differs");
+        }
+        let moved = Entry { extent_first: dest, ..*e };
+        let (name, first) = (e.name, e.extent_first);
+        let seq = self.commit_dropping(|x| !(x.name == name && x.extent_first == first), [Some(moved), None], &[], "move", &mut stats)?;
+        event!(
+            Info,
+            "store.moved",
+            name = e.name(),
+            from = first,
+            to = dest,
+            extents = e.extent_count,
+            catalog_seq = seq,
+            ms = time::ticks_to_ns(Current::now() - started) / 1_000_000
+        );
+        Ok(())
     }
 
     /// Drops an install in progress (a kernel update begins).

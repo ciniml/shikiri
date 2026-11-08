@@ -367,9 +367,9 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
-p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img
+p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin
 
 test-p4emu: p4emu-prep
 	$(MAKE) --no-print-directory --output-sync=target -j$(P4EMU_JOBS) $(P4EMU_RUNS)
@@ -767,6 +767,22 @@ p4emu-run-34:
 	@# Every install went in, the last too.
 	! grep -q "cmd=install_end ok=false" $(BUILD)/emu-catalog.txt
 	grep -q "store.installed name=init " $(BUILD)/emu-catalog.txt
+
+$(BUILD)/store-frag/apps.bin: $(STORE_DIR)/apps.bin tools/fragstore.py
+	python3 tools/fragstore.py $(STORE_DIR) $(BUILD)/store-frag
+
+p4emu-run-35:
+	@# Moving apps to make room (doc/65): the store with one or two free
+	@# extents before each app (tools/fragstore.py: 59 free, no run longer
+	@# than 2); matter (8 extents) goes in after apps are moved out of a
+	@# run (store.moved), and a moved app still loads and runs.
+	$(T5EMU) --max-ms 90000 --flash $(BUILD)/store-frag/appmeta.bin@410000 --flash $(BUILD)/store-frag/apps.bin@420000 \
+	    $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "install $(APPS_DIR)/matter.t5a" --ctl "run hello" \
+	    --expect-event store.moved --expect-event store.installed --expect-event hello.greet \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-frag.txt 2>&1 || { tail -20 $(BUILD)/emu-frag.txt; false; }
+	grep -q "store.moved name=hello " $(BUILD)/emu-frag.txt
+	grep -q "store.installed name=matter " $(BUILD)/emu-frag.txt
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target
