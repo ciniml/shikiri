@@ -178,7 +178,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
                      [--linger-ms N] [--host-peer BYTES] [--host-peer-target ADDR] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
-                     [--trace-traps] [--warn-unmodelled] [--rng-stuck] [--quiet] KERNEL.elf";
+                     [--sd IMAGE] [--sd-out FILE] [--trace-traps] [--warn-unmodelled] [--rng-stuck] [--quiet] KERNEL.elf";
 
 struct Opts {
     mhz: u64,
@@ -201,6 +201,10 @@ struct Opts {
     /// (a kernel that rolls itself back, doc/16 §6.10).
     expect_reset: bool,
     flash_images: Vec<(u32, String)>,
+    /// The microSD card's sectors (a raw disk image), and where to save
+    /// them at the end (doc/64).
+    sd: Option<String>,
+    sd_out: Option<String>,
     ctl: Vec<String>,
     expect_events: Vec<String>,
     linger_ms: u64,
@@ -238,6 +242,8 @@ fn parse_args() -> Result<Opts, String> {
         expect_prev_event: None,
         expect_reset: false,
         flash_images: Vec::new(),
+        sd: None,
+        sd_out: None,
         ctl: Vec::new(),
         expect_events: Vec::new(),
         linger_ms: 300,
@@ -307,6 +313,8 @@ fn parse_args() -> Result<Opts, String> {
                 let off = u32::from_str_radix(off.trim_start_matches("0x"), 16).map_err(|e| format!("--flash {v}: {e}"))?;
                 o.flash_images.push((off, file.to_string()));
             }
+            "--sd" => o.sd = Some(val()?),
+            "--sd-out" => o.sd_out = Some(val()?),
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => o.elf = s.to_string(),
         }
@@ -369,6 +377,20 @@ fn main() -> ExitCode {
         if let Err(e) = r {
             eprintln!("t5emu: {e}");
             return ExitCode::from(64);
+        }
+    }
+
+    if let Some(file) = &o.sd {
+        match std::fs::read(file) {
+            Ok(d) if d.len() % 512 == 0 && !d.is_empty() => bus.sd.image = Some(d),
+            Ok(_) => {
+                eprintln!("t5emu: {file}: not whole 512-byte sectors");
+                return ExitCode::from(64);
+            }
+            Err(e) => {
+                eprintln!("t5emu: {file}: {e}");
+                return ExitCode::from(64);
+            }
         }
     }
 
@@ -540,6 +562,15 @@ fn main() -> ExitCode {
             "t5emu: I2C: {} transfers; expander #1 DIR={dir:#04x} OUT={out:#04x}; {} write(s) to expander #2",
             i2c.transfers, i2c.exp2_writes
         );
+    }
+    let sd = &m.bus.sd;
+    if sd.stats.0 > 0 {
+        eprintln!("t5emu: SD: {} command(s), {} sector(s) read, {} written", sd.stats.0, sd.stats.1, sd.stats.2);
+    }
+    if let (Some(file), Some(image)) = (&o.sd_out, &sd.image)
+        && let Err(e) = std::fs::write(file, image)
+    {
+        eprintln!("t5emu: {file}: {e}");
     }
     let dsi = &m.bus.periph.dsi;
     if dsi.frames > 0 {

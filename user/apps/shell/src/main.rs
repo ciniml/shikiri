@@ -246,7 +246,11 @@ impl Shell {
             }
             (Esc::None, 0x7F | 0x08) => {
                 if self.line.len > 0 {
+                    // A whole character (completion may have put UTF-8 in).
                     self.line.len -= 1;
+                    while self.line.len > 0 && self.line.buf[self.line.len] & 0xC0 == 0x80 {
+                        self.line.len -= 1;
+                    }
                     self.out.str("\x08 \x08");
                 }
             }
@@ -285,23 +289,28 @@ impl Shell {
         let text = line.as_str();
         let (c, start) = complete::candidates(text);
         let word = &text[start..];
+        let mut ubuf = [0u8; LINE_MAX];
+        let typed = complete::unescape(word, &mut ubuf).len();
         if c.n == 0 {
             return;
         }
         let (take, end) = if c.n == 1 { (c.name(0).len(), Some(if c.is_dir(0) { b'/' } else { b' ' })) } else { (c.common(), None) };
-        if take > word.len() || end.is_some() {
-            // The candidate's spelling (a file's case) replaces the word.
-            for _ in 0..word.len() {
+        if take > typed || end.is_some() {
+            // The candidate's spelling (a file's case) replaces the word,
+            // a space in it escaped.
+            for _ in 0..word.chars().count() {
                 self.out.str("\x08 \x08");
             }
             self.line.len = start;
             let name = c.name(0).as_bytes();
-            for &b in name[..take].iter().chain(end.as_slice()) {
-                if self.line.len < LINE_MAX {
-                    self.line.buf[self.line.len] = b;
-                    self.line.len += 1;
-                    self.out.raw(b);
+            for &b in &name[..take] {
+                if b == b' ' {
+                    self.put(b'\\');
                 }
+                self.put(b);
+            }
+            if let Some(e) = end {
+                self.put(e);
             }
             return;
         }
@@ -326,8 +335,17 @@ impl Shell {
         self.out.str(text);
     }
 
+    /// Adds `b` to the line and shows it.
+    fn put(&mut self, b: u8) {
+        if self.line.len < LINE_MAX {
+            self.line.buf[self.line.len] = b;
+            self.line.len += 1;
+            self.out.raw(b);
+        }
+    }
+
     fn erase_line(&mut self) {
-        for _ in 0..self.line.len {
+        for _ in 0..self.line.as_str().chars().count() {
             self.out.str("\x08 \x08");
         }
         self.line.len = 0;
@@ -353,15 +371,16 @@ impl Shell {
 
     /// Runs a command line; true on `exit`.
     fn run(&mut self, line: &str) -> bool {
-        let mut words = line.split_whitespace();
-        let Some(cmd) = words.next() else { return false };
-        let mut args = [""; 8];
-        let mut n = 0;
-        for w in words.by_ref().take(args.len()) {
-            args[n] = w;
-            n += 1;
+        // Words at spaces; `\ ` and "..." keep spaces in one (doc/63).
+        let mut buf = [0u8; LINE_MAX];
+        let mut ranges = [(0, 0); 9];
+        let count = complete::split(line, &mut buf, &mut ranges);
+        let mut all = [""; 9];
+        for (w, &(a, b)) in all.iter_mut().zip(&ranges[..count]) {
+            *w = core::str::from_utf8(&buf[a..b]).unwrap_or("");
         }
-        let args = &args[..n];
+        let Some((&cmd, args)) = all[..count].split_first() else { return false };
+        let n = args.len();
         event!(Info, "shell.exec", cmd = cmd, args = n as u32);
         let o = &mut self.out;
         match cmd {
@@ -393,7 +412,8 @@ impl Shell {
                  cfg rm KEY            delete a setting\n\
                  more FILE             a file a screen at a time\n\
                  exit                  end the shell (term starts a new one)\n\
-                 Tab completes commands, apps (run), processes (fg) and files.\n",
+                 Tab completes commands, apps (run), processes (fg) and files.\n\
+                 A space in a name: \\  or \"...\" (cat My\\ File.txt).\n",
             ),
             "echo" => {
                 for (i, a) in args.iter().enumerate() {
@@ -635,6 +655,7 @@ fn cat(o: &mut Out, path: &str) {
         return;
     };
     let mut buf = [0u8; 512];
+    let mut total = 0;
     while let Ok(n) = f.read(id, &mut buf) {
         if n == 0 {
             break;
@@ -642,8 +663,10 @@ fn cat(o: &mut Out, path: &str) {
         for &b in &buf[..n] {
             o.byte(b);
         }
+        total += n;
     }
     let _ = f.close(id);
+    event!(Info, "shell.cat", bytes = total as u32);
 }
 
 /// Rows `more` shows before it asks: the terminal's, but the prompt's.

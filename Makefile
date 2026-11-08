@@ -367,9 +367,9 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
-p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb
+p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img
 
 test-p4emu: p4emu-prep
 	$(MAKE) --no-print-directory --output-sync=target -j$(P4EMU_JOBS) $(P4EMU_RUNS)
@@ -719,6 +719,24 @@ p4emu-run-32:
 	    --capture-out $(BUILD)/emu-capture-history.png --expect-pixel 1270,4,d69a \
 	    --expect-event shell.fg --expect-event term.view --expect-event capture.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+$(BUILD)/sd-test.img: tools/mksdimg.sh
+	tools/mksdimg.sh $@
+
+p4emu-run-33:
+	@# The microSD card (doc/64) and long names (doc/63): fs on an image
+	@# made by mtools; a long-named folder and file, with an escaped space
+	@# and in quotes in another case, are read (shell.cat); a new 8.3 file is
+	@# written and mtools reads it back from the card the run left.
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --sd $(BUILD)/sd-test.img --sd-out $(BUILD)/sd-test-after.img \
+	    --ctl "run fs" --ctl "wait-ms 2000" --ctl "run term" --ctl "wait-ms 3000" \
+	    --ctl "keys cat My\\ Documents/notes-about-tab5.txt\n" --ctl "wait-ms 1500" \
+	    --ctl "keys cat \"long file name.txt\"\n" --ctl "wait-ms 1500" \
+	    --ctl "keys write new.txt made in emu\n" --ctl "wait-ms 1500" \
+	    --expect-event fs.ready --expect-event shell.cat \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+	MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M ::/NEW.TXT | grep -qx "made in emu"
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

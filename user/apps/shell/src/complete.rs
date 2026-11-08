@@ -72,16 +72,105 @@ impl Candidates {
             len = len.min(b.len());
             len = (0..len).find(|&k| !b[k].eq_ignore_ascii_case(&first[k])).unwrap_or(len);
         }
+        // Not inside a character.
+        while !self.name(0).is_char_boundary(len) {
+            len -= 1;
+        }
         len
     }
 }
 
+/// Where the last word of `line` starts: after the last space that is
+/// neither escaped (`\ `) nor in double quotes.
+pub fn last_word(line: &str) -> usize {
+    let (mut start, mut quoted, mut escaped) = (0, false, false);
+    for (i, b) in line.bytes().enumerate() {
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' => escaped = true,
+            b'"' => quoted = !quoted,
+            b' ' if !quoted => start = i + 1,
+            _ => {}
+        }
+    }
+    start
+}
+
+/// Splits `line` into words at spaces, honouring `\ ` and double quotes
+/// (doc/63): the words, unescaped into `buf`, as ranges of it in `out`.
+/// Returns how many (at most `out.len()`).
+pub fn split(line: &str, buf: &mut [u8; crate::LINE_MAX], out: &mut [(usize, usize)]) -> usize {
+    let (mut n, mut words) = (0, 0);
+    let (mut quoted, mut escaped) = (false, false);
+    // Where the word being read starts in `buf`, if one is.
+    let mut start: Option<usize> = None;
+    for b in line.bytes() {
+        if !escaped && !quoted && b == b' ' {
+            if let Some(s) = start.take()
+                && words < out.len()
+            {
+                out[words] = (s, n);
+                words += 1;
+            }
+            continue;
+        }
+        start.get_or_insert(n);
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' => {
+                escaped = true;
+                continue;
+            }
+            b'"' => {
+                quoted = !quoted;
+                continue;
+            }
+            _ => {}
+        }
+        if n < buf.len() {
+            buf[n] = b;
+            n += 1;
+        }
+    }
+    if let Some(s) = start
+        && words < out.len()
+    {
+        out[words] = (s, n);
+        words += 1;
+    }
+    words
+}
+
+/// `word` without its escapes and quotes, in `buf`.
+pub fn unescape<'b>(word: &str, buf: &'b mut [u8; crate::LINE_MAX]) -> &'b str {
+    let mut n = 0;
+    let mut escaped = false;
+    for b in word.bytes() {
+        match b {
+            _ if escaped => {
+                escaped = false;
+                buf[n] = b;
+                n += 1;
+            }
+            b'\\' => escaped = true,
+            b'"' => {}
+            _ => {
+                buf[n] = b;
+                n += 1;
+            }
+        }
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("")
+}
+
 /// What completes `line` (the whole line typed so far): the candidates
-/// and where the word being completed starts (after a file's directory).
+/// and where the word being completed starts in `line` (after a file's
+/// directory).
 pub fn candidates(line: &str) -> (Candidates, usize) {
     let mut c = Candidates::new();
-    let start = line.rfind(' ').map_or(0, |i| i + 1);
-    let word = &line[start..];
+    let start = last_word(line);
+    let mut buf = [0u8; crate::LINE_MAX];
+    let word = unescape(&line[start..], &mut buf);
     let mut words = line[..start].split_whitespace();
     let Some(cmd) = words.next() else {
         for name in COMMANDS {
@@ -117,6 +206,8 @@ pub fn candidates(line: &str) -> (Candidates, usize) {
             // completed.
             let cut = word.rfind('/').map_or(0, |i| i + 1);
             let (dir, name) = word.split_at(cut);
+            // `/` is never escaped: the same place in the line as typed.
+            let raw_cut = line[start..].rfind('/').map_or(0, |i| i + 1);
             if let Ok(f) = Files::connect() {
                 let _ = f.list(dir.trim_end_matches('/'), |n, _, is_dir| {
                     if n != "." && n != ".." {
@@ -124,7 +215,7 @@ pub fn candidates(line: &str) -> (Candidates, usize) {
                     }
                 });
             }
-            return (c, start + cut);
+            return (c, start + raw_cut);
         }
         _ => {}
     }

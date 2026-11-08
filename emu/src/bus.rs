@@ -86,6 +86,8 @@ pub struct Bus {
     pub cache: Cache,
     pub psram: Psram,
     pub periph: Peripherals,
+    /// The SDMMC host and the microSD card (doc/64).
+    pub sd: crate::sdmmc::Sdmmc,
 }
 
 /// HP_SYS_CLKRST_ANA_PLL_CTRL0: MSPI_CAL_END (bit 8) reads as done, so the
@@ -158,6 +160,7 @@ impl Bus {
             cache: Cache::new(cache_mode, L2MEM_BASE, L2MEM_SIZE),
             psram: Psram::new(cache_mode),
             periph: Peripherals::default(),
+            sd: Default::default(),
         }
         .with_flash_chip()
     }
@@ -353,6 +356,9 @@ impl Bus {
             (ANA_PLL_CTRL0, 4) => return Some(self.periph.read32(addr, self.ticks()) | MSPI_CAL_END),
             _ => {}
         }
+        if crate::sdmmc::contains(addr) && size == 4 && addr % 4 == 0 {
+            return Some(crate::sdmmc::read(self, addr));
+        }
         if (PERIPH.contains(&addr) || CLIC.contains(&addr) || CACHE_CTRL.contains(&addr)) && addr % size == 0 {
             let ticks = self.ticks();
             let word = self.periph.read32(addr & !3, ticks);
@@ -429,6 +435,10 @@ impl Bus {
                 return true;
             }
             _ => {}
+        }
+        if crate::sdmmc::contains(addr) && size == 4 && addr % 4 == 0 {
+            crate::sdmmc::write(self, addr, v);
+            return true;
         }
         if (PERIPH.contains(&addr) || CLIC.contains(&addr) || CACHE_CTRL.contains(&addr)) && addr % size == 0 {
             let ticks = self.ticks();

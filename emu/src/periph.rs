@@ -477,6 +477,9 @@ fn initial_value(addr: u32) -> u32 {
         // REF_CLK_CTRL1/2 reset values: PLL_F240M and PLL_F20M gates on
         // (hp_sys_clkrst_reg.h:900-1039).
         0x500E_6028 => 23 << 16 | 1 << 30,
+        // REF_CLK_CTRL0: PLL_F160M = 480 MHz / (2 + 1), as the bootloader
+        // leaves it; the SD host's source (doc/64).
+        0x500E_6024 => 2 << 24,
         0x500E_602C => 1 << 8,
         _ => 0,
     }

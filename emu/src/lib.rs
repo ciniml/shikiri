@@ -11,3 +11,4 @@ pub mod pmp;
 pub mod psram;
 pub mod regmap;
 pub mod rvc;
+pub mod sdmmc;
