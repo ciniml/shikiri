@@ -36,8 +36,8 @@ pub const ABI_MAJOR: u16 = 0;
 /// `Error::Limit`, `spawn::RESTART`. Minor 21 (doc/58 R5): `wait` returns
 /// the time too. Minor 22 (doc/60 F2): `display::HIDDEN`/`SHOWN`. Minor
 /// 23 (doc/60 F3): `display:focus`. Minor 24 (doc/61): `proc:mem`, the
-/// text size in `proc:list`.
-pub const ABI_MINOR: u16 = 24;
+/// text size in `proc:list`. Minor 25 (doc/67): `update`.
+pub const ABI_MINOR: u16 = 25;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -722,6 +722,38 @@ pub mod display {
         /// larger than the shift, and refused (`Invalid`) if that would
         /// take more than 32 pieces.
         pub const COPY: u16 = 2;
+    }
+}
+
+/// Updates from an app (doc/67, system key only): installing an app into
+/// the store or a kernel package (T5K) into the other kernel slot, as the
+/// host's control commands do (doc/14 §3, doc/16 §3), and restarting.
+/// One process at a time. A request is one `write`: `op`, then for `BEGIN_*`
+/// the image's length (u32 LE), for `DATA` the offset (u32 LE) and up to
+/// `DATA_MAX` bytes (in order, each piece but the last a whole multiple of
+/// 256 bytes). The kernel carries it out on its service round; `wait` then
+/// gives `DONE` with `status::OK` or `status::FAILED` (the log says why).
+/// `write` returns `Busy` while a request is outstanding. Images are
+/// verified as from the host: signature, ABI, `secure_version`.
+pub mod update {
+    pub const NAME: &str = "update";
+    pub mod op {
+        pub const BEGIN_APP: u8 = 1;
+        pub const BEGIN_KERNEL: u8 = 2;
+        pub const DATA: u8 = 3;
+        pub const END: u8 = 4;
+        /// Restarts the chip (a kernel update takes effect).
+        pub const REBOOT: u8 = 5;
+        pub const CANCEL: u8 = 6;
+    }
+    pub const DATA_MAX: usize = 1024;
+    /// The longest request.
+    pub const REQUEST_MAX: usize = 5 + DATA_MAX;
+    /// `wait` event: the request was carried out (value = status).
+    pub const DONE: usize = 1;
+    pub mod status {
+        pub const OK: usize = 0;
+        pub const FAILED: usize = 1;
     }
 }
 

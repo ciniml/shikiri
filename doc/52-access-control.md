@@ -128,7 +128,7 @@
   - ローダは、アプリの鍵の像が強い許可（`t5a::strong`）を持てば断る（`LoadError::StrongPermit`、`loader.strong_permit`）。
   - カーネルの更新（T5K）はシステムの鍵だけ（`kupdate` の "app key"）。
   - 強い許可:
-    - そのものの名前: `sd`、`wlan:ctl`、`bt:hci`、`flash:cfg`、`kbd`、`proc:kill`、`proc:kill/any`、`proc:spawn`、`svc:net/link`、`svc:wifi/ota`（doc/58 R5）、`display:focus`（doc/60 F3）
+    - そのものの名前: `sd`、`wlan:ctl`、`bt:hci`、`flash:cfg`、`kbd`、`proc:kill`、`proc:kill/any`、`proc:spawn`、`svc:net/link`、`svc:wifi/ota`（doc/58 R5）、`display:focus`（doc/60 F3）、`update`（doc/67）
     - 前方一致: `listen:*`、`netdev:*`、`ready:*`、`svc:fs/*`（自分のフォルダの外のファイル）、`svc:cfg/secret:*`、`svc:wifi/join*`
 - 自己試験を 3 つ足した:
   - `fault/load-other-slot`、`fault/store-other-slot`: 隣のスロットを読む、書く。アクセスフォールト。

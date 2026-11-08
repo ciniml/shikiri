@@ -321,9 +321,9 @@ fn entries(permissions: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// marks, starting or stopping any app, files outside the app's own
 /// folder, secrets in the settings, changing the network, a CPU partition
 /// (doc/57), the Wi-Fi chip's firmware (doc/58 R5), and putting any
-/// app's screen in front (doc/60 F3).
+/// app's screen in front (doc/60 F3), and updates (doc/67).
 pub fn strong(entry: &[u8]) -> bool {
-    const EXACT: [&[u8]; 11] = [
+    const EXACT: [&[u8]; 12] = [
         b"sd",
         b"wlan:ctl",
         b"bt:hci",
@@ -335,6 +335,7 @@ pub fn strong(entry: &[u8]) -> bool {
         b"svc:net/link",
         b"svc:wifi/ota",
         b"display:focus",
+        b"update",
     ];
     const PREFIX: [&[u8]; 7] = [b"listen:", b"netdev:", b"ready:", b"svc:fs/", b"svc:cfg/secret:", b"svc:wifi/join", b"cpu:"];
     EXACT.contains(&entry) || PREFIX.iter().any(|p| entry.starts_with(p))

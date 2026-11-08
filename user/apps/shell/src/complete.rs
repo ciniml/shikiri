@@ -8,12 +8,13 @@ use t5_rt::{Files, proc};
 use crate::{name_of, snapshot};
 
 /// The commands `help` lists.
-pub const COMMANDS: [&str; 22] = [
+pub const COMMANDS: [&str; 23] = [
     "help", "echo", "clear", "uptime", "ls", "cat", "write", "rm", "mkdir", "run", "apps", "ps", "kill", "fg", "ping", "ifconfig", "top",
-    "nc", "mt", "cfg", "exit", "more",
+    "nc", "mt", "cfg", "exit", "more", "ota",
 ];
 
 const CFG: [&str; 5] = ["list", "get", "set", "secret", "rm"];
+const OTA: [&str; 3] = ["app", "kernel", "reboot"];
 
 const MAX: usize = 48;
 const NAME: usize = 32;
@@ -201,7 +202,12 @@ pub fn candidates(line: &str) -> (Candidates, usize) {
                 c.add(name, word, false, false);
             }
         }
-        ("ls" | "cat" | "rm" | "mkdir" | "more", 1) | ("write", 1) => {
+        ("ota", 1) => {
+            for name in OTA {
+                c.add(name, word, false, false);
+            }
+        }
+        ("ls" | "cat" | "rm" | "mkdir" | "more", 1) | ("write", 1) | ("ota", 2) => {
             // The directory part stays as typed; the name after it is
             // completed.
             let cut = word.rfind('/').map_or(0, |i| i + 1);

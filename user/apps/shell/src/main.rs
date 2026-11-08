@@ -411,6 +411,8 @@ impl Shell {
                  cfg secret KEY VALUE  a setting only wifi may read back\n\
                  cfg rm KEY            delete a setting\n\
                  more FILE             a file a screen at a time\n\
+                 ota app|kernel FILE   install an app or a kernel from the SD card\n\
+                 ota reboot            restart (a new kernel starts)\n\
                  exit                  end the shell (term starts a new one)\n\
                  Tab completes commands, apps (run), processes (fg) and files.\n\
                  A space in a name: \\  or \"...\" (cat My\\ File.txt).\n",
@@ -486,6 +488,7 @@ impl Shell {
                 None => o.str("usage: ping HOST\n"),
             },
             "mt" => mt(o, args),
+            "ota" => ota(o, args),
             "cfg" => cfg(o, args),
             "exit" => return true,
             _ => {
@@ -939,6 +942,65 @@ fn kill(o: &mut Out, pid: u32) {
         // `proc:kill/own` (doc/52): only what this shell started.
         Err(Error::Denied) => o.str("kill: not started from this shell\n"),
         Err(_) => o.str("kill: failed\n"),
+    }
+}
+
+/// `ota ...` (doc/67): a request to the update service, which is started
+/// if it does not run; prints its answer.
+fn ota(o: &mut Out, args: &[&str]) {
+    if args.is_empty() {
+        o.str("usage: ota app FILE | ota kernel FILE | ota reboot\n");
+        return;
+    }
+    let mut req = [0u8; chan::MSG_MAX];
+    let mut n = 0;
+    for (i, a) in args.iter().enumerate() {
+        let part = a.as_bytes();
+        if n + part.len() + 1 > req.len() {
+            o.str("ota: too long\n");
+            return;
+        }
+        if i > 0 {
+            req[n] = b' ';
+            n += 1;
+        }
+        req[n..n + part.len()].copy_from_slice(part);
+        n += part.len();
+    }
+    let c = match Channel::connect("ota") {
+        Ok(c) => c,
+        Err(_) => {
+            run_app(o, "ota", 0, 0);
+            let mut c = None;
+            for _ in 0..50 {
+                sleep_ms(100);
+                if let Ok(x) = Channel::connect("ota") {
+                    c = Some(x);
+                    break;
+                }
+            }
+            match c {
+                Some(c) => c,
+                None => {
+                    o.str("ota: the update service did not start\n");
+                    return;
+                }
+            }
+        }
+    };
+    o.str("ota: working...\n");
+    o.flush();
+    let mut reply = [0u8; chan::MSG_MAX];
+    if c.send(&req[..n]).is_err() {
+        o.str("ota: cannot reach the update service\n");
+        return;
+    }
+    match c.recv(&mut reply) {
+        Ok(k) => {
+            o.str(core::str::from_utf8(&reply[..k]).unwrap_or("?"));
+            o.str("\n");
+        }
+        Err(_) => o.str("ota: no answer (restarting?)\n"),
     }
 }
 

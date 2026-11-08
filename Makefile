@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -40,6 +40,7 @@ PERMIT_cfg    := --permit listen:cfg --permit flash:cfg --permit random --permit
                  --permit svc:fs/rw:T5OS/CONFIG.B --stack 16384
 PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w:wifi.
 PERMIT_c6ota  := --permit svc:net/tcp-connect --permit svc:wifi/ota
+PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r:
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
                  --permit svc:ble/scan --permit svc:ble/central --permit svc:ble/peripheral \
@@ -49,7 +50,7 @@ PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn/shell --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs/rw: --permit svc:net/tcp-connect --permit svc:net/ping \
                  --permit svc:net/resolve --permit svc:net/info --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:mem \
-                 --permit proc:kill/own --permit display:focus --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
+                 --permit proc:kill/own --permit display:focus --permit svc:ota --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
                  --permit svc:cfg/r: --permit svc:cfg/w: --stack 32768
 # What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a
 # service listens) or `ready:NAME` (a process raised the mark). The kernel
@@ -116,7 +117,7 @@ APP_KEY       ?= $(HOME)/.config/tab5-os/app-ed25519.key
 APP_PUB       := keys/app-ed25519.pub
 # Signed with the system key (DEV_KEY): the services and the apps that need
 # strong permissions. The rest get APP_KEY.
-SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota
+SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota ota
 KEY_OF         = $(if $(filter $(1),$(SYSTEM_APPS)),$(DEV_KEY),$(APP_KEY))
 # A key the kernel does not trust, for the rejection test. Not a secret.
 UNTRUSTED_KEY := $(BUILD)/keys/untrusted.key
@@ -367,9 +368,9 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
-p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin
+p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
 test-p4emu: p4emu-prep
 	$(MAKE) --no-print-directory --output-sync=target -j$(P4EMU_JOBS) $(P4EMU_RUNS)
@@ -783,6 +784,33 @@ p4emu-run-35:
 	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-frag.txt 2>&1 || { tail -20 $(BUILD)/emu-frag.txt; false; }
 	grep -q "store.moved name=hello " $(BUILD)/emu-frag.txt
 	grep -q "store.installed name=matter " $(BUILD)/emu-frag.txt
+
+# The card for p4emu-run-36: the test card and, in UPDATE, images to install.
+$(BUILD)/sd-ota.img: $(BUILD)/sd-test.img $(APPS_DIR)/greeter.t5a $(APPS_DIR)/hello-untrusted.t5a $(KERNEL_T5K)
+	cp $(BUILD)/sd-test.img $@
+	MTOOLS_SKIP_CHECK=1 mmd -i $@@@1M ::/UPDATE
+	MTOOLS_SKIP_CHECK=1 mcopy -i $@@@1M $(APPS_DIR)/greeter.t5a ::/UPDATE/greeter.t5a
+	MTOOLS_SKIP_CHECK=1 mcopy -i $@@@1M $(APPS_DIR)/hello-untrusted.t5a ::/UPDATE/untrusted.t5a
+	MTOOLS_SKIP_CHECK=1 mcopy -i $@@@1M $(KERNEL_T5K) ::/UPDATE/kernel.t5k
+
+p4emu-run-36:
+	@# Updates from an app (doc/67): the shell's `ota` starts the update
+	@# service, which installs an app from the SD card through the kernel's
+	@# `update` (store.installed; the new app runs), is refused an image
+	@# signed with an unknown key, writes a kernel package into the other
+	@# slot (kupdate.ready) and restarts (update.reboot ends the run).
+	$(T5EMU) --quiet --max-ms 120000 $(EMU_FLASH) --flash $(BUILD)/t5-kernel-esp32p4v1.bin@10000 $(addprefix --elf ,$(APP_ELFS)) \
+	    --sd $(BUILD)/sd-ota.img \
+	    --ctl "run fs" --ctl "wait-ms 2000" --ctl "run term" --ctl "wait-ms 3000" \
+	    --ctl "keys ota app UPDATE/greeter.t5a\n" --ctl "wait-ms 10000" \
+	    --ctl "keys ota app UPDATE/untrusted.t5a\n" --ctl "wait-ms 6000" \
+	    --ctl "keys run greeter\n" --ctl "wait-ms 2000" \
+	    --ctl "keys ota kernel UPDATE/kernel.t5k\n" --ctl "wait-ms 30000" \
+	    --ctl "keys ota reboot\n" --ctl "wait-ms 3000" \
+	    --expect-event ota.ready --expect-event ota.installed --expect-event store.installed \
+	    --expect-event store.rejected --expect-event hello.greet --expect-event kupdate.ready \
+	    --expect-event update.reboot \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

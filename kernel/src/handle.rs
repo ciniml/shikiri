@@ -36,6 +36,8 @@ pub enum Object {
     Focus(u32),
     /// `proc:mem` (doc/61).
     Mem,
+    /// `update` (doc/67).
+    Update(crate::update::UpdateHandle),
     Random,
     CfgFlash(crate::flash::CfgFlash),
     /// Held for its `Drop`: the mark goes down with the handle.
@@ -139,6 +141,7 @@ impl Object {
             }
             n if n == display::FOCUS.as_bytes() => Ok((Object::Focus(pid), rights::WRITE)),
             n if n == proc::MEM.as_bytes() => Ok((Object::Mem, rights::READ)),
+            n if n == t5_abi::update::NAME.as_bytes() => Ok((Object::Update(crate::update::UpdateHandle::open(pid)?), rights::WRITE | rights::WAIT)),
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == t5_abi::cfgflash::NAME.as_bytes() => {
                 Ok((Object::CfgFlash(crate::flash::CfgFlash::open()?), rights::READ | rights::WRITE | rights::CTL))
@@ -295,7 +298,7 @@ impl Table {
             Object::ApDev(d) => d.ctl(op, arg),
             Object::CfgFlash(f) => f.ctl(op, arg),
             Object::Spawn(s) => s.ctl(op, arg),
-            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Update(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
                 Err(Error::NoSupport)
             }
         }
@@ -404,6 +407,7 @@ impl Table {
             Object::BtHci(b) => b.write(buf),
             Object::Spawn(s) => s.write(buf),
             Object::Kill(k) => k.write(buf),
+            Object::Update(u) => u.write(buf),
             Object::Focus(by) => {
                 let pid = u32::from_le_bytes(buf.try_into().map_err(|_| Error::Size)?);
                 crate::screen::focus_by(pid, *by).map(|_| buf.len())
@@ -497,6 +501,7 @@ impl Table {
             Object::ApDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::BtHci(b) => b.poll().map(|(ev, v)| (i, ev, v)),
             Object::Kbd(k) => k.poll().map(|(ev, v)| (i, ev, v)),
+            Object::Update(u) => u.poll().map(|(ev, v)| (i, ev, v)),
             Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Random => None,
         })
     }

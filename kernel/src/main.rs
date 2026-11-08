@@ -29,6 +29,7 @@ mod log;
 mod platform;
 mod process;
 mod procinfo;
+mod update;
 mod prof;
 mod sched;
 mod screen;
@@ -273,6 +274,18 @@ fn next_pid() -> u32 {
     }
 }
 
+/// The store extents running XIP processes execute from (doc/15 §4): an
+/// install must not write over them.
+pub(crate) fn xip_busy(s: &sched::Scheduler) -> ([(u16, u16); sched::MAX_PROCS], usize) {
+    let mut busy = [(0u16, 0u16); sched::MAX_PROCS];
+    let mut n = 0;
+    for e in s.slots.iter().flatten().filter_map(|p| p.xip_extents) {
+        busy[n] = e;
+        n += 1;
+    }
+    (busy, n)
+}
+
 /// Control frames handled per scheduler poll (every `sched::POLL_MS`).
 const FRAMES_PER_POLL: usize = 4;
 
@@ -296,6 +309,7 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
             settle_updates(s, store);
             spawn_requested(s, store);
             procinfo::poll(s, store);
+            update::poll(s, store, kup);
             kbd::poll();
             touch_log.poll();
             screen::poll();
@@ -582,12 +596,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         }
         Command::InstallBegin { length } => {
             kup.cancel();
-            let mut busy = [(0u16, 0u16); sched::MAX_PROCS];
-            let mut n = 0;
-            for e in s.slots.iter().flatten().filter_map(|p| p.xip_extents) {
-                busy[n] = e;
-                n += 1;
-            }
+            let (busy, n) = xip_busy(s);
             store.install_begin(length, &busy[..n])
         }
         // Answered only on failure (doc/14 §3). Data and end go to the
