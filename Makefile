@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -41,6 +41,7 @@ PERMIT_cfg    := --permit listen:cfg --permit flash:cfg --permit random --permit
 PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w:wifi.
 PERMIT_c6ota  := --permit svc:net/tcp-connect --permit svc:wifi/ota
 PERMIT_kgfx   := --permit display
+PERMIT_imu    := --permit i2c:int/0x68 --permit i2c:int/0x69
 PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
@@ -370,7 +371,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
@@ -886,6 +887,17 @@ p4emu-run-41:
 	    --expect-pixel 20,20,ffff --expect-pixel 600,300,18c4 --expect-pixel 50,690,f800 \
 	    --expect-event screen.taken_away --expect-event kgfx.redraw --expect-event capture.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-42:
+	@# The IMU from an app (doc/69): kumiki's kumiki-bmi270 on
+	@# kumiki_t5os::I2cDevice (the kernel's i2c:int/0x68) finds the BMI270,
+	@# uploads its configuration (33-byte writes, over the FIFO: in two
+	@# pieces with END) and reads samples: 1 g on Z (az_mg=1000).
+	$(T5EMU) --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run imu 3" --ctl "wait-ms 4000" \
+	    --expect-event imu.found --expect-event imu.ready --expect-event imu.sample \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-imu.txt 2>&1 || { tail -20 $(BUILD)/emu-imu.txt; false; }
+	grep -q "imu.sample n=0 ax_mg=0 ay_mg=0 az_mg=1000 gx=10 gy=-20 gz=30" $(BUILD)/emu-imu.txt
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

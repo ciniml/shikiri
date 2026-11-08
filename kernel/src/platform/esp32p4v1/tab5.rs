@@ -261,6 +261,8 @@ pub const NAME: &str = "tab5";
 /// GPIO50).
 pub const I2C: bool = true;
 pub const KBD: bool = true;
+/// The internal I²C bus (I2C1) is brought up at boot (doc/69).
+pub const INTERNAL_I2C: bool = true;
 /// No Ethernet (doc/58).
 pub const ETH: bool = false;
 /// The ESP32-C6 (doc/research/net-stack.md §1.1).

@@ -1114,6 +1114,13 @@ impl Platform for Esp32p4v1 {
         kbd::poll(sink)
     }
 
+    fn i2c_transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), &'static str> {
+        if !board::INTERNAL_I2C {
+            return Err("no internal i2c on this board");
+        }
+        i2c::transfer(addr, tx, rx).map_err(|e| e.as_str())
+    }
+
     fn touch_read(out: &mut [super::TouchPoint; 5]) -> Result<usize, &'static str> {
         board::touch_read(out)
     }

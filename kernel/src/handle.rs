@@ -38,6 +38,8 @@ pub enum Object {
     Mem,
     /// `update` (doc/67).
     Update(crate::update::UpdateHandle),
+    /// A device on the internal I²C bus (doc/69).
+    I2c(I2cDev),
     Random,
     CfgFlash(crate::flash::CfgFlash),
     /// Held for its `Drop`: the mark goes down with the handle.
@@ -99,6 +101,42 @@ impl Drop for SdHandle {
     }
 }
 
+/// A device on the internal I²C bus (doc/69): a `write` is one transfer,
+/// `read` gives what it read.
+pub struct I2cDev {
+    addr: u8,
+    rx: [u8; t5_abi::i2c::MAX],
+    len: usize,
+}
+
+impl I2cDev {
+    fn write(&mut self, req: &[u8]) -> Result<usize, Error> {
+        let (&rlen, tx) = req.split_first().ok_or(Error::Size)?;
+        let rlen = rlen as usize;
+        if rlen > t5_abi::i2c::MAX || tx.len() > t5_abi::i2c::MAX {
+            return Err(Error::Size);
+        }
+        self.len = 0;
+        match Current::i2c_transfer(self.addr, tx, &mut self.rx[..rlen]) {
+            Ok(()) => {
+                self.len = rlen;
+                Ok(req.len())
+            }
+            Err("nack") => Err(Error::NoAck),
+            Err(why) => {
+                t5_abi::event!(Debug, "i2c.failed", addr = self.addr, error = why);
+                Err(Error::Fail)
+            }
+        }
+    }
+
+    fn read(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        let n = self.len.min(out.len());
+        out[..n].copy_from_slice(&self.rx[..n]);
+        Ok(n)
+    }
+}
+
 impl Object {
     /// Opens the object named `name` for process `pid` (the caller has
     /// checked permissions).
@@ -141,6 +179,10 @@ impl Object {
             }
             n if n == display::FOCUS.as_bytes() => Ok((Object::Focus(pid), rights::WRITE)),
             n if n == proc::MEM.as_bytes() => Ok((Object::Mem, rights::READ)),
+            n if n.starts_with(t5_abi::i2c::PREFIX.as_bytes()) => {
+                let addr = t5_abi::i2c::address(n).ok_or(Error::Invalid)?;
+                Ok((Object::I2c(I2cDev { addr, rx: [0; t5_abi::i2c::MAX], len: 0 }), rights::READ | rights::WRITE))
+            }
             n if n == t5_abi::update::NAME.as_bytes() => Ok((Object::Update(crate::update::UpdateHandle::open(pid)?), rights::READ | rights::WRITE | rights::WAIT)),
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == t5_abi::cfgflash::NAME.as_bytes() => {
@@ -298,7 +340,7 @@ impl Table {
             Object::ApDev(d) => d.ctl(op, arg),
             Object::CfgFlash(f) => f.ctl(op, arg),
             Object::Spawn(s) => s.ctl(op, arg),
-            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Update(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Update(_) | Object::I2c(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
                 Err(Error::NoSupport)
             }
         }
@@ -408,6 +450,7 @@ impl Table {
             Object::Spawn(s) => s.write(buf),
             Object::Kill(k) => k.write(buf),
             Object::Update(u) => u.write(buf),
+            Object::I2c(d) => d.write(buf),
             Object::Focus(by) => {
                 let pid = u32::from_le_bytes(buf.try_into().map_err(|_| Error::Size)?);
                 crate::screen::focus_by(pid, *by).map(|_| buf.len())
@@ -434,6 +477,7 @@ impl Table {
             Object::List(l) => l.read(buf),
             Object::Mem => crate::procinfo::read_mem(buf),
             Object::Update(u) => u.read(buf),
+            Object::I2c(d) => d.read(buf),
             Object::Random => {
                 // Nothing from a read during which a health test failed
                 // (doc/47 §6).
@@ -503,7 +547,7 @@ impl Table {
             Object::BtHci(b) => b.poll().map(|(ev, v)| (i, ev, v)),
             Object::Kbd(k) => k.poll().map(|(ev, v)| (i, ev, v)),
             Object::Update(u) => u.poll().map(|(ev, v)| (i, ev, v)),
-            Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Random => None,
+            Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::I2c(_) | Object::Random => None,
         })
     }
 

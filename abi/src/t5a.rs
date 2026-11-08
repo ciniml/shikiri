@@ -321,8 +321,13 @@ fn entries(permissions: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// marks, starting or stopping any app, files outside the app's own
 /// folder, secrets in the settings, changing the network, a CPU partition
 /// (doc/57), the Wi-Fi chip's firmware (doc/58 R5), and putting any
-/// app's screen in front (doc/60 F3), and updates (doc/67).
+/// app's screen in front (doc/60 F3), updates (doc/67), and the I²C
+/// bus but the IMU (doc/69).
 pub fn strong(entry: &[u8]) -> bool {
+    // I²C (doc/69): the whole bus, or any device but the IMU.
+    if entry.starts_with(b"i2c:") {
+        return !crate::i2c::address(entry).is_some_and(|a| crate::i2c::APP_DEVICES.contains(&a));
+    }
     const EXACT: [&[u8]; 12] = [
         b"sd",
         b"wlan:ctl",
@@ -433,4 +438,22 @@ fn parse_inner(signed: &[u8], want_abi: Option<(u16, u16)>) -> Result<Image<'_>,
         image: &signed[image_off..relocs_off],
         relocs: &signed[relocs_off..],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strong;
+
+    /// I²C (doc/69): the whole bus and every device but the IMU need the
+    /// system key.
+    #[test]
+    fn i2c_permits() {
+        assert!(strong(b"i2c:int"));
+        assert!(strong(b"i2c:int/0x43"));
+        assert!(strong(b"i2c:int/0x44"));
+        assert!(!strong(b"i2c:int/0x68"));
+        assert!(!strong(b"i2c:int/0x69"));
+        assert!(strong(b"i2c:int/68"));
+        assert!(strong(b"i2c:ext/0x68"));
+    }
 }

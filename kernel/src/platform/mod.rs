@@ -154,6 +154,11 @@ pub trait Platform {
     fn kbd_poll(_sink: &mut dyn FnMut(u8, u8)) -> Result<(), &'static str> {
         Err("no keyboard")
     }
+    /// One transfer on the board's internal I²C bus (doc/69): `tx` sent to
+    /// `addr`, then `rx` read after a repeated start (empty: none).
+    fn i2c_transfer(_addr: u8, _tx: &[u8], _rx: &mut [u8]) -> Result<(), &'static str> {
+        Err("no internal i2c")
+    }
     /// Reads the touch points into `out`; returns how many (0 = no touch).
     fn touch_read(_out: &mut [TouchPoint; 5]) -> Result<usize, &'static str> {
         Err("no touch")

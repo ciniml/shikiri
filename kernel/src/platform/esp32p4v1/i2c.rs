@@ -88,6 +88,8 @@ const TO_VALUE: u32 = 17;
 const SP_RST_SLV_EN: u32 = 1 << 0;
 const SR_BUS_BUSY: u32 = 1 << 4;
 
+/// The command list reached an END (the bus is held, doc/69).
+const INT_END_DETECT: u32 = 1 << 3;
 const INT_TRANS_COMPLETE: u32 = 1 << 7;
 const INT_NACK: u32 = 1 << 10;
 /// TIME_OUT, ARBITRATION_LOST, SCL_ST_TO, SCL_MAIN_ST_TO.
@@ -99,6 +101,10 @@ const CMD_WRITE_ACK: u32 = (1 << 11) | (1 << 8);
 const CMD_READ: u32 = 3 << 11;
 const CMD_READ_NACK: u32 = CMD_READ | (1 << 10);
 const CMD_STOP: u32 = 2 << 11;
+/// Pauses the transfer holding the bus until TRANS_START again (i2c_ll.h).
+const CMD_END: u32 = 4 << 11;
+/// The longest write `transfer_on` takes (in pieces over END, doc/69).
+pub const WRITE_MAX: usize = 64;
 
 const FIFO_SIZE: usize = 32;
 /// Software limit on one transfer, well above 31 bytes at 100 kHz (~3 ms).
@@ -219,6 +225,10 @@ pub fn transfer(addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
 /// reads `rx` after a repeated start. An empty `tx` and `rx` only checks
 /// for an ACK.
 pub fn transfer_on(b: &Bus, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Error> {
+    // A longer write (no read): in two pieces, the bus held between them.
+    if tx.len() + 2 > FIFO_SIZE && rx.is_empty() && tx.len() <= WRITE_MAX {
+        return long_write(b, addr, tx);
+    }
     if tx.len() + 2 > FIFO_SIZE || rx.len() >= FIFO_SIZE {
         return Err(Error::TooLong);
     }
@@ -282,6 +292,76 @@ pub fn transfer_on(b: &Bus, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), Er
         // itself; wait until the bus is free. No reset and no bus clear:
         // the clear's 9 SCL pulses after every NACK (an I2C scan) made the
         // GT911 stop answering until its next reset (doc/17 §9).
+        Err(Error::Nack) => {
+            let end = Esp32p4v1::now() + 16 * TRANSFER_US;
+            while unsafe { rd(b.base + SR) } & SR_BUS_BUSY != 0 {
+                if Esp32p4v1::now() > end {
+                    recover(b);
+                    break;
+                }
+            }
+            fifo_reset(b);
+            Err(Error::Nack)
+        }
+        Err(e) => {
+            recover(b);
+            Err(e)
+        }
+    }
+}
+
+/// Waits for `done` (END_DETECT or TRANS_COMPLETE) of the running
+/// command list.
+fn wait_for(b: &Bus, done: u32) -> Result<(), Error> {
+    let end = Esp32p4v1::now() + 16 * TRANSFER_US;
+    loop {
+        let raw = unsafe { rd(b.base + INT_RAW) };
+        if raw & INT_NACK != 0 {
+            return Err(Error::Nack);
+        }
+        if raw & INT_ERRORS != 0 || Esp32p4v1::now() > end {
+            return Err(Error::Bus);
+        }
+        if raw & done != 0 {
+            return Ok(());
+        }
+    }
+}
+
+/// A write longer than the FIFO holds (doc/69), as ESP-IDF's driver does:
+/// the address and the first bytes, END (the controller holds SCL low),
+/// then the rest and STOP.
+fn long_write(b: &Bus, addr: u8, tx: &[u8]) -> Result<(), Error> {
+    let first = FIFO_SIZE - 1;
+    let (a, rest) = tx.split_at(first.min(tx.len()));
+    fifo_reset(b);
+    unsafe {
+        wr(b.base + INT_CLR, 0x3FFFF);
+        wr(b.base + DATA, (addr as u32) << 1);
+        for &byte in a {
+            wr(b.base + DATA, byte as u32);
+        }
+        wr(b.base + COMD0, CMD_RSTART);
+        wr(b.base + COMD0 + 4, CMD_WRITE_ACK | (1 + a.len() as u32));
+        wr(b.base + COMD0 + 8, CMD_END);
+    }
+    update(b);
+    set_bits(b.base + CTR, CTR_TRANS_START);
+    let r = wait_for(b, INT_END_DETECT).and_then(|()| {
+        unsafe {
+            wr(b.base + INT_CLR, 0x3FFFF);
+            for &byte in rest {
+                wr(b.base + DATA, byte as u32);
+            }
+            wr(b.base + COMD0, CMD_WRITE_ACK | rest.len() as u32);
+            wr(b.base + COMD0 + 4, CMD_STOP);
+        }
+        update(b);
+        set_bits(b.base + CTR, CTR_TRANS_START);
+        wait_for(b, INT_TRANS_COMPLETE)
+    });
+    match r {
+        Ok(()) => Ok(()),
         Err(Error::Nack) => {
             let end = Esp32p4v1::now() + 16 * TRANSFER_US;
             while unsafe { rd(b.base + SR) } & SR_BUS_BUSY != 0 {

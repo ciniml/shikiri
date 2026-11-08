@@ -1,7 +1,7 @@
 //! I2C1 (0x500C_5000) with the Tab5's internal bus devices that M6a talks
 //! to (doc/17 §7): the two PI4IOE5V6408 IO expanders (0x43, 0x44) and the
 //! GT911 touch controller (0x14) of the ILI9881C lot, as on the Tab5 at hand,
-//! reporting one fixed touch point.
+//! reporting one fixed touch point, and the BMI270 IMU (0x68, doc/69).
 //! The command list runs at once when TRANS_START is set; timing is not
 //! modelled. Register layout: doc/research/m6-panel-touch.md §1.3.
 
@@ -25,6 +25,7 @@ const SCL_SP_CONF: u32 = 0x80;
 const CTR_TRANS_START: u32 = 1 << 5;
 const FIFO_RX_RST: u32 = 1 << 12;
 const FIFO_TX_RST: u32 = 1 << 13;
+const INT_END_DETECT: u32 = 1 << 3;
 const INT_TRANS_COMPLETE: u32 = 1 << 7;
 const INT_NACK: u32 = 1 << 10;
 
@@ -48,6 +49,58 @@ impl Expander {
         e.regs[0x07] = 0xFF;
         e.regs[0x0B] = 0xFF;
         e
+    }
+}
+
+/// The BMI270 (doc/69): CHIP_ID, soft reset, the configuration upload
+/// (INIT_DATA does not advance the register pointer), INIT_CTRL = 1 makes
+/// INTERNAL_STATUS 1, and fixed samples: 1 g on Z (4096 LSB), the angular
+/// rate (10, -20, 30).
+pub const BMI270_ADDR: u8 = 0x68;
+
+struct Bmi270 {
+    regs: [u8; 0x80],
+    reg: u8,
+    written: usize,
+    /// Configuration bytes uploaded.
+    pub uploaded: u32,
+}
+
+impl Bmi270 {
+    fn new() -> Bmi270 {
+        let mut b = Bmi270 { regs: [0; 0x80], reg: 0, written: 0, uploaded: 0 };
+        b.reset();
+        b
+    }
+
+    fn reset(&mut self) {
+        self.regs = [0; 0x80];
+        self.regs[0x00] = 0x24;
+        self.regs[0x0C..0x12].copy_from_slice(&[0, 0, 0, 0, 0x00, 0x10]);
+        self.regs[0x12..0x18].copy_from_slice(&[10, 0, 0xEC, 0xFF, 30, 0]);
+    }
+
+    fn write(&mut self, b: u8) {
+        if self.written == 0 {
+            self.reg = b & 0x7F;
+        } else {
+            match (self.reg, b) {
+                (0x7E, 0xB6) => self.reset(),
+                (0x59, 1) => self.regs[0x21] = 1,
+                (0x5E, _) => self.uploaded += 1,
+                (r, v) => self.regs[r as usize] = v,
+            }
+            if self.reg != 0x5E {
+                self.reg = (self.reg + 1) & 0x7F;
+            }
+        }
+        self.written += 1;
+    }
+
+    fn read(&mut self) -> u8 {
+        let v = self.regs[self.reg as usize];
+        self.reg = (self.reg + 1) & 0x7F;
+        v
     }
 }
 
@@ -181,6 +234,7 @@ pub struct I2c {
     rx: VecDeque<u8>,
     exp: [Expander; 2],
     touch: Gt911,
+    imu: Bmi270,
     /// Device addressed since the last start, if it answered.
     target: Option<u8>,
     /// Transfers that ran, for tests.
@@ -198,6 +252,7 @@ impl Default for I2c {
             rx: VecDeque::new(),
             exp: [Expander::new(), Expander::new()],
             touch: Gt911::default(),
+            imu: Bmi270::new(),
             target: None,
             transfers: 0,
             exp2_writes: 0,
@@ -276,6 +331,12 @@ impl I2c {
                     raw |= INT_TRANS_COMPLETE; // STOP
                     break;
                 }
+                // END: paused, the device stays addressed; the next
+                // TRANS_START goes on (a write longer than the FIFO, doc/69).
+                4 => {
+                    raw |= INT_END_DETECT;
+                    break;
+                }
                 _ => break,
             }
         }
@@ -294,6 +355,12 @@ impl I2c {
             0x14 => {
                 if !read {
                     self.touch.written = 0;
+                }
+                true
+            }
+            BMI270_ADDR => {
+                if !read {
+                    self.imu.written = 0;
                 }
                 true
             }
@@ -323,6 +390,7 @@ impl I2c {
                 }
                 e.written += 1;
             }
+            Some(BMI270_ADDR) => self.imu.write(b),
             Some(KBD_ADDR) => {
                 // Register, then data (mode and interrupt settings: taken
                 // as given).
@@ -356,6 +424,7 @@ impl I2c {
                 v
             }
             Some(KBD_ADDR) => self.kbd.as_mut().unwrap().read_byte(),
+            Some(BMI270_ADDR) => self.imu.read(),
             Some(0x14) => {
                 let v = self.touch.read_reg(self.touch.reg);
                 self.touch.reg = self.touch.reg.wrapping_add(1);

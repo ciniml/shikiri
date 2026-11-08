@@ -16,6 +16,8 @@ use crate::platform::{Panel, TouchPoint};
 pub const NAME: &str = "p4evb";
 pub const I2C: bool = false;
 pub const KBD: bool = false;
+/// No internal I²C bus set up (doc/69).
+pub const INTERNAL_I2C: bool = false;
 /// The IP101GRI on RMII (`emac.rs`).
 pub const ETH: bool = true;
 pub const SDIO: super::sdio::Pins = super::sdio::Pins { clk: 18, cmd: 19, data: [14, 15, 16, 17], chip_en: 54 };

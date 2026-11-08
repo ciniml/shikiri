@@ -36,8 +36,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// `Error::Limit`, `spawn::RESTART`. Minor 21 (doc/58 R5): `wait` returns
 /// the time too. Minor 22 (doc/60 F2): `display::HIDDEN`/`SHOWN`. Minor
 /// 23 (doc/60 F3): `display:focus`. Minor 24 (doc/61): `proc:mem`, the
-/// text size in `proc:list`. Minor 25 (doc/67): `update`.
-pub const ABI_MINOR: u16 = 25;
+/// text size in `proc:list`. Minor 25 (doc/67): `update`. Minor 26
+/// (doc/69): `i2c:int/ADDR`.
+pub const ABI_MINOR: u16 = 26;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -767,6 +768,31 @@ pub mod update {
     pub mod status {
         pub const OK: usize = 0;
         pub const FAILED: usize = 1;
+    }
+}
+
+/// One device on the board's internal I²C bus (doc/69): open
+/// `i2c:int/0xNN` (the 7-bit address in hex, two digits). The permission
+/// names the device (`i2c:int/0x68`) or the whole bus (`i2c:int`, system
+/// key only; so is every device but `APP_DEVICES`, as the bus also carries
+/// the IO expanders that switch the power). A `write` is one transfer:
+/// `[read_len, bytes to send...]` (at most `MAX` each): the bytes are sent,
+/// then, after a repeated start, `read_len` bytes are read; `read` returns
+/// those. Errors: `NoAck` (no answer), `Fail`.
+pub mod i2c {
+    pub const PREFIX: &str = "i2c:int/";
+    pub const MAX: usize = 64;
+    /// Devices app-key images may name: the IMU (BMI270 at 0x68 or 0x69).
+    pub const APP_DEVICES: [u8; 2] = [0x68, 0x69];
+
+    /// The address in an object name `i2c:int/0xNN`.
+    pub fn address(name: &[u8]) -> Option<u8> {
+        let hex = name.strip_prefix(PREFIX.as_bytes())?.strip_prefix(b"0x")?;
+        if hex.len() != 2 {
+            return None;
+        }
+        let v = core::str::from_utf8(hex).ok()?;
+        u8::from_str_radix(v, 16).ok().filter(|&a| a < 0x80)
     }
 }
 

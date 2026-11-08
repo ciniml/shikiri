@@ -1,0 +1,10 @@
+[package]
+name = "imu"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+t5-rt = { path = "../../rt" }
+kumiki-t5os = { path = "../../kumiki-t5os" }
+kumiki-bmi270 = { path = "../../../../m5-rs/drivers/kumiki-bmi270" }
