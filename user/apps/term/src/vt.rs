@@ -47,6 +47,10 @@ pub struct Cell {
 /// space), so the grids can live in `.bss`.
 pub type Grid = [[Cell; COLS]; ROWS];
 
+/// Lines kept after they scroll off the top of the main screen (doc/62).
+pub const HISTORY: usize = 200;
+pub type History = [[Cell; COLS]; HISTORY];
+
 /// The cells changed since the last `take_damage`: rows and columns,
 /// end exclusive.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -411,6 +415,13 @@ pub const RESPONSE_MAX: usize = 64;
 
 pub struct Screen {
     grids: &'static mut [Grid; 2],
+    /// The lines scrolled off the main screen, a ring: `hist_len` of them
+    /// from `hist_head` (the oldest).
+    history: &'static mut History,
+    hist_head: usize,
+    hist_len: usize,
+    /// How many lines back the view is (0: the screen as it is).
+    view: usize,
     p: Page,
     /// The inactive screen.
     other: Page,
@@ -429,9 +440,13 @@ fn clamp(v: i32, hi_inclusive: usize) -> usize {
 
 impl Screen {
     /// The grids start blank (zeroed).
-    pub fn new(grids: &'static mut [Grid; 2]) -> Screen {
+    pub fn new(grids: &'static mut [Grid; 2], history: &'static mut History) -> Screen {
         Screen {
             grids,
+            history,
+            hist_head: 0,
+            hist_len: 0,
+            view: 0,
             p: Page::new(0),
             other: Page::new(1),
             alt_active: false,
@@ -444,8 +459,45 @@ impl Screen {
         }
     }
 
+    /// The cell shown at (row, col): the screen's, or the history's while
+    /// the view is back.
     pub fn at(&self, row: usize, col: usize) -> &Cell {
-        &self.grids[self.p.g][row][col]
+        if self.view == 0 {
+            return &self.grids[self.p.g][row][col];
+        }
+        let line = self.hist_len - self.view + row;
+        if line < self.hist_len { &self.history[(self.hist_head + line) % HISTORY][col] } else { &self.grids[self.p.g][line - self.hist_len][col] }
+    }
+
+    /// How many lines back the view is, and how many there are.
+    pub fn view(&self) -> (usize, usize) {
+        (self.view, self.hist_len)
+    }
+
+    /// Moves the view `lines` back (negative: forward); 0 back is the
+    /// screen as it is. Not on the alternate screen (full-screen apps).
+    pub fn scroll_view(&mut self, lines: isize) {
+        let max = if self.alt_active { 0 } else { self.hist_len };
+        let to = (self.view as isize + lines).clamp(0, max as isize) as usize;
+        if to != self.view {
+            self.view = to;
+            self.mark_all();
+        }
+    }
+
+    /// Keeps the line at the top of the main screen (doc/62).
+    fn keep(&mut self, row: usize) {
+        let i = (self.hist_head + self.hist_len) % HISTORY;
+        self.history[i] = self.grids[self.p.g][row];
+        if self.hist_len < HISTORY {
+            self.hist_len += 1;
+        } else {
+            self.hist_head = (self.hist_head + 1) % HISTORY;
+        }
+        // A view back stays on the same lines.
+        if self.view > 0 {
+            self.view = (self.view + 1).min(self.hist_len);
+        }
     }
 
     pub fn cursor(&self) -> (usize, usize) {
@@ -556,6 +608,12 @@ impl Screen {
         if bot <= top || n == 0 {
             return;
         }
+        // Lines leaving the top of the main screen go to the history.
+        if top == 0 && !self.alt_active {
+            for row in 0..n.min(bot) {
+                self.keep(row);
+            }
+        }
         if n >= bot - top {
             self.clear_cells(top, 0, bot, COLS);
             return;
@@ -657,7 +715,13 @@ impl Screen {
                 self.clear_cells(0, 0, row, COLS);
                 self.clear_cells(row, 0, row + 1, col + 1);
             }
-            2 | 3 => self.clear_cells(0, 0, ROWS, COLS),
+            2 => self.clear_cells(0, 0, ROWS, COLS),
+            // And the history (xterm's "erase saved lines").
+            3 => {
+                self.clear_cells(0, 0, ROWS, COLS);
+                self.hist_len = 0;
+                self.view = 0;
+            }
             _ => {}
         }
     }
@@ -698,6 +762,7 @@ impl Screen {
         // The alternate screen starts cleared, in the default state.
         self.clear_page();
         self.alt_active = true;
+        self.view = 0;
         self.mark_all();
     }
 

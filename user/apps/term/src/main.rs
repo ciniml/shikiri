@@ -36,6 +36,10 @@ const RESTART_MS: u64 = 1000;
 
 const BLANK_GRID: Grid = [[Cell { ch: '\0', fg: Color::Default, bg: Color::Default, attrs: 0 }; COLS]; ROWS];
 static mut GRIDS: [Grid; 2] = [BLANK_GRID; 2];
+/// The lines scrolled off the top (doc/62), zero like the grids: in `.bss`.
+static mut HISTORY: vt::History = [BLANK_GRID[0]; vt::HISTORY];
+/// Lines Shift+PgUp/PgDn move the view.
+const VIEW_PAGE: isize = ROWS as isize - 2;
 /// What each cell on the screen shows: the cell, and whether the cursor is
 /// on it. Cells that would be drawn the same are skipped (doc/42).
 static mut SHOWN: [[(Cell, bool); COLS]; ROWS] = [[(BLANK_GRID[0][0], false); COLS]; ROWS];
@@ -81,7 +85,7 @@ fn main(mode: usize, _: usize) -> usize {
     };
     let launcher = Handle::open(spawn::NAME, rights::WRITE).ok();
     let mut t = Term {
-        screen: vt::Screen::new(unsafe { &mut *core::ptr::addr_of_mut!(GRIDS) }),
+        screen: vt::Screen::new(unsafe { &mut *core::ptr::addr_of_mut!(GRIDS) }, unsafe { &mut *core::ptr::addr_of_mut!(HISTORY) }),
         parser: vt::Parser::new(),
         cursor_drawn: None,
         shown: unsafe { &mut *core::ptr::addr_of_mut!(SHOWN) },
@@ -152,16 +156,12 @@ fn main(mode: usize, _: usize) -> usize {
             while let Ok(len) = k.read(&mut ev) {
                 for e in ev[..len].chunks(kbd::EVENT_SIZE) {
                     repeat.event(e[0], e[1], now);
-                    let mut b = [0u8; keys::MAX_BYTES];
-                    let m = keys::translate(e[1], e[0], &mut b);
-                    send(&b[..m], &client);
+                    key(&mut t, e[0], e[1], &mut |b| send(b, &client));
                 }
             }
         }
         if let Some((m, u)) = repeat.take(now) {
-            let mut b = [0u8; keys::MAX_BYTES];
-            let len = keys::translate(u, m, &mut b);
-            send(&b[..len], &client);
+            key(&mut t, m, u, &mut |b| send(b, &client));
         }
         if let Ok(c) = listener.accept() {
             if client.is_none() {
@@ -204,6 +204,36 @@ fn main(mode: usize, _: usize) -> usize {
         }
         if screen {
             t.draw(&mut d);
+        }
+    }
+}
+
+/// A key pressed (or repeated): moves the view through the history
+/// (doc/62), or goes to the client as bytes, bringing the view back first.
+fn key(t: &mut Term, modifiers: u8, usage: u8, send: &mut dyn FnMut(&[u8])) {
+    if let Some(lines) = keys::view_scroll(modifiers, usage, VIEW_PAGE) {
+        t.screen.scroll_view(lines);
+        let (back, of) = t.screen.view();
+        event!(Info, "term.view", back = back as u32, lines = of as u32);
+        return;
+    }
+    let mut b = [0u8; keys::MAX_BYTES];
+    let n = keys::translate(usage, modifiers, &mut b);
+    if n > 0 {
+        t.screen.scroll_view(isize::MIN / 2);
+        send(&b[..n]);
+    }
+}
+
+/// `v` in decimal, in `buf`.
+fn num(mut v: usize, buf: &mut [u8; 5]) -> &[u8] {
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 || i == 0 {
+            return &buf[i..];
         }
     }
 }
@@ -297,7 +327,8 @@ impl Term {
             self.screen.mark_all();
         }
         let mut dmg = self.screen.take_damage();
-        let cursor = self.screen.cursor_visible.then(|| self.screen.cursor());
+        // No cursor while the view is back in the history.
+        let cursor = (self.screen.cursor_visible && self.screen.view().0 == 0).then(|| self.screen.cursor());
         // The cursor's old and new cells.
         for (r, c) in [self.cursor_drawn, cursor].into_iter().flatten() {
             if dmg.is_empty() {
@@ -361,6 +392,20 @@ impl Term {
     /// the character and colours of its head (so it is drawn again when
     /// the head changes).
     fn cell_at(&self, r: usize, c: usize) -> Cell {
+        // While the view is back: where, at the top right (doc/62).
+        let (back, of) = self.screen.view();
+        if back > 0 && r == 0 {
+            let (mut b1, mut b2) = ([0; 5], [0; 5]);
+            let mut label = [b' '; 16];
+            let mut n = 0;
+            for part in [b"[-".as_slice(), num(back, &mut b1), b"/".as_slice(), num(of, &mut b2), b"]".as_slice()] {
+                label[n..n + part.len()].copy_from_slice(part);
+                n += part.len();
+            }
+            if c >= COLS - n {
+                return Cell { ch: label[c - (COLS - n)] as char, fg: Color::Default, bg: Color::Default, attrs: attr::REVERSE };
+            }
+        }
         let cell = *self.screen.at(r, c);
         if cell.attrs & attr::WIDE_CONT != 0 && c > 0 {
             let head = *self.screen.at(r, c - 1);
@@ -374,7 +419,8 @@ impl Term {
     /// Cells whose pixels differ from what the screen holds (the bench's
     /// check that moving the framebuffer kept it right).
     fn check(&self, d: &mut Display) -> u32 {
-        let cursor = self.screen.cursor_visible.then(|| self.screen.cursor());
+        // No cursor while the view is back in the history.
+        let cursor = (self.screen.cursor_visible && self.screen.view().0 == 0).then(|| self.screen.cursor());
         let mut wrong = 0;
         for r in 0..ROWS {
             for c in 0..COLS {

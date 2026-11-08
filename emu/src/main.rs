@@ -148,9 +148,12 @@ impl Monitor<'_> {
 }
 
 /// `keys TEXT`: typed on the emulated keyboard (doc/39), not sent. `\n`
-/// is Enter, `<switch>` the seat switch key (doc/60 §8).
+/// is Enter, `\t` Tab, `<switch>` the seat switch key (doc/60 §8),
+/// `<pgup>`/`<pgdn>` Shift+PgUp/PgDn (doc/62).
 fn keys(line: &str) -> Option<String> {
-    line.strip_prefix("keys ").map(|t| t.replace("\\n", "\n").replace("<switch>", "\u{E000}"))
+    line.strip_prefix("keys ").map(|t| {
+        t.replace("\\n", "\n").replace("\\t", "\t").replace("<switch>", "\u{E000}").replace("<pgup>", "\u{E001}").replace("<pgdn>", "\u{E002}")
+    })
 }
 
 /// `wait-ms N`: a pause between commands (see `Monitor`), not sent.

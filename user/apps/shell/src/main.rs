@@ -2,8 +2,8 @@
 #![no_main]
 
 //! A command shell on `svc:tty` (doc/39): reads keys from the terminal,
-//! edits a line (Backspace, Ctrl-U, Ctrl-C, Up/Down for history) and runs
-//! built-in commands; `help` lists them.
+//! edits a line (Backspace, Ctrl-U, Ctrl-C, Up/Down for history, Tab to
+//! complete, doc/62) and runs built-in commands; `help` lists them.
 //!
 //! Built with `--permit svc:tty --permit svc:fs --permit svc:net --permit
 //! proc:spawn --permit proc:list --permit proc:apps --permit proc:kill`.
@@ -12,6 +12,8 @@
 use t5_rt::{CfgError, Channel, Config, Error, Files, Handle, Net, chan, display, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
 
 t5_rt::entry!(main);
+
+mod complete;
 
 const LINE_MAX: usize = 160;
 const HISTORY: usize = 8;
@@ -163,6 +165,7 @@ impl Out {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Line {
     buf: [u8; LINE_MAX],
     len: usize,
@@ -249,6 +252,7 @@ impl Shell {
             }
             // Ctrl-U: the whole line.
             (Esc::None, 0x15) => self.erase_line(),
+            (Esc::None, b'\t') => self.complete(),
             // Ctrl-C: give up the line.
             (Esc::None, 0x03) => {
                 self.out.str("^C\n");
@@ -272,6 +276,54 @@ impl Shell {
             _ => {}
         }
         false
+    }
+
+    /// Tab (doc/62): completes the word at the end of the line, as far as
+    /// the candidates agree; lists them when that adds nothing.
+    fn complete(&mut self) {
+        let line = self.line;
+        let text = line.as_str();
+        let (c, start) = complete::candidates(text);
+        let word = &text[start..];
+        if c.n == 0 {
+            return;
+        }
+        let (take, end) = if c.n == 1 { (c.name(0).len(), Some(if c.is_dir(0) { b'/' } else { b' ' })) } else { (c.common(), None) };
+        if take > word.len() || end.is_some() {
+            // The candidate's spelling (a file's case) replaces the word.
+            for _ in 0..word.len() {
+                self.out.str("\x08 \x08");
+            }
+            self.line.len = start;
+            let name = c.name(0).as_bytes();
+            for &b in name[..take].iter().chain(end.as_slice()) {
+                if self.line.len < LINE_MAX {
+                    self.line.buf[self.line.len] = b;
+                    self.line.len += 1;
+                    self.out.raw(b);
+                }
+            }
+            return;
+        }
+        // Nothing to add: show them, then the line again.
+        self.out.str("\n");
+        let mut col = 0;
+        for i in 0..c.n {
+            let w = c.name(i).len() + c.is_dir(i) as usize + 2;
+            if col > 0 && col + w > 80 {
+                self.out.str("\n");
+                col = 0;
+            }
+            self.out.str(c.name(i));
+            self.out.str(if c.is_dir(i) { "/  " } else { "  " });
+            col += w;
+        }
+        if c.more {
+            self.out.str("...");
+        }
+        self.out.str("\n");
+        self.out.str(PROMPT);
+        self.out.str(text);
     }
 
     fn erase_line(&mut self) {
@@ -339,7 +391,9 @@ impl Shell {
                  cfg set KEY [VALUE]   change a setting (words joined by a space)\n\
                  cfg secret KEY VALUE  a setting only wifi may read back\n\
                  cfg rm KEY            delete a setting\n\
-                 exit                  end the shell (term starts a new one)\n",
+                 more FILE             a file a screen at a time\n\
+                 exit                  end the shell (term starts a new one)\n\
+                 Tab completes commands, apps (run), processes (fg) and files.\n",
             ),
             "echo" => {
                 for (i, a) in args.iter().enumerate() {
@@ -364,6 +418,10 @@ impl Shell {
             "cat" => match args.first() {
                 Some(f) => cat(o, f),
                 None => o.str("usage: cat FILE\n"),
+            },
+            "more" => match args.first() {
+                Some(f) => more(o, f),
+                None => o.str("usage: more FILE\n"),
             },
             "write" => match args.split_first() {
                 Some((f, words)) => write(o, f, words),
@@ -583,6 +641,62 @@ fn cat(o: &mut Out, path: &str) {
         }
         for &b in &buf[..n] {
             o.byte(b);
+        }
+    }
+    let _ = f.close(id);
+}
+
+/// Rows `more` shows before it asks: the terminal's, but the prompt's.
+const MORE_ROWS: usize = 21;
+
+/// `more FILE` (doc/62): a screen at a time. Space shows the next screen,
+/// Enter the next line, q or Ctrl-C stops.
+fn more(o: &mut Out, path: &str) {
+    let Ok(mut f) = Files::connect() else {
+        o.str("more: no file service\n");
+        return;
+    };
+    let Ok(id) = f.open(path, fs::flag::READ) else {
+        o.str("more: cannot open ");
+        o.str(path);
+        o.str("\n");
+        return;
+    };
+    let mut buf = [0u8; 512];
+    // Rows still to show before asking, and the column (lines wrap at 80).
+    let (mut left, mut col) = (MORE_ROWS, 0);
+    'file: while let Ok(n) = f.read(id, &mut buf) {
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            if left == 0 {
+                o.str("\x1b[7m--More-- (space, Enter, q)\x1b[m");
+                o.flush();
+                let mut k = [0u8; chan::MSG_MAX];
+                let key = loop {
+                    match keys(o, &mut k, 1000) {
+                        Ok(0) => {}
+                        Ok(_) => break k[0],
+                        Err(_) => break b'q',
+                    }
+                };
+                o.str("\r\x1b[K");
+                match key {
+                    b' ' => left = MORE_ROWS,
+                    b'\r' | b'\n' => left = 1,
+                    _ => break 'file,
+                }
+            }
+            o.byte(b);
+            if b == b'\n' {
+                (left, col) = (left - 1, 0);
+            } else if b != b'\r' {
+                col += 1;
+                if col == 80 {
+                    (left, col) = (left - 1, 0);
+                }
+            }
         }
     }
     let _ = f.close(id);

@@ -6,6 +6,17 @@ const MOD_CTRL: u8 = 0x01 | 0x10;
 const MOD_SHIFT: u8 = 0x02 | 0x20;
 const MOD_ALT: u8 = 0x04 | 0x40;
 
+/// Shift+PgUp / Shift+PgDn (doc/62): moves the view through the history
+/// by `page` lines instead of going to the client. Positive: back.
+pub fn view_scroll(modifiers: u8, usage: u8, page: isize) -> Option<isize> {
+    match usage {
+        _ if modifiers & MOD_SHIFT == 0 || modifiers & (MOD_CTRL | MOD_ALT) != 0 => None,
+        PAGE_UP => Some(page),
+        PAGE_DOWN => Some(-page),
+        _ => None,
+    }
+}
+
 /// Longest output of one key.
 pub const MAX_BYTES: usize = 12;
 
