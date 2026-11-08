@@ -44,7 +44,14 @@
 - p4emu-run-38: otadata が `pending_verify`、label に 10.55.0.1:8080（`elf2t5a otadata OUT 1 1 10.55.0.1:8080`）で起動。自己試験の後に待ち、`ota` がつながって確定する。
 - p4emu-run-39: 同じでサーバがない。300 秒後に無効にして再起動（`--expect-reset`）。
 
-## 8. まだ
-- 実機（Tab5）での確かめ（PC で `python3 -m http.server` を立て、`ota app http://PC:8000/...`）。
+## 8. 実機（Tab5、2026-11-08）
+- カーネルとアプリ（`ota` は自分で起動する版）を入れた。`make install-apps` は、doc/65 の直しで全部入った。
+- PC で `python3 -m http.server 8089 --directory build` を立てた（8000 番は PC の別のサービスが使っていた）。
+- **PC の Wi-Fi のアドレス（192.168.8.107）には届かなかった**（`error cannot connect`）。Tab5 からルーター（192.168.8.1）とインターネット（1.1.1.1）には ping が届くが、PC には届かず、PC の ICMP の受信の数も 0 だった。同じ AP（BSSID 2e:ea:03:08:e7:62）につながっていて、利用者によるとクライアントアイソレーションは無効。PC の USB の Wi-Fi のアダプタが、他の機器のマルチキャスト（mDNS）を 15 秒で 1 つも受けていなかったので、ブロードキャスト（Tab5 の ARP の問い合わせ）を受けられていないのではないか（推測、未確認）。
+- PC の有線のアドレス（192.168.2.14、ルーターの外側）にはルーター経由で届いたので、そこでサーバを立てた。
+- `ota app http://192.168.2.14:8089/apps/greeter.t5a` が入って動き、`ota kernel http://192.168.2.14:8089/kupdate/good.t5k` と `ota reboot` の後、新しいカーネル（スロット 1、otadata の seq 112）は確定前で起動し（`kupdate.pending`）、起動から 29 秒以内に `valid` になった（`ota` がサーバに届いて `CONFIRM`）。サーバの記録に、Tab5 の 2 つの取得（ルーターの NAT の後の 192.168.2.129 から、HTTP/1.0）がある。
+- 再起動のたびに `term` は起動の一覧（SD の `START.CFG`）にないので、ホストの `run term` が要る。
+
+## 9. まだ
 - 定期的な更新の確認（版を比べる目録、`ota check`）。今は人が `ota` で頼む。
 - HTTPS（TLS）。署名があるので必須ではない。
