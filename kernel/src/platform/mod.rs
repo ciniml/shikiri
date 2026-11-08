@@ -144,6 +144,18 @@ pub trait Platform {
     }
     /// Logs the core voltage settings (`stage` names the moment).
     fn log_power(_stage: &'static str) {}
+    /// Bytes of L2MEM the audio stream's DMA rings need (doc/70); 0: no
+    /// audio on this board.
+    const AUDIO_RING_BYTES: usize = 0;
+    /// Starts the audio stream with its rings at `area` (doc/70). Before
+    /// `board_init`: the codecs must be set up before the display.
+    fn audio_init(_area: usize) -> Result<(), &'static str> {
+        Err("no audio")
+    }
+    /// Logs the audio stream's counters; the interrupts taken.
+    fn audio_stats() -> Result<u32, &'static str> {
+        Err("no audio")
+    }
     /// Board devices around the display (M6a, doc/17 §5): releases the
     /// panel and touch resets and identifies the panel.
     fn board_init() -> Panel {

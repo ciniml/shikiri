@@ -14,7 +14,7 @@ bench = false
 default = []
 # Exactly one platform must be selected.
 platform-virt = []
-platform-esp32p4v1 = []
+platform-esp32p4v1 = ["dep:kumiki-p4v1-hal"]
 # The board under platform-esp32p4v1 (doc/58 §3.1): the Tab5 unless this
 # is set (the ESP32-P4-Function-EV-Board v1.5.x).
 board-p4evb = []
@@ -33,6 +33,9 @@ test-bad-selftest = []
 t5-abi = { path = "../abi" }
 # Signature verification of app images (doc/14 §1.3).
 ed25519-compact = { version = "2.6", default-features = false, features = ["opt_size"] }
+# I2S and the AHB-GDMA for audio (doc/70): kumiki's HAL without its runtime
+# and console. ../m5-rs until it is published.
+kumiki-p4v1-hal = { path = "../../m5-rs/hal/kumiki-p4v1-hal", default-features = false, optional = true }
 
 [profile.release]
 opt-level = "s"

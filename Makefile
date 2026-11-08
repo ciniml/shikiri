@@ -371,7 +371,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
@@ -898,6 +898,21 @@ p4emu-run-42:
 	    --expect-event imu.found --expect-event imu.ready --expect-event imu.sample \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-imu.txt 2>&1 || { tail -20 $(BUILD)/emu-imu.txt; false; }
 	grep -q "imu.sample n=0 ax_mg=0 ay_mg=0 az_mg=1000 gx=10 gy=-20 gz=30" $(BUILD)/emu-imu.txt
+
+p4emu-run-43:
+	@# Audio stage A1 (doc/70): the kernel starts I2S0 on the AHB-GDMA
+	@# (kumiki-p4v1-hal) before the display, at 48 kHz (375 TX and 750 RX
+	@# descriptors a second); with nothing pushed it plays silence. The
+	@# DMA's interrupt stays off until something uses the stream (A2).
+	$(T5EMU) --max-ms 30000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --audio-out $(BUILD)/emu-audio.wav --ctl "wait-ms 1000" --ctl audio \
+	    --expect-event audio.started --expect-event audio.stats \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-audio.txt 2>&1 || { tail -20 $(BUILD)/emu-audio.txt; false; }
+	grep -Eq "audio.started rate_millihz=4[78][0-9]{6} " $(BUILD)/emu-audio.txt
+	grep -Eq "audio.stats irqs=0 tx_descs=[0-9]+ tx_underruns=0 " $(BUILD)/emu-audio.txt
+	grep -Eq "t5emu: audio: [0-9]{4,} descriptor\(s\) sent" $(BUILD)/emu-audio.txt
+	grep -B100 "audio.started" $(BUILD)/emu-audio.txt | grep -q "board.ready" && { echo "audio after the display"; false; } || true
+	python3 -c "import sys; d = open(sys.argv[1], 'rb').read()[44:]; sys.exit(0 if len(d) > 100000 and not any(d) else 1)" $(BUILD)/emu-audio.wav
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

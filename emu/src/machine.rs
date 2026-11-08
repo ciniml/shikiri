@@ -317,6 +317,9 @@ impl Machine {
     /// `wfi` (any enabled pending line, whatever MIE says).
     fn wake_pending(&mut self) -> bool {
         let ticks = self.bus.ticks();
+        if ticks >= self.bus.audio.next_at {
+            crate::audio::advance(&mut self.bus, ticks);
+        }
         self.bus.periph.route_interrupts(ticks);
         self.best_pending(None).is_some()
     }
@@ -456,6 +459,9 @@ impl Machine {
 
     pub fn step(&mut self) -> Result<(), Stop> {
         let ticks = self.bus.ticks();
+        if ticks >= self.bus.audio.next_at {
+            crate::audio::advance(&mut self.bus, ticks);
+        }
         self.bus.periph.route_interrupts(ticks);
         if let Some(line) = self.interrupt_to_take() {
             self.take_interrupt(line)?;

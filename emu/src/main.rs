@@ -178,7 +178,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
                      [--linger-ms N] [--host-peer BYTES] [--http-dir DIR] [--host-peer-target ADDR] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
-                     [--sd IMAGE] [--sd-out FILE] [--trace-traps] [--warn-unmodelled] [--rng-stuck] [--quiet] KERNEL.elf";
+                     [--sd IMAGE] [--sd-out FILE] [--audio-out FILE.wav] [--trace-traps] [--warn-unmodelled] [--rng-stuck] [--quiet] KERNEL.elf";
 
 struct Opts {
     mhz: u64,
@@ -205,6 +205,8 @@ struct Opts {
     /// them at the end (doc/64).
     sd: Option<String>,
     sd_out: Option<String>,
+    /// What the I2S played, as a WAV file (doc/70).
+    audio_out: Option<String>,
     ctl: Vec<String>,
     expect_events: Vec<String>,
     linger_ms: u64,
@@ -246,6 +248,7 @@ fn parse_args() -> Result<Opts, String> {
         flash_images: Vec::new(),
         sd: None,
         sd_out: None,
+        audio_out: None,
         ctl: Vec::new(),
         expect_events: Vec::new(),
         linger_ms: 300,
@@ -319,6 +322,7 @@ fn parse_args() -> Result<Opts, String> {
             }
             "--sd" => o.sd = Some(val()?),
             "--sd-out" => o.sd_out = Some(val()?),
+            "--audio-out" => o.audio_out = Some(val()?),
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s => o.elf = s.to_string(),
         }
@@ -369,6 +373,7 @@ fn main() -> ExitCode {
 
     let mut bus = Bus::new(o.mhz * 1_000_000, o.cache, o.seed);
     bus.periph.warn_unmodelled = o.warn_unmodelled;
+    bus.audio.capture = o.audio_out.is_some();
     bus.rng_stuck = o.rng_stuck;
     bus.periph.i2c0.kbd = Some(Default::default());
     bus.periph.reset_cause = periph::reset_reason::POWERON;
@@ -579,6 +584,15 @@ fn main() -> ExitCode {
     }
     if let (Some(file), Some(image)) = (&o.sd_out, &sd.image)
         && let Err(e) = std::fs::write(file, image)
+    {
+        eprintln!("t5emu: {file}: {e}");
+    }
+    let audio = &m.bus.audio;
+    if audio.stats != (0, 0) {
+        eprintln!("t5emu: audio: {} descriptor(s) sent, {} received", audio.stats.0, audio.stats.1);
+    }
+    if let Some(file) = &o.audio_out
+        && let Err(e) = std::fs::write(file, t5emu::audio::wav(&audio.played))
     {
         eprintln!("t5emu: {file}: {e}");
     }

@@ -88,6 +88,8 @@ pub struct Bus {
     pub periph: Peripherals,
     /// The SDMMC host and the microSD card (doc/64).
     pub sd: crate::sdmmc::Sdmmc,
+    /// The AHB-GDMA and I2S0 (doc/70).
+    pub audio: crate::audio::Audio,
 }
 
 /// HP_SYS_CLKRST_ANA_PLL_CTRL0: MSPI_CAL_END (bit 8) reads as done, so the
@@ -161,6 +163,7 @@ impl Bus {
             psram: Psram::new(cache_mode),
             periph: Peripherals::default(),
             sd: Default::default(),
+            audio: Default::default(),
         }
         .with_flash_chip()
     }
@@ -359,6 +362,9 @@ impl Bus {
         if crate::sdmmc::contains(addr) && size == 4 && addr % 4 == 0 {
             return Some(crate::sdmmc::read(self, addr));
         }
+        if crate::audio::contains(addr) && size == 4 && addr % 4 == 0 {
+            return Some(crate::audio::read(self, addr));
+        }
         if (PERIPH.contains(&addr) || CLIC.contains(&addr) || CACHE_CTRL.contains(&addr)) && addr % size == 0 {
             let ticks = self.ticks();
             let word = self.periph.read32(addr & !3, ticks);
@@ -438,6 +444,10 @@ impl Bus {
         }
         if crate::sdmmc::contains(addr) && size == 4 && addr % 4 == 0 {
             crate::sdmmc::write(self, addr, v);
+            return true;
+        }
+        if crate::audio::contains(addr) && size == 4 && addr % 4 == 0 {
+            crate::audio::write(self, addr, v);
             return true;
         }
         if (PERIPH.contains(&addr) || CLIC.contains(&addr) || CACHE_CTRL.contains(&addr)) && addr % size == 0 {

@@ -5,6 +5,9 @@
 
 use super::Platform;
 
+// I2S audio on the Tab5 (doc/70); kumiki's HAL is for chip v1.x.
+#[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+mod audio;
 mod clock;
 mod display;
 // The EMAC (doc/58 R2); only boards with Ethernet use it.
@@ -1100,6 +1103,19 @@ impl Platform for Esp32p4v1 {
         }
     }
 
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    const AUDIO_RING_BYTES: usize = audio::RING_BYTES;
+
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_init(area: usize) -> Result<(), &'static str> {
+        audio::init(area)
+    }
+
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_stats() -> Result<u32, &'static str> {
+        audio::log_stats()
+    }
+
     fn board_init() -> super::Panel {
         t5_abi::event!(Info, "board.name", name = board::NAME);
         board::init()
@@ -1165,6 +1181,11 @@ impl Platform for Esp32p4v1 {
     }
 
     fn handle_irq(code: usize) -> bool {
+        #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+        if code == audio::IRQ {
+            audio::on_irq();
+            return true;
+        }
         if code == display::IRQ {
             display::service();
             return true;

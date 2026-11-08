@@ -2,7 +2,7 @@
 
 利用者の指示（2026-11-09）: kumiki の作業（kumiki-p4v1-hal の I2S と、カーネル向けの依頼 1〜5、doc/69 の続きの相談）の後、「Tab5 を書き戻して、オーディオの設計を」。IO エクスパンダ #1 の bit1（SPK_EN）の書き込みは許可（同日）。
 
-**これは設計で、まだ実装していない。** 利用者の確認の後に実装する。
+**実装の状況**: §7 のとおり、段 A1 のうちコーデックを除く部分（I2S を起動時に無音で回す）まで。コーデックと SPK_EN は kumiki のコーデックのクレートを待つ。
 
 ## 1. Tab5 のオーディオ（kumiki の調べと実機の確認による）
 | 部品 | 内容 |
@@ -55,3 +55,15 @@
 3. **サンプリング周波数はハードウェアに依る**: カーネルは板とコーデックが扱える周波数で I2S を回し、`ctl(INFO)` で周波数と形式（16 ビットのステレオなど）をアプリに知らせる。変換はアプリの側で。
 4. **コーデックの設定は kumiki が管理する**: ES8388 と ES7210 の設定（表とドライバ）を、カーネルからも使える形（no_std、esp-hal に依存しない、embedded-hal の I2C の上）で kumiki に出してもらう。カーネルは自分の I2C に embedded-hal の `I2c` を実装して使う。
 5. **既定で有効**: 起動のたびに、画面より前にコーデックを設定し、I2S を回す。
+
+## 7. 実装（段 A1 の前半、2026-11-09）
+- **kumiki 側**（tab5-os の依頼で kumiki が入れた）: AHB-GDMA の割り込みの API と割り込み源の番号（rev v1 は IN_CHn 56 + n、OUT_CHn 59 + n）、`i2s::Config::dma_channel`、待ちのループの上限、`steal` を `Option` に（73dd3f9）。`ahb_dma::assume_initialized`（5263cf4）。`I2s::new_in` と公開の `DmaMem`（輪のメモリを呼び出し側が渡す、d6ea120）。
+- **カーネル**: `kernel/src/platform/esp32p4v1/audio.rs`（Tab5 で chip v1 だけ。EVB と chip-v3 には入らない）。kumiki-p4v1-hal は `default-features = false` の任意の依存（`platform-esp32p4v1` で入る、`../../m5-rs` の path）。
+  - 起動の順: `clock_init` の後、`board_init`（エクスパンダと画面の電源）の前に `audio_init`。コーデックの設定もここに入れる。
+  - AHB-GDMA はカーネルが設定する（バスクロック、ブロックのリセット、窓 0x4000_0000〜0x4FFC_0000）。その後 `ahb_dma::assume_initialized()`。
+  - 輪（約 33.5 KiB）は、PSRAM があるとき空く L2MEM（`APP_POOL`、0x4FF8_0000〜）の Wi-Fi の輪の後ろ（64 バイト境界、今は 0x4FF8_C100）。カーネルの .bss の残り（約 26 KiB）には入らないため。PSRAM がなければオーディオは始めない。
+  - 割り込み: TX と RX の割り込み源をコア 0 の CPU の線 8 へ。`on_irq` が kumiki の `on_interrupt`（要因を消して poll）を呼ぶ。512 バイト（送り）と 256 バイト（受け）ごとで、48 kHz では毎秒約 1,100 回。**A1 では割り込みを有効にしない**（送りの輪は無音で始まり、誰も書かないので、poll することがない）。有効にしたら、40 MHz のエミュレータでは割り込みの道（トラップとスケジューラ）が CPU を大きく取り、matter の起動が約 3.2 秒から 5.5 秒に延びて p4emu-run-26 の競争に負けた。A2 では `audio` を開いたプロセスがいる間だけ有効にし、割り込みの回数も減らす（kumiki に、何枚かの記述子ごとに EOF を立てる形を相談する）。
+  - 事象 `audio.started`（`rate_millihz`、`ring_us`、`area`、割り込み源）、`audio.failed`、`audio.stats`（ctl の新しい命令 `audio`、番号 37）。
+  - `audio.stats` は先に poll する。割り込みがない間は poll がまばらで、kumiki の `tx_descs` は輪の周回を数え落とす（記述子の番地の差から数えるため）。
+- **エミュレータ**: `emu/src/audio.rs`。AHB-GDMA（割り込みのブロック、リンク）と I2S0（`C_UPDATE`、`C_RESET`、`C_FIFO_RESET` は自分で消える）。I2S の `C_START` の間、48 kHz で記述子を進め、EOF の割り込みを上げる。受けは 440 Hz の音。`--audio-out FILE.wav` で鳴らしたものを残す。単体試験 `audio::tests`。
+- **試験 p4emu-run-43**: `audio.started` が `board.ready` より前、約 48 kHz、`audio.stats` で割り込みが 0、`tx_underruns=0`、エミュレータの送りの記述子が 4 桁以上、鳴らしたものが全部無音。

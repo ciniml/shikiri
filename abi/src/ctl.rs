@@ -100,6 +100,8 @@ pub mod cmd {
     /// `u32 pid`: puts that process's seat (its `display`) in front
     /// (doc/60).
     pub const FOCUS: u8 = 36;
+    /// Logs the audio stream's counters (`audio.stats`, doc/70).
+    pub const AUDIO: u8 = 37;
 }
 
 /// `Command::Prof` operations.
@@ -158,6 +160,7 @@ pub enum Command<'a> {
     Partitions { on: bool },
     Partition { pid: u32, partition: u32 },
     Focus { pid: u32 },
+    Audio,
 }
 
 impl Command<'_> {
@@ -198,6 +201,7 @@ impl Command<'_> {
             Command::Partitions { .. } => "partitions",
             Command::Partition { .. } => "partition",
             Command::Focus { .. } => "focus",
+            Command::Audio => "audio",
             Command::TouchInject { .. } => "touch_inject",
         }
     }
@@ -223,6 +227,7 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::FLASH_TEST if args.is_empty() => Command::FlashTest,
         cmd::NVS_ERASE if args.is_empty() => Command::NvsErase,
         cmd::CAPTURE if args.is_empty() => Command::Capture,
+        cmd::AUDIO if args.is_empty() => Command::Audio,
         cmd::PARTITIONS if args.len() == 4 => Command::Partitions { on: u32_at(args, 0)? != 0 },
         cmd::PARTITION if args.len() == 8 => Command::Partition { pid: u32_at(args, 0)?, partition: u32_at(args, 4)? },
         cmd::FOCUS if args.len() == 4 => Command::Focus { pid: u32_at(args, 0)? },
@@ -315,6 +320,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Entropy { .. } => put(&[cmd::ENTROPY])?,
         Command::NvsErase => put(&[cmd::NVS_ERASE])?,
         Command::Capture => put(&[cmd::CAPTURE])?,
+        Command::Audio => put(&[cmd::AUDIO])?,
         Command::Partitions { .. } => put(&[cmd::PARTITIONS])?,
         Command::Partition { .. } => put(&[cmd::PARTITION])?,
         Command::Focus { .. } => put(&[cmd::FOCUS])?,
@@ -427,6 +433,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("rotate") => Command::Rotate { degrees: num(Some(w.next().ok_or("rotate 0|90|180|270")?))? },
         Some("ppabench") => Command::PpaBench,
         Some("capture") => Command::Capture,
+        Some("audio") => Command::Audio,
         Some("tap") => {
             let x = num(Some(w.next().ok_or("tap X Y [MS]")?))?;
             let y = num(Some(w.next().ok_or("tap X Y [MS]")?))?;

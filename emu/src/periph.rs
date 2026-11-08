@@ -511,6 +511,10 @@ pub struct Peripherals {
     /// DMA2D's RX1 interrupt (raw & enabled), kept as those registers are
     /// written: `route_interrupts` looks every instruction.
     dma2d_irq: bool,
+    /// The AHB-GDMA's interrupts (audio.rs): bit n IN_CHn, bit 3 + n
+    /// OUT_CHn; and when the next comes.
+    pub audio_irq: u8,
+    pub audio_next: Option<u64>,
     warned: std::collections::HashSet<u32>,
     pub warn_unmodelled: bool,
 }
@@ -617,6 +621,15 @@ impl Peripherals {
                 mask |= 1 << idx;
             }
         }
+        for b in 0..6 {
+            if self.audio_irq & (1 << b) != 0 {
+                let src = if b < 3 { crate::audio::SRC_IN0 + b } else { crate::audio::SRC_OUT0 + b - 3 };
+                let idx = map[src] as usize;
+                if idx < CLIC_LINES {
+                    mask |= 1 << idx;
+                }
+            }
+        }
         if self.usj.int_st() != 0 {
             let idx = map[SRC_USJ] as usize;
             if idx < CLIC_LINES {
@@ -647,6 +660,14 @@ impl Peripherals {
             .chain(self.dsi.next_event().filter(|_| {
                 let idx = map[SRC_GDMA] as usize;
                 idx < CLIC_LINES && self.clic.ie[idx]
+            }))
+            // Each descriptor raises the DMA's interrupt, if enabled there:
+            // waking for it is enough.
+            .chain(self.audio_next.filter(|_| {
+                (crate::audio::SRC_IN0..crate::audio::SRC_OUT0 + 3).any(|s| {
+                    let idx = map[s] as usize;
+                    idx < CLIC_LINES && self.clic.ie[idx]
+                })
             }))
             .min()
     }

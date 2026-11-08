@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod bus;
 pub mod cache;
 pub mod dma2d;

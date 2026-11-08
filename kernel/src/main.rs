@@ -183,6 +183,7 @@ pub extern "C" fn kmain() -> ! {
     // Apps get the PSRAM but its last `FB_RESERVE`, the display's (doc/17
     // §3), and the `SHM_RESERVE` below it, shared memory's (doc/19 §2).
     let mut psram_size = 0;
+    let mut audio_area = None;
     let framebuffer = match Current::psram_init() {
         Ok((window, size)) if size > 2 * (FB_RESERVE + SHM_RESERVE) => {
             psram_size = size;
@@ -193,6 +194,11 @@ pub extern "C" fn kmain() -> ! {
             // frame rings (doc/35 §5).
             if Current::APP_POOL.len() >= t5_abi::netdev::ring::SIZE {
                 wlan::set_ring_area(Current::APP_POOL.start);
+            }
+            // After them, the audio stream's DMA rings (doc/70).
+            let audio = (Current::APP_POOL.start + t5_abi::netdev::ring::SIZE).next_multiple_of(64);
+            if Current::AUDIO_RING_BYTES > 0 && audio + Current::AUDIO_RING_BYTES <= Current::APP_POOL.end {
+                audio_area = Some(audio);
             }
             Some(window + size - FB_RESERVE)
         }
@@ -221,6 +227,13 @@ pub extern "C" fn kmain() -> ! {
         if Current::INTERNAL_RAM > 0 && psram_size > 0 { Current::APP_POOL.len() as u32 } else { 0 },
     ]);
     Current::clock_init();
+    // Audio before the display: the ES8388 stays silent when it is set up
+    // after the display's power sequence (kumiki, doc/70 §1).
+    if let Some(area) = audio_area
+        && let Err(why) = Current::audio_init(area)
+    {
+        event!(Warn, "audio.failed", error = why);
+    }
     // The panel and touch (M6a). Not part of the self-test's result: a
     // kernel must be able to confirm itself without them (doc/17 §2).
     let t = Current::now();
@@ -663,6 +676,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::Rotate { degrees } => screen::set_orientation(degrees),
         Command::Focus { pid } => screen::focus(pid),
         Command::Capture => capture::start(),
+        Command::Audio => Current::audio_stats(),
         Command::TouchInject { x0, y0, x1, y1, ms } => screen::inject(x0, y0, x1, y1, ms),
         Command::SdInfo => Current::sd_info(),
         Command::SdRead { lba } => Current::sd_dump(lba),
