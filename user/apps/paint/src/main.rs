@@ -55,7 +55,17 @@ fn paint(seconds: u64) -> Result<(), u32> {
     let mut squares = 0u32;
     let mut pts = [Point::default(); touch::MAX_POINTS];
     while time_ns() < end {
-        match wait(&[&t.0], 100_000_000) {
+        match wait(&[&t.0, &d.handle], 100_000_000) {
+            // The seat went behind or came back (doc/60): the picture
+            // stays in the framebuffer, nothing to redraw.
+            Ok(ev) if ev.index == 1 => {
+                match ev.kind {
+                    display::HIDDEN => event!(Info, "paint.hidden"),
+                    display::SHOWN => event!(Info, "paint.shown"),
+                    _ => {}
+                }
+                continue;
+            }
             Ok(_) => {}
             Err(Error::TimedOut) => continue,
             Err(_) => return Err(4),
@@ -91,6 +101,10 @@ fn self_test() -> Result<(), u32> {
     let mut frames = 0;
     while frames < 3 {
         let ev = wait(&[&d.handle], 1_000_000_000).map_err(|_| 17u32)?;
+        // A seat change (doc/60) may come between frames.
+        if matches!(ev.kind, display::HIDDEN | display::SHOWN) {
+            continue;
+        }
         check(ev.kind == display::FRAME && ev.value > 0, 18)?;
         frames += ev.value;
     }

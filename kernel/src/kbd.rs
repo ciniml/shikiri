@@ -23,19 +23,26 @@ fn q() -> &'static mut Queue {
     unsafe { &mut *core::ptr::addr_of_mut!(Q) }
 }
 
-/// From the service loop.
+/// The switch key (doc/60 §8): left Ctrl + left Alt + Tab.
+const SWITCH_MODIFIER: u8 = 1 << 0 | 1 << 2;
+const SWITCH_USAGE: u8 = 0x2B;
+
+/// From the service loop: while a process has it open, or two seats are
+/// held (for the switch key).
 pub fn poll() {
     let q = q();
-    if !q.open {
+    if !q.open && crate::screen::taken() < 2 {
         return;
     }
-    let to_owner = crate::screen::input_for(q.pid);
     let _ = Current::kbd_poll(&mut |modifier, usage| {
-        // Read either way: another seat's keys are not kept for later.
-        if !to_owner {
+        if modifier & 0x0F == SWITCH_MODIFIER && usage == SWITCH_USAGE && crate::screen::taken() >= 2 {
+            crate::screen::switch("key");
             return;
         }
-        push(q, [modifier, usage]);
+        // Read either way: another seat's keys are not kept for later.
+        if q.open && crate::screen::input_for(q.pid) {
+            push(q, [modifier, usage]);
+        }
     });
 }
 

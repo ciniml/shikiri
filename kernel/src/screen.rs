@@ -56,6 +56,9 @@ struct Touch {
     /// A finger from the host (doc/54): it replaces the controller's
     /// points until it is lifted.
     inject: Option<Inject>,
+    /// A swipe in from the left edge being followed (doc/60 §8): the
+    /// first point and the latest, the user's coordinates.
+    edge: Option<((u16, u16), (u16, u16))>,
 }
 
 /// A finger down at `from` at `start`, at `to` at `end`, then up; the
@@ -79,6 +82,7 @@ static mut TOUCH: Touch = Touch {
     points: [TouchPoint { x: 0, y: 0, id: 0, size: 0 }; t5_abi::touch::MAX_POINTS],
     errors: 0,
     inject: None,
+    edge: None,
 };
 
 fn touch() -> &'static mut Touch {
@@ -87,12 +91,18 @@ fn touch() -> &'static mut Touch {
 
 const TOUCH_POLL_MS: u64 = 16;
 
-/// Reads the touch controller every `TOUCH_POLL_MS` while a handle is open.
-/// Called from the service loop.
+/// The switch gesture (doc/60 §8): a finger down within `EDGE_PX` of the
+/// left edge, lifted at least `SWIPE_PX` to the right of where it began.
+const EDGE_PX: u16 = 24;
+const SWIPE_PX: u16 = 200;
+
+/// Reads the touch controller every `TOUCH_POLL_MS` while a handle is open
+/// or two seats are held (for the switch gesture). Called from the service
+/// loop.
 pub fn poll() {
     let t = touch();
     let now = Current::now();
-    if t.users == 0 || now < t.next_poll {
+    if (t.users == 0 && taken() < 2) || now < t.next_poll {
         return;
     }
     t.next_poll = now + time::ms_to_ticks(TOUCH_POLL_MS);
@@ -108,9 +118,11 @@ pub fn poll() {
             (0, TouchPoint::default())
         };
         if n != t.n || (n == 1 && t.points[0] != p) {
+            let was = t.n;
             t.n = n;
             t.points[0] = p;
             t.seq = t.seq.wrapping_add(1);
+            gesture(was);
         }
         release_hold();
         return;
@@ -132,11 +144,31 @@ pub fn poll() {
         *o = to_user(*p, size);
     }
     if n != t.n || pts[..n] != t.points[..n] {
+        let was = t.n;
         t.n = n;
         t.points = pts;
         t.seq = t.seq.wrapping_add(1);
+        gesture(was);
     }
     release_hold();
+}
+
+/// Follows the switch gesture after the points changed (`was` points
+/// before). Only while two seats are held; its points reach no one.
+fn gesture(was: usize) {
+    let t = touch();
+    let p = (t.points[0].x, t.points[0].y);
+    match t.edge {
+        None if was == 0 && t.n > 0 && p.0 < EDGE_PX && taken() >= 2 => t.edge = Some((p, p)),
+        Some((from, _)) if t.n > 0 => t.edge = Some((from, p)),
+        Some((from, last)) => {
+            t.edge = None;
+            if last.0 >= from.0 + SWIPE_PX {
+                switch("swipe");
+            }
+        }
+        None => {}
+    }
 }
 
 /// Lifts the hold of a seat change (doc/60 §4) once no finger is down.
@@ -173,8 +205,10 @@ pub fn inject(x0: u32, y0: u32, x1: u32, y1: u32, ms: u32) -> Result<u32, &'stat
         start: now,
         end: now + time::ms_to_ticks(ms as u64),
     });
-    // Read at once rather than at the next poll.
+    // Read at once rather than at the next poll. The finger replaces the
+    // controller's points: it comes down on none (for the gesture).
     t.next_poll = now;
+    t.n = 0;
     Ok(ms)
 }
 
@@ -200,7 +234,7 @@ impl TouchHandle {
     /// The points this process sees: none while the input is another's or
     /// held after a seat change.
     fn visible(&self) -> usize {
-        if input_for(self.pid) && !seats().hold_touch { touch().n } else { 0 }
+        if input_for(self.pid) && !seats().hold_touch && touch().edge.is_none() { touch().n } else { 0 }
     }
 
     /// The `wait` event: CHANGED with the number of points.
@@ -277,6 +311,11 @@ pub fn shown_fb() -> Option<usize> {
     seat_fb(seats().front.unwrap_or(0))
 }
 
+/// Seats held.
+pub fn taken() -> usize {
+    seats().pid.iter().flatten().count()
+}
+
 /// Whether the keyboard and touch go to `pid`: the front seat's process,
 /// or anyone while no process has a seat.
 pub fn input_for(pid: u32) -> bool {
@@ -316,9 +355,23 @@ pub fn focus(pid: u32) -> Result<u32, &'static str> {
     Ok(pid)
 }
 
+/// The switch key or gesture (doc/60 §8): puts the next held seat in
+/// front.
+pub fn switch(reason: &'static str) {
+    let st = seats();
+    let from = st.front.unwrap_or(SEATS - 1);
+    let next = (1..=SEATS).map(|k| (from + k) % SEATS).find(|&i| st.pid[i].is_some());
+    if next != st.front {
+        set_front(next, reason);
+    }
+}
+
 /// A handle on `display`: the process's seat.
 pub struct DisplayHandle {
     seat: usize,
+    /// Whether the process was last told its seat is in front (`SHOWN`)
+    /// or behind (`HIDDEN`); at first, where it opened.
+    shown: bool,
     seen_frames: u32,
     /// 2D requests (finished, failed) the process has been told about.
     seen_done: (u32, u32),
@@ -346,7 +399,8 @@ impl DisplayHandle {
             Some(f) if crate::ident::descends_from(pid, f) => set_front(Some(seat), "child"),
             Some(_) => event!(Info, "screen.seat_behind", pid = pid, front = front_pid.unwrap_or(0)),
         }
-        Ok(DisplayHandle { seat, seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
+        let shown = st.front == Some(seat);
+        Ok(DisplayHandle { seat, shown, seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
     }
 
     fn fb(&self) -> Result<usize, Error> {
@@ -401,9 +455,15 @@ impl DisplayHandle {
         Ok(req.len())
     }
 
-    /// The `wait` events: FAILED or DONE with the 2D requests finished
-    /// since the last one, else FRAME with the frames sent since the last.
+    /// The `wait` events: HIDDEN or SHOWN when the seat left or came to
+    /// the front, else FAILED or DONE with the 2D requests finished since
+    /// the last one, else FRAME with the frames sent since the last.
     pub fn poll(&mut self) -> Option<(usize, usize)> {
+        let front = seats().front == Some(self.seat);
+        if front != self.shown {
+            self.shown = front;
+            return Some((if front { t5_abi::display::SHOWN } else { t5_abi::display::HIDDEN }, 0));
+        }
         let (done, failed) = Current::gfx_finished();
         if (done, failed) != self.seen_done {
             let (n, bad) = (done.wrapping_sub(self.seen_done.0), failed.wrapping_sub(self.seen_done.1));

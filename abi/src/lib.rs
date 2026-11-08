@@ -34,8 +34,8 @@ pub const ABI_MAJOR: u16 = 0;
 /// 2D requests (`write`, `display::DONE`). Minor 18 (doc/46): `random`.
 /// Minor 19 (doc/48): `bt:hci`. Minor 20 (doc/56): `permit_drop`,
 /// `Error::Limit`, `spawn::RESTART`. Minor 21 (doc/58 R5): `wait` returns
-/// the time too.
-pub const ABI_MINOR: u16 = 21;
+/// the time too. Minor 22 (doc/60 F2): `display::HIDDEN`/`SHOWN`.
+pub const ABI_MINOR: u16 = 22;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -675,6 +675,13 @@ pub mod display {
     /// `wait` event: 2D requests failed (timed out, DMA error), in place of
     /// their `DONE` (value = how many). The rows may be partly written.
     pub const FAILED: usize = 3;
+    /// `wait` event: the seat went behind (doc/60): the framebuffer is no
+    /// longer shown and the keyboard and touch go elsewhere. Drawing still
+    /// works. Only changes are told: a process that opened behind gets no
+    /// `HIDDEN` first.
+    pub const HIDDEN: usize = 4;
+    /// `wait` event: the seat came to the front (doc/60).
+    pub const SHOWN: usize = 5;
 
     /// 2D requests, written to the display handle (doc/44): little-endian
     /// u16s, in framebuffer pixels (the panel's, not the orientation's).
