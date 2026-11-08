@@ -1,0 +1,12 @@
+[package]
+name = "kumiki-t5os"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "kumiki-gfx on tab5-os: the display object as a FramebufferPanel (doc/68)"
+
+[dependencies]
+t5-rt = { path = "../rt" }
+# kumiki (m5-rs) checked out next to tab5-os (doc/68).
+kumiki-gfx = { path = "../../../m5-rs/gfx/kumiki-gfx" }
+embedded-graphics-core = "0.4"
