@@ -729,7 +729,11 @@ pub mod display {
 /// the store or a kernel package (T5K) into the other kernel slot, as the
 /// host's control commands do (doc/14 §3, doc/16 §3), and restarting.
 /// One process at a time. A request is one `write`: `op`, then for `BEGIN_*`
-/// the image's length (u32 LE), for `DATA` the offset (u32 LE) and up to
+/// the image's length (u32 LE) (for `BEGIN_KERNEL` optionally followed by
+/// an IPv4 address (u32 LE) and a TCP port (u16 LE): the new kernel then
+/// confirms itself only once an app has reached that server, `CONFIRM`,
+/// within `NET_CONFIRM_MS` of its self-test, else it goes back to the old
+/// one), for `DATA` the offset (u32 LE) and up to
 /// `DATA_MAX` bytes (in order, each piece but the last a whole multiple of
 /// 256 bytes). The kernel carries it out on its service round; `wait` then
 /// gives `DONE` with `status::OK` or `status::FAILED` (the log says why).
@@ -745,7 +749,16 @@ pub mod update {
         /// Restarts the chip (a kernel update takes effect).
         pub const REBOOT: u8 = 5;
         pub const CANCEL: u8 = 6;
+        /// The running kernel waits for the network (see above): it was
+        /// reached; the kernel confirms itself.
+        pub const CONFIRM: u8 = 7;
     }
+    /// `read`: `STATUS_SIZE` bytes: the server (IPv4 u32 LE, port u16 LE) a
+    /// waiting kernel wants reached, and u16 flags (`AWAITING`).
+    pub const STATUS_SIZE: usize = 8;
+    pub const AWAITING: u16 = 1;
+    /// How long a kernel installed over the network waits to be confirmed.
+    pub const NET_CONFIRM_MS: u64 = 300_000;
     pub const DATA_MAX: usize = 1024;
     /// The longest request.
     pub const REQUEST_MAX: usize = 5 + DATA_MAX;

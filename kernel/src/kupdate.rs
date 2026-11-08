@@ -3,6 +3,12 @@
 //! signature and image check out, a new otadata entry selects it for the
 //! next boot. The new kernel confirms itself when its self-test passes; if
 //! it does not, the ESP-IDF bootloader starts the old one again.
+//!
+//! A package an app fetched over the network (doc/67 §5) names the server
+//! in its otadata entry's label (`T5NC`, IPv4, port): after its self-test
+//! the new kernel waits up to `update::NET_CONFIRM_MS` for an app to say
+//! it reached that server (`update` `CONFIRM`), and otherwise marks itself
+//! invalid and restarts, so the old kernel comes back.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,8 +31,13 @@ pub fn pending() -> bool {
     PENDING.load(Ordering::Relaxed)
 }
 
+/// The label of an otadata entry whose kernel waits for the network.
+const NET_MAGIC: &[u8; 4] = b"T5NC";
+
 /// A package being received.
 struct Session {
+    /// The server the new kernel must reach before it confirms itself.
+    net: Option<(u32, u16)>,
     slot: usize,
     length: u32,
     next: u32,
@@ -40,6 +51,9 @@ pub struct Kupdate {
     /// The slot (0 or 1) the running kernel came from.
     running: Option<usize>,
     session: Option<Session>,
+    /// This kernel waits for the network: the server, and the deadline
+    /// (ticks; set after the self-test).
+    net: Option<((u32, u16), Option<u64>)>,
 }
 
 fn state_name(s: u32) -> &'static str {
@@ -57,7 +71,14 @@ fn state_name(s: u32) -> &'static str {
 impl Kupdate {
     pub fn new(window: usize) -> Kupdate {
         let running = Current::kernel_slot().and_then(|o| SLOTS.iter().position(|&s| s == o));
-        let k = Kupdate { window, running, session: None };
+        let mut k = Kupdate { window, running, session: None, net: None };
+        if let Some((_, e)) = k.own_entry().filter(|(_, e)| e.state == state::PENDING_VERIFY)
+            && e.label[..4] == *NET_MAGIC
+        {
+            let ip = u32::from_le_bytes([e.label[4], e.label[5], e.label[6], e.label[7]]);
+            let port = u16::from_le_bytes([e.label[8], e.label[9]]);
+            k.net = Some(((ip, port), None));
+        }
         if k.own_entry().is_some_and(|(_, e)| e.state == state::PENDING_VERIFY) {
             // Until the self-test confirms this kernel, a hang must end in
             // a reset as well: arm the watchdog again in case a probe
@@ -125,14 +146,14 @@ impl Kupdate {
 
     /// Starts receiving a package of `length` bytes; returns the slot it
     /// goes to.
-    pub fn begin(&mut self, length: u32) -> Result<u32, &'static str> {
+    pub fn begin(&mut self, length: u32, net: Option<(u32, u16)>) -> Result<u32, &'static str> {
         self.cancel();
         let slot = flash::spare_slot().ok_or("kernel slot unknown")?;
         if (length as usize) < t5k::HEADER_SIZE || length > SLOT_SIZE {
             return Err("bad length");
         }
         event!(Info, "kupdate.begin", length = length, slot = slot as u32);
-        self.session = Some(Session { slot, length, next: 0, stats: flash::Stats::default(), started: Current::now() });
+        self.session = Some(Session { net, slot, length, next: 0, stats: flash::Stats::default(), started: Current::now() });
         Ok(slot as u32)
     }
 
@@ -204,7 +225,13 @@ impl Kupdate {
         event!(Info, "kupdate.verified", slot = s.slot as u32, version = p.image.version, secure_version = p.image.secure_version, chip_rev = rev, verify_us = time::ticks_to_ns(Current::now() - started) / 1000);
         let e = self.entries();
         let (sector, seq) = otadata::next(&e, s.slot);
-        self.write_entry(sector, &Entry::new(seq, state::NEW))?;
+        let mut entry = Entry::new(seq, state::NEW);
+        if let Some((ip, port)) = s.net {
+            entry.label[..4].copy_from_slice(NET_MAGIC);
+            entry.label[4..8].copy_from_slice(&ip.to_le_bytes());
+            entry.label[8..10].copy_from_slice(&port.to_le_bytes());
+        }
+        self.write_entry(sector, &entry)?;
         event!(Info, "kupdate.ready", slot = s.slot as u32, ota_seq = seq, sector = sector as u32, version = p.image.version);
         Ok(seq)
     }
@@ -225,9 +252,17 @@ impl Kupdate {
     /// confirms itself if the test passed, and otherwise marks itself
     /// invalid and restarts, so the bootloader goes back to the other slot
     /// (doc/16 §3.4).
-    pub fn after_selftest(&self, pass: bool) {
+    pub fn after_selftest(&mut self, pass: bool) {
         let Some((sector, e)) = self.own_entry() else { return };
         if e.state != state::PENDING_VERIFY {
+            return;
+        }
+        // Installed over the network: confirmed once the network works.
+        if pass && let Some((server, _)) = self.net {
+            let deadline = Current::now() + time::ms_to_ticks(t5_abi::update::NET_CONFIRM_MS);
+            self.net = Some((server, Some(deadline)));
+            crate::update::set_awaiting(Some(server));
+            event!(Info, "kupdate.awaiting_net", ip = t5_abi::log::Addr(server.0), port = server.1 as u32, seconds = (t5_abi::update::NET_CONFIRM_MS / 1000) as u32);
             return;
         }
         if pass {
@@ -242,6 +277,35 @@ impl Kupdate {
         }
         let r = self.write_entry(sector, &Entry { state: state::INVALID, ..e });
         event!(Error, "kupdate.rejected", ota_seq = e.seq, slot = e.slot() as u32, written = r.is_ok());
+        Current::reset();
+    }
+
+    /// `update` `CONFIRM` from process `pid` (doc/67 §5): the server was
+    /// reached; a kernel waiting for that confirms itself.
+    pub fn confirm_net(&mut self, pid: u32) -> Result<(), &'static str> {
+        let Some((server, Some(_))) = self.net else { return Err("not waiting for the network") };
+        let (sector, e) = self.own_entry().filter(|(_, e)| e.state == state::PENDING_VERIFY).ok_or("not pending")?;
+        self.write_entry(sector, &Entry { state: state::VALID, ..e })?;
+        self.net = None;
+        crate::update::set_awaiting(None);
+        PENDING.store(false, Ordering::Relaxed);
+        event!(Info, "kupdate.net_reached", by = pid, ip = t5_abi::log::Addr(server.0), port = server.1 as u32);
+        event!(Info, "kupdate.confirmed", ota_seq = e.seq, slot = e.slot() as u32);
+        Ok(())
+    }
+
+    /// From the service loop: a kernel that waited for the network too long
+    /// goes back to the old one.
+    pub fn poll(&mut self, now: u64) {
+        let Some((server, Some(deadline))) = self.net else { return };
+        if now < deadline {
+            return;
+        }
+        event!(Error, "kupdate.no_network", ip = t5_abi::log::Addr(server.0), port = server.1 as u32);
+        if let Some((sector, e)) = self.own_entry() {
+            let r = self.write_entry(sector, &Entry { state: state::INVALID, ..e });
+            event!(Error, "kupdate.rejected", ota_seq = e.seq, slot = e.slot() as u32, written = r.is_ok());
+        }
         Current::reset();
     }
 }

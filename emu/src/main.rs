@@ -177,7 +177,7 @@ const USAGE: &str = "usage: t5emu [--mhz N] [--cache strict|off] [--max-ms N] [-
                      [--elf APP.elf]... [--schemas FILE]... [--json] [--console-out FILE] \
                      [--rtt-poll N] [--log-from-rtt] [--resets N] [--expect-prev-event NAME] [--expect-reset] \
                      [--flash FILE@HEXOFFSET]... [--ctl COMMAND|'wait-ms N']... [--expect-event NAME]... \
-                     [--linger-ms N] [--host-peer BYTES] [--host-peer-target ADDR] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
+                     [--linger-ms N] [--host-peer BYTES] [--http-dir DIR] [--host-peer-target ADDR] [--host-peer-start EVENT|none] [--host-peer-pinged-by A.B.C.D] \
                      [--sd IMAGE] [--sd-out FILE] [--trace-traps] [--warn-unmodelled] [--rng-stuck] [--quiet] KERNEL.elf";
 
 struct Opts {
@@ -215,6 +215,8 @@ struct Opts {
     host_peer_start: String,
     /// The passive host peer must have been pinged from this address.
     host_peer_pinged_by: Option<std::net::Ipv4Addr>,
+    /// The host peer serves these files over HTTP on port 8080 (doc/67).
+    http_dir: Option<String>,
     /// Where to write the last screen captured (PNG, the user's view).
     capture_out: Option<String>,
     /// Pixels the last capture must have: (x, y, RGB565), the user's view.
@@ -251,6 +253,7 @@ fn parse_args() -> Result<Opts, String> {
         host_peer_target: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 55, 0, 2)),
         host_peer_start: "nettest.listening".into(),
         host_peer_pinged_by: None,
+        http_dir: None,
         capture_out: None,
         expect_pixels: Vec::new(),
         elf: String::new(),
@@ -294,6 +297,7 @@ fn parse_args() -> Result<Opts, String> {
             "--host-peer-target" => o.host_peer_target = val()?.parse().map_err(|e| format!("--host-peer-target: {e}"))?,
             "--host-peer-start" => o.host_peer_start = val()?,
             "--host-peer-pinged-by" => o.host_peer_pinged_by = Some(val()?.parse().map_err(|e| format!("--host-peer-pinged-by: {e}"))?),
+            "--http-dir" => o.http_dir = Some(val()?),
             "--capture-out" => o.capture_out = Some(val()?),
             "--expect-pixel" => {
                 let v = val()?;
@@ -421,7 +425,13 @@ fn main() -> ExitCode {
         linger_cycles: o.linger_ms * o.mhz * 1000,
         stop_at: None,
         seen: Default::default(),
-        peer: o.host_peer.map(|b| HostPeer::new(b, o.host_peer_target.into())),
+        peer: o.host_peer.map(|b| {
+            let mut p = HostPeer::new(b, o.host_peer_target.into());
+            if let Some(d) = &o.http_dir {
+                p.serve_http(d);
+            }
+            p
+        }),
         peer_start: o.host_peer_start.clone(),
         captures_asked: 0,
         captures_ended: 0,
@@ -581,6 +591,9 @@ fn main() -> ExitCode {
         Some(p) if mon.peer_start == "none" => {
             let by: Vec<String> = p.pinged_by.iter().map(|a| a.to_string()).collect();
             eprintln!("t5emu: host peer (passive): pinged by {by:?}");
+            if o.http_dir.is_some() {
+                eprintln!("t5emu: host peer served over HTTP: {:?}", p.served);
+            }
             match o.host_peer_pinged_by {
                 Some(a) if !p.pinged_by.contains(&smoltcp::wire::IpAddress::Ipv4(a)) => {
                     eprintln!("t5emu: host peer was not pinged by {a}");

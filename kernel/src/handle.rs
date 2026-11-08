@@ -141,7 +141,7 @@ impl Object {
             }
             n if n == display::FOCUS.as_bytes() => Ok((Object::Focus(pid), rights::WRITE)),
             n if n == proc::MEM.as_bytes() => Ok((Object::Mem, rights::READ)),
-            n if n == t5_abi::update::NAME.as_bytes() => Ok((Object::Update(crate::update::UpdateHandle::open(pid)?), rights::WRITE | rights::WAIT)),
+            n if n == t5_abi::update::NAME.as_bytes() => Ok((Object::Update(crate::update::UpdateHandle::open(pid)?), rights::READ | rights::WRITE | rights::WAIT)),
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == t5_abi::cfgflash::NAME.as_bytes() => {
                 Ok((Object::CfgFlash(crate::flash::CfgFlash::open()?), rights::READ | rights::WRITE | rights::CTL))
@@ -433,6 +433,7 @@ impl Table {
             Object::Kbd(k) => k.read(buf),
             Object::List(l) => l.read(buf),
             Object::Mem => crate::procinfo::read_mem(buf),
+            Object::Update(u) => u.read(buf),
             Object::Random => {
                 // Nothing from a read during which a health test failed
                 // (doc/47 §6).

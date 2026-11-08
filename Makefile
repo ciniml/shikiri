@@ -40,7 +40,7 @@ PERMIT_cfg    := --permit listen:cfg --permit flash:cfg --permit random --permit
                  --permit svc:fs/rw:T5OS/CONFIG.B --stack 16384
 PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w:wifi.
 PERMIT_c6ota  := --permit svc:net/tcp-connect --permit svc:wifi/ota
-PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r:
+PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
                  --permit svc:ble/scan --permit svc:ble/central --permit svc:ble/peripheral \
@@ -162,7 +162,7 @@ apps: tools $(UNTRUSTED_KEY)
 # the autostart flag, installed over RTT by `make install-auto`. The store
 # image (and so the tests) keeps them without it.
 # `init` starts the rest from T5OS/START.CFG on the SD card (doc/38).
-AUTO_APPS := fs init
+AUTO_APPS := fs init ota
 AUTO_DIR  := $(APPS_DIR)/auto
 apps-auto: apps
 	mkdir -p $(AUTO_DIR)
@@ -262,6 +262,7 @@ kupdate-test-kernels: image-p4
 	$(call test_kernel,bad-selftest,test-bad-selftest)
 	$(call test_kernel,bad-panic,test-bad-panic)
 	$(ELF2T5A) otadata $(KUPDATE_DIR)/otadata-pending.bin 1 1
+	$(ELF2T5A) otadata $(KUPDATE_DIR)/otadata-netconfirm.bin 1 1 10.55.0.1:8080
 	@# The development kernel (secure_version 0): refused once a test kernel
 	@# (secure_version 1) runs.
 	cp $(KERNEL_T5K) $(KUPDATE_DIR)/downgrade.t5k
@@ -368,7 +369,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
@@ -810,6 +811,52 @@ p4emu-run-36:
 	    --expect-event ota.ready --expect-event ota.installed --expect-event store.installed \
 	    --expect-event store.rejected --expect-event hello.greet --expect-event kupdate.ready \
 	    --expect-event update.reboot \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-37:
+	@# Updates over the network (doc/67 stage 2): the host peer serves
+	@# build/ over HTTP (10.55.0.1:8080, on the host link); the shell's
+	@# `ota app http://...` installs greeter (it runs), a missing file is
+	@# a 404 (ota.http_status), and the kernel package goes into the other
+	@# slot (kupdate.ready). ota stays up for all of them (no app faults;
+	@# its stack once overflowed in the HTTP path).
+	$(T5EMU) --max-ms 150000 $(EMU_FLASH) --flash $(BUILD)/t5-kernel-esp32p4v1.bin@10000 $(addprefix --elf ,$(APP_ELFS)) \
+	    --host-peer 0 --host-peer-start none --http-dir $(BUILD) \
+	    --ctl "run net" --ctl "wait-ms 3000" --ctl "run term" --ctl "wait-ms 3000" \
+	    --ctl "keys ota app http://10.55.0.1:8080/apps/greeter.t5a\n" --ctl "wait-ms 10000" \
+	    --ctl "keys run greeter\n" --ctl "wait-ms 2000" \
+	    --ctl "keys ota app http://10.55.0.1:8080/apps/missing.t5a\n" --ctl "wait-ms 5000" \
+	    --ctl "keys ota kernel http://10.55.0.1:8080/t5-kernel-esp32p4v1.t5k\n" --ctl "wait-ms 45000" \
+	    --expect-event ota.installed --expect-event store.installed --expect-event hello.greet \
+	    --expect-event ota.http_status --expect-event kupdate.ready \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-ota-net.txt 2>&1 || { tail -20 $(BUILD)/emu-ota-net.txt; false; }
+	! grep -aqE "proc.fault: 1[0-9][0-9] killed" $(BUILD)/emu-ota-net.txt
+	test "$$(grep -ac ' ota.ready' $(BUILD)/emu-ota-net.txt)" = 1
+
+p4emu-run-38:
+	@# A kernel installed over the network confirms itself once the network
+	@# works (doc/67 §5): started from otadata `pending_verify` whose label
+	@# names 10.55.0.1:8080, it passes its self-test and waits
+	@# (kupdate.awaiting_net); ota connects to that server over the host
+	@# link and confirms it (kupdate.confirmed).
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) --flash $(KUPDATE_DIR)/otadata-netconfirm.bin@d000 \
+	    $(addprefix --elf ,$(APP_ELFS)) \
+	    --host-peer 0 --host-peer-start none --http-dir $(BUILD) \
+	    --ctl "run net" --ctl "wait-ms 3000" --ctl "run ota" --ctl "wait-ms 8000" \
+	    --expect-event kupdate.pending --expect-event kupdate.awaiting_net --expect-event ota.confirming \
+	    --expect-event kupdate.net_reached --expect-event kupdate.confirmed --expect-event ota.confirmed \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-39:
+	@# The same kernel when the server cannot be reached (no HTTP on the
+	@# host peer): after update::NET_CONFIRM_MS (300 s) it marks itself
+	@# invalid and restarts, so the bootloader would start the old one.
+	$(T5EMU) --quiet --max-ms 340000 --expect-reset $(EMU_FLASH) --flash $(KUPDATE_DIR)/otadata-netconfirm.bin@d000 \
+	    $(addprefix --elf ,$(APP_ELFS)) \
+	    --host-peer 0 --host-peer-start none \
+	    --ctl "run net" --ctl "wait-ms 3000" --ctl "run ota" --ctl "wait-ms 310000" \
+	    --expect-event kupdate.awaiting_net --expect-event ota.confirming \
+	    --expect-event kupdate.no_network --expect-event kupdate.rejected \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

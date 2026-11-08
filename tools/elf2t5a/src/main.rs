@@ -15,7 +15,7 @@
 //!   elf2t5a verify IMAGE.t5a --public FILE
 //!   elf2t5a kernel IN.bin OUT.t5k --key SECRET [--chip-rev REV]
 //!   elf2t5a verify-kernel PACKAGE.t5k --public FILE
-//!   elf2t5a otadata OUT.bin SEQ STATE
+//!   elf2t5a otadata OUT.bin SEQ STATE [A.B.C.D:PORT]
 //!
 //! `kernel` signs an ESP app image (espflash save-image) as a T5K kernel
 //! package (`t5_abi::t5k`, doc/16 §2): the image, a 16-byte header and the
@@ -48,7 +48,7 @@ const USAGE: &str = "usage:
   elf2t5a verify IMAGE.t5a --public FILE
   elf2t5a kernel IN.bin OUT.t5k --key SECRET [--chip-rev REV]
   elf2t5a verify-kernel PACKAGE.t5k --public FILE
-  elf2t5a otadata OUT.bin SEQ STATE";
+  elf2t5a otadata OUT.bin SEQ STATE [A.B.C.D:PORT]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -402,8 +402,21 @@ fn verify_kernel(args: &[String]) -> Result<(), String> {
 }
 
 fn otadata(args: &[String]) -> Result<(), String> {
-    let [out, seq, state] = args else { return Err(USAGE.into()) };
-    let entry = otadata::Entry::new(parse_u32(seq)?, parse_u32(state)?);
+    let (out, seq, state, net) = match args {
+        [out, seq, state] => (out, seq, state, None),
+        [out, seq, state, net] => (out, seq, state, Some(net)),
+        _ => return Err(USAGE.into()),
+    };
+    let mut entry = otadata::Entry::new(parse_u32(seq)?, parse_u32(state)?);
+    // A kernel waiting for the network (doc/67 §5): `T5NC`, IPv4, port.
+    if let Some(net) = net {
+        let (ip, port) = net.rsplit_once(':').ok_or(format!("bad server {net} (A.B.C.D:PORT)"))?;
+        let ip: std::net::Ipv4Addr = ip.parse().map_err(|_| format!("bad address {ip}"))?;
+        let port: u16 = port.parse().map_err(|_| format!("bad port {port}"))?;
+        entry.label[..4].copy_from_slice(b"T5NC");
+        entry.label[4..8].copy_from_slice(&u32::from(ip).to_le_bytes());
+        entry.label[8..10].copy_from_slice(&port.to_le_bytes());
+    }
     let mut data = vec![0xFF; 2 * otadata::SECTOR_SIZE as usize];
     data[..otadata::ENTRY_SIZE].copy_from_slice(&entry.to_bytes());
     fs::write(out, data).map_err(|e| format!("{out}: {e}"))

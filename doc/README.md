@@ -63,7 +63,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [64](64-emulator-sd.md) | エミュレータの microSD: SDMMC ホストと SDHC カード（`--sd`、`--sd-out`）、mtools の試験用の像、p4emu-run-33 |
 | [65](65-store-catalog-full.md) | アプリのストアの「catalog full」: 動かさないアプリの古い版が目録（63 項目）と拡張領域を埋める。満ちたら、ほかのアプリの古い版を外す（自分で起動しないものを先に）。空きが細切れなら、アプリを動かして寄せる |
 | [66](66-stdio-study.md) | 標準入出力の検討（記録のみ）: 今はない。起動のときにチャネルの端を渡す案と、性能（チャネルの小ささ、数）と安全性（権限の受け渡し、端末を直接渡さない、Ctrl-C）の懸念 |
-| [67](67-ota.md) | アプリとカーネルの OTA 更新: カーネルの `update`（強い許可、要求をサービスの巡回で）、更新のサービス `ota`、`shell` の `ota`。段 1 は SD から、段 2 は網から、段 3 は網に戻れてから確定 |
+| [67](67-ota.md) | アプリとカーネルの OTA 更新: カーネルの `update`（強い許可、要求をサービスの巡回で）、更新のサービス `ota`、`shell` の `ota`。SD から、網（HTTP）から、網で入れたカーネルは網に戻れてから確定（300 秒で戻る） |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |

@@ -13,6 +13,10 @@
 //!
 //! The PC also has fd55::1/64 (doc/26): with an IPv6 target (fd55::2) the
 //! pings are ICMPv6 and the TCP echo runs over IPv6.
+//!
+//! With `serve_http`, it also answers HTTP/1.0 `GET`s on port 8080 with the
+//! files of a directory (`--http-dir`, doc/67): the update service's
+//! downloads.
 
 use std::collections::VecDeque;
 
@@ -127,6 +131,21 @@ pub struct HostPeer {
     /// Sources of the echo requests that came while idle (NAT test).
     pub pinged_by: std::collections::BTreeSet<IpAddress>,
     pub why: String,
+    http: Option<Http>,
+    /// Files served (path, bytes).
+    pub served: Vec<(String, usize)>,
+}
+
+const HTTP_PORT: u16 = 8080;
+
+/// The HTTP file server (`serve_http`).
+struct Http {
+    dir: std::path::PathBuf,
+    socket: SocketHandle,
+    request: Vec<u8>,
+    /// The answer being sent, and how much of it went.
+    answer: Vec<u8>,
+    sent: usize,
 }
 
 impl HostPeer {
@@ -187,6 +206,58 @@ impl HostPeer {
             icmp_errors: Vec::new(),
             pinged_by: Default::default(),
             why: String::new(),
+            http: None,
+            served: Vec::new(),
+        }
+    }
+
+    /// Answers HTTP `GET`s on port 8080 with the files under `dir`.
+    pub fn serve_http(&mut self, dir: &str) {
+        let socket = self.sockets.add(tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 65536]), tcp::SocketBuffer::new(vec![0; 65536])));
+        self.http = Some(Http { dir: dir.into(), socket, request: Vec::new(), answer: Vec::new(), sent: 0 });
+    }
+
+    /// One connection at a time: reads the request, sends the file (or
+    /// 404), closes.
+    fn http_poll(&mut self) {
+        let Some(h) = &mut self.http else { return };
+        let s = self.sockets.get_mut::<tcp::Socket>(h.socket);
+        if !s.is_open() {
+            h.request.clear();
+            h.answer.clear();
+            h.sent = 0;
+            let _ = s.listen(HTTP_PORT);
+            return;
+        }
+        if h.answer.is_empty() {
+            while s.can_recv() {
+                let _ = s.recv(|b| {
+                    h.request.extend_from_slice(b);
+                    (b.len(), ())
+                });
+            }
+            let Some(end) = h.request.windows(4).position(|w| w == b"\r\n\r\n") else { return };
+            let head = String::from_utf8_lossy(&h.request[..end]).to_string();
+            let path = head.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').to_string();
+            let file = (!path.contains("..")).then(|| std::fs::read(h.dir.join(&path)).ok()).flatten();
+            h.answer = match &file {
+                Some(body) => {
+                    self.served.push((path.clone(), body.len()));
+                    let mut a = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n", body.len()).into_bytes();
+                    a.extend_from_slice(body);
+                    a
+                }
+                None => b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            };
+        }
+        while h.sent < h.answer.len() && s.can_send() {
+            match s.send_slice(&h.answer[h.sent..]) {
+                Ok(n) => h.sent += n,
+                Err(_) => break,
+            }
+        }
+        if h.sent == h.answer.len() && s.send_queue() == 0 {
+            s.close();
         }
     }
 
@@ -215,6 +286,10 @@ impl HostPeer {
         self.dev.rx.extend(usj.packets_out.drain(..));
         let now = Instant::from_millis(now_ms);
         self.iface.poll(now, &mut self.dev, &mut self.sockets);
+        if self.http.is_some() {
+            self.http_poll();
+            self.iface.poll(now, &mut self.dev, &mut self.sockets);
+        }
         if self.step == Step::Idle {
             // Who pings the PC (answered by the stack itself).
             let r = self.sockets.get_mut::<raw::Socket>(self.raw);

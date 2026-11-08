@@ -250,7 +250,7 @@ pub extern "C" fn kmain() -> ! {
     } else {
         event!(Error, "selftest.result", failures = failures, pass = false);
     }
-    if let Some(k) = &kup {
+    if let Some(k) = &mut kup {
         k.after_selftest(failures == 0);
     }
     #[cfg(feature = "test-lockup")]
@@ -310,6 +310,7 @@ fn serve(store: &mut store::Store, kup: &mut kupdate::Kupdate) -> ! {
             spawn_requested(s, store);
             procinfo::poll(s, store);
             update::poll(s, store, kup);
+            kup.poll(Current::now());
             kbd::poll();
             touch_log.poll();
             screen::poll();
@@ -612,7 +613,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::InstallEnd => store.install_end().map(|e| e.length),
         Command::KupdateBegin { length } => {
             store.install_cancel();
-            kup.begin(length)
+            kup.begin(length, None)
         }
         Command::Kinfo => {
             kup.log_state();

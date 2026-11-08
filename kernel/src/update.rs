@@ -46,9 +46,10 @@ impl UpdateHandle {
             return Err(Error::Busy);
         }
         let ok = match req.first() {
-            Some(&(op::BEGIN_APP | op::BEGIN_KERNEL)) => req.len() == 5,
+            Some(&op::BEGIN_APP) => req.len() == 5,
+            Some(&op::BEGIN_KERNEL) => req.len() == 5 || req.len() == 11,
             Some(&op::DATA) => req.len() > 5 && req.len() <= update::REQUEST_MAX,
-            Some(&(op::END | op::REBOOT | op::CANCEL)) => req.len() == 1,
+            Some(&(op::END | op::REBOOT | op::CANCEL | op::CONFIRM)) => req.len() == 1,
             _ => false,
         };
         if !ok {
@@ -63,6 +64,26 @@ impl UpdateHandle {
     pub fn poll(&self) -> Option<(usize, usize)> {
         st().done.take().map(|v| (update::DONE, v))
     }
+
+    /// The status: the server a waiting kernel wants reached.
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize, Error> {
+        let o = out.get_mut(..update::STATUS_SIZE).ok_or(Error::Size)?;
+        o.fill(0);
+        if let Some((ip, port)) = unsafe { *core::ptr::addr_of!(AWAITING) } {
+            o[0..4].copy_from_slice(&ip.to_le_bytes());
+            o[4..6].copy_from_slice(&port.to_le_bytes());
+            o[6..8].copy_from_slice(&update::AWAITING.to_le_bytes());
+        }
+        Ok(update::STATUS_SIZE)
+    }
+}
+
+/// The server the running kernel waits for an app to reach (doc/67 §5).
+static mut AWAITING: Option<(u32, u16)> = None;
+
+/// From `kupdate`: the kernel waits for `server` to be reached (or not).
+pub fn set_awaiting(server: Option<(u32, u16)>) {
+    unsafe { *core::ptr::addr_of_mut!(AWAITING) = server };
 }
 
 impl Drop for UpdateHandle {
@@ -95,8 +116,10 @@ pub fn poll(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdat
         }
         op::BEGIN_KERNEL => {
             store.install_cancel();
-            kup.begin(u32_at(1)).map(|_| ())
+            let net = (req.len() == 11).then(|| (u32_at(5), u16::from_le_bytes([req[9], req[10]])));
+            kup.begin(u32_at(1), net).map(|_| ())
         }
+        op::CONFIRM => kup.confirm_net(u.pid),
         op::DATA => {
             let mut offset = u32_at(1);
             let mut r = Ok(());
