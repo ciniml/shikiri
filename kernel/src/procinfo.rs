@@ -75,7 +75,7 @@ pub fn poll(s: &mut sched::Scheduler, store: &store::Store) {
             r[4] = match p.state {
                 process::State::Ready => proc::STATE_READY,
                 process::State::Sleeping { .. } => proc::STATE_SLEEPING,
-                process::State::Waiting { .. } => proc::STATE_WAITING,
+                process::State::Waiting { .. } | process::State::NoScreen => proc::STATE_WAITING,
                 process::State::Exited(_) => proc::STATE_EXITED,
             };
             r[5] = p.handles.count() as u8;

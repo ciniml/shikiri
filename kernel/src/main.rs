@@ -497,6 +497,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
                     process::State::Ready => "ready",
                     process::State::Sleeping { .. } => "sleeping",
                     process::State::Waiting { .. } => "waiting",
+                    process::State::NoScreen => "no_screen",
                     process::State::Exited(_) => "exited",
                 };
                 event!(

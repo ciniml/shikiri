@@ -8,15 +8,16 @@
 //! humidity, PM2.5, air quality, or the raw value. It asks `values` every
 //! second and draws what changed.
 //!
-//! `display` has one owner (doc/17 §6), usually `term`: stop it first.
-//! Built with `--permit display --permit touch --permit svc:matter/read
+//! Its screen is a seat (doc/60): behind `term` or in front, switched with
+//! the key, the edge swipe or `fg`; it draws again when shown after its
+//! framebuffer was taken away. Built with `--permit display --permit touch --permit svc:matter/read
 //! --permit svc:matter/control`. Exit 0 when stopped, or the step that
-//! failed (1: the display is someone else's).
+//! failed (1: no seat free).
 
 use core::fmt::Write as _;
 
 use t5_rt::log::FmtBuf;
-use t5_rt::{Channel, Display, Error, Point, Touch, chan, event, matter, rgb, sleep_ms, time_ns, touch, wait};
+use t5_rt::{Channel, Display, Error, Point, Touch, chan, display, event, matter, rgb, sleep_ms, time_ns, touch, wait};
 
 t5_rt::entry!(main);
 
@@ -302,6 +303,9 @@ fn run() -> Result<(), u32> {
     let mut next_poll = now_ms() + POLL_MS;
     let mut pts = [Point::default(); touch::MAX_POINTS];
     let mut down = false;
+    // Whether the framebuffer is ours (doc/60 §10), and a draw put off
+    // while it was not.
+    let (mut screen, mut owed) = (true, false);
     loop {
         let mut dirty = false;
         // A finger coming down on a light's tile toggles it.
@@ -326,11 +330,26 @@ fn run() -> Result<(), u32> {
             next_poll = now_ms() + POLL_MS;
             dirty |= poll(&mut s);
         }
-        if dirty {
+        if dirty && screen {
             draw(&mut d, &s)?;
         }
+        owed |= dirty && !screen;
         let ms = next_poll.saturating_sub(now_ms()).clamp(1, POLL_MS);
-        let _ = wait(&[&t.0], ms * 1_000_000);
+        if let Ok(ev) = wait(&[&t.0, &d.handle], ms * 1_000_000)
+            && ev.index == 1
+        {
+            match ev.kind {
+                display::HIDDEN => screen = ev.value == 0,
+                display::SHOWN => {
+                    screen = true;
+                    if ev.value == 1 || owed {
+                        owed = false;
+                        draw(&mut d, &s)?;
+                    }
+                }
+                _ => {}
+            }
+        }
         let _ = chan::PEER_CLOSED;
     }
 }

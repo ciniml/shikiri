@@ -9,7 +9,7 @@
 //! Built with `--permit display --permit touch`. Exit 0 if everything held,
 //! otherwise the number of the failed check.
 
-use t5_rt::{Display, Error, Handle, Point, Touch, display, event, rgb, rights, time_ns, touch, wait};
+use t5_rt::{Display, Error, Handle, Point, Touch, display, event, rgb, rights, sleep_ms, time_ns, touch, wait};
 
 t5_rt::entry!(main);
 
@@ -19,7 +19,12 @@ const COLORS: [u16; 5] = [rgb(255, 80, 80), rgb(80, 255, 80), rgb(80, 160, 255),
 const SQUARE: usize = 16;
 
 fn main(mode: usize, seconds: usize) -> usize {
-    let r = if mode == 1 { self_test() } else { paint(if seconds == 0 { 60 } else { seconds as u64 }) };
+    let secs = if seconds == 0 { 60 } else { seconds as u64 };
+    let r = match mode {
+        1 => self_test(),
+        2 => keep_drawing(secs),
+        _ => paint(secs),
+    };
     match r {
         Ok(()) => 0,
         Err(check) => {
@@ -41,14 +46,39 @@ fn rows(d: &Display, x: usize, y: usize, w: usize, h: usize) -> (usize, usize) {
     (*corners.iter().min().unwrap(), *corners.iter().max().unwrap() + 1)
 }
 
-fn paint(seconds: u64) -> Result<(), u32> {
-    let mut d = Display::open().map_err(|_| 1u32)?;
-    let t = Touch::open().map_err(|_| 2u32)?;
+/// The background, the bar and the white corner.
+fn frame(d: &mut Display) -> Result<(), u32> {
     let (w, _) = d.size();
     d.fill(BACKGROUND);
     d.rect(0, 0, w, 48, BAR);
     d.rect(8, 8, 32, 32, rgb(255, 255, 255)); // top-left corner as the user sees it
-    d.flush_all().map_err(|_| 3u32)?;
+    d.flush_all().map_err(|_| 3u32)
+}
+
+/// Mode 2 (doc/60 §10): a yellow square around (600, 400) every 50 ms,
+/// never looking at the display's events, as an app that knows nothing of
+/// seats. While its framebuffer is taken away it is stopped at the first
+/// write, and goes on once its seat is in front again.
+fn keep_drawing(seconds: u64) -> Result<(), u32> {
+    let mut d = Display::open().map_err(|_| 1u32)?;
+    let end = time_ns() + seconds * 1_000_000_000;
+    let mut squares = 0u32;
+    while time_ns() < end {
+        d.rect(590, 390, 20, 20, COLORS[3]);
+        let (r0, r1) = rows(&d, 590, 390, 20, 20);
+        d.flush(r0, r1).map_err(|_| 6u32)?;
+        squares += 1;
+        sleep_ms(50);
+    }
+    event!(Info, "paint.done", squares = squares);
+    Ok(())
+}
+
+fn paint(seconds: u64) -> Result<(), u32> {
+    let mut d = Display::open().map_err(|_| 1u32)?;
+    let t = Touch::open().map_err(|_| 2u32)?;
+    let (w, _) = d.size();
+    frame(&mut d)?;
     event!(Info, "paint.ready", width = w as u32, height = d.size().1 as u32, quarter = d.quarter as u32);
 
     let end = time_ns() + seconds * 1_000_000_000;
@@ -56,12 +86,18 @@ fn paint(seconds: u64) -> Result<(), u32> {
     let mut pts = [Point::default(); touch::MAX_POINTS];
     while time_ns() < end {
         match wait(&[&t.0, &d.handle], 100_000_000) {
-            // The seat went behind or came back (doc/60): the picture
-            // stays in the framebuffer, nothing to redraw.
+            // The seat went behind or came back (doc/60). Shown after the
+            // framebuffer was taken away (value 1): it is black, the
+            // squares are gone.
             Ok(ev) if ev.index == 1 => {
                 match ev.kind {
-                    display::HIDDEN => event!(Info, "paint.hidden"),
-                    display::SHOWN => event!(Info, "paint.shown"),
+                    display::HIDDEN => event!(Info, "paint.hidden", taken = ev.value as u32),
+                    display::SHOWN => {
+                        event!(Info, "paint.shown", lost = ev.value as u32);
+                        if ev.value == 1 {
+                            frame(&mut d)?;
+                        }
+                    }
                     _ => {}
                 }
                 continue;

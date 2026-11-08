@@ -17,7 +17,6 @@ use t5_abi::{cpu, event};
 
 use crate::arch::riscv32::csr::{cause, mstatus};
 use crate::arch::riscv32::fpu::{self, FpState};
-use crate::arch::riscv32::pmp;
 use crate::arch::riscv32::trap::{self, Trap};
 use crate::platform::{Current, Platform};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -528,7 +527,8 @@ fn log_exit(p: &mut Process, exit: Exit) {
 /// (`prof`).
 fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadline: u64) {
     let p = unsafe { &mut *p };
-    pmp::set_process(&p.region);
+    p.load_pmp();
+    let mut screens = crate::screen::generation();
     // A sample that fell due while the process did not run is not taken
     // when it comes back: it would look like kernel time.
     prof::resumed(p.pid);
@@ -543,6 +543,11 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadl
             let owns = s.fpu[core].owner == Some(i);
             (owns, if owns { mstatus::FS_CLEAN } else { mstatus::FS_OFF })
         };
+        // A framebuffer was taken away while this core waited for the lock.
+        if crate::screen::generation() != screens {
+            screens = crate::screen::generation();
+            p.load_pmp();
+        }
         smp::sync_fetch();
         smp::unlock();
         let t = trap::run_user(&mut p.frame, fs);
@@ -625,6 +630,15 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadl
                 fpu::restore(&s.fpu_saved[i]);
                 s.fpu[core] = CoreFpu { owner: Some(i), dirty: false };
                 s.stats.fpu_switches += 1;
+            }
+            // Its framebuffer, taken away (doc/60 §10): it waits for it and
+            // runs the instruction again (the pc is the faulting one).
+            Trap::Exception { code: cause::LOAD_ACCESS | cause::STORE_ACCESS, tval, .. }
+                if p.region.shared.as_ref().is_some_and(|r| r.contains(&tval)) && crate::screen::taken_away(p.pid) =>
+            {
+                event!(Info, "screen.no_screen", pid = p.pid, addr = Addr(tval as u32));
+                p.state = State::NoScreen;
+                return;
             }
             Trap::Exception { code, pc, tval } => {
                 p.state = State::Exited(Exit::Fault { code, pc, tval });

@@ -55,6 +55,9 @@ pub enum State {
     /// In `wait` on `handles[..n]` until one has an event or the counter
     /// reaches `until` (`u64::MAX`: no timeout).
     Waiting { handles: [u32; WAIT_MAX], n: usize, until: u64 },
+    /// Touched its framebuffer while it was taken away (doc/60 §10): the
+    /// instruction runs again once its seat holds it.
+    NoScreen,
     Exited(Exit),
 }
 
@@ -120,6 +123,16 @@ impl Process {
         }
     }
 
+    /// Loads the PMP for this process, without its framebuffer while that
+    /// is taken away (doc/60 §10).
+    pub fn load_pmp(&self) {
+        if self.region.shared.is_some() && crate::screen::taken_away(self.pid) {
+            pmp::set_process(&pmp::Region { shared: None, ..self.region.clone() });
+        } else {
+            pmp::set_process(&self.region);
+        }
+    }
+
     /// When the scheduler must look at a blocked process again (ticks).
     pub fn wake_at(&mut self) -> Option<u64> {
         match self.state {
@@ -136,6 +149,7 @@ impl Process {
     pub fn try_wake(&mut self, now: u64) -> bool {
         match self.state {
             State::Sleeping { until } if until <= now => {}
+            State::NoScreen if !crate::screen::taken_away(self.pid) => {}
             State::Waiting { handles, n, until } => {
                 match self.handles.poll(&handles[..n], now) {
                     Some((i, ev, v)) => self.set_result(Ok([i, ev, v])),
@@ -182,17 +196,17 @@ impl Process {
                 if let Some(i) = self.shm_mapped.iter().position(|&m| m == Some(a0)) {
                     self.shm_mapped[i] = None;
                     self.region.shm[i] = None;
-                    pmp::set_process(&self.region);
+                    self.load_pmp();
                 }
                 if let Some(i) = self.ring_mapped.iter().position(|&m| m == Some(a0)) {
                     self.ring_mapped[i] = None;
                     self.region.rings[i] = None;
-                    pmp::set_process(&self.region);
+                    self.load_pmp();
                 }
                 let r = self.handles.close(a0);
                 if self.region.shared.is_some() && !self.handles.has_display() {
                     self.region.shared = None;
-                    pmp::set_process(&self.region);
+                    self.load_pmp();
                 }
                 r.map(|_| [0, 0, 0])
             }
@@ -219,7 +233,7 @@ impl Process {
                         // handle (doc/35 §5).
                         self.region.rings[i] = Some(base..base + t5_abi::netdev::ring::SIZE);
                         self.ring_mapped[i] = Some(a0);
-                        pmp::set_process(&self.region);
+                        self.load_pmp();
                         [base, 0, 0]
                     }),
                 }
@@ -234,7 +248,7 @@ impl Process {
                     // The framebuffer becomes the process's until it closes
                     // the handle (doc/17 §6).
                     self.region.shared = Some(fb..fb + len);
-                    pmp::set_process(&self.region);
+                    self.load_pmp();
                 }
                 r.map(|v| [v, 0, 0])
             }
@@ -358,7 +372,7 @@ impl Process {
         let len = self.handles.ctl(h, t5_abi::shm::SIZE, 0)?;
         self.region.shm[i] = Some(addr..addr + len);
         self.shm_mapped[i] = Some(h);
-        pmp::set_process(&self.region);
+        self.load_pmp();
         Ok(addr)
     }
 

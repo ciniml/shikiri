@@ -677,11 +677,17 @@ pub mod display {
     /// their `DONE` (value = how many). The rows may be partly written.
     pub const FAILED: usize = 3;
     /// `wait` event: the seat went behind (doc/60): the framebuffer is no
-    /// longer shown and the keyboard and touch go elsewhere. Drawing still
-    /// works. Only changes are told: a process that opened behind gets no
-    /// `HIDDEN` first.
+    /// longer shown and the keyboard and touch go elsewhere. Value 0: it
+    /// is still the process's (drawing works). Value 1: it was taken away
+    /// for another seat (doc/60 §10): stop drawing; `FLUSH` does nothing,
+    /// 2D requests are `Off`, and touching the framebuffer stops the
+    /// process until its seat is in front again. A seat behind can get a
+    /// second `HIDDEN` (1 after 0). Only changes are told: a process that
+    /// opened behind gets no `HIDDEN` first.
     pub const HIDDEN: usize = 4;
-    /// `wait` event: the seat came to the front (doc/60).
+    /// `wait` event: the seat came to the front (doc/60). Value 1: the
+    /// framebuffer had been taken away and is cleared (black): draw
+    /// everything again. Value 0: the picture is as it was left.
     pub const SHOWN: usize = 5;
     /// `display:focus` (doc/60 F3, system key only): writing a `u32` pid
     /// (LE) puts that process's seat in front. `Invalid` if it holds none.

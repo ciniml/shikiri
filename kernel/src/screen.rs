@@ -283,18 +283,34 @@ impl Drop for TouchHandle {
 
 // ---- seats and the display (doc/60) ----
 
-/// Seats: as many framebuffers as the display's memory holds (doc/60 §4).
-pub const SEATS: usize = 2;
+/// Seats (doc/60 §10): processes with `display` open.
+pub const SEATS: usize = 6;
+/// Framebuffers: as many as the display's memory holds (doc/60 §4).
+const FBS: usize = 2;
 
 struct Seats {
     /// The process in each seat.
     pid: [Option<u32>; SEATS],
+    /// Each seat's framebuffer, for its whole life: a process draws at a
+    /// fixed address (no MMU), so a seat can only get its own back.
+    home: [usize; SEATS],
+    /// The seat each framebuffer is lent to. A seat whose framebuffer is
+    /// another's has none (taken away): it is not in its PMP, and a
+    /// process touching it waits until its seat comes in front again.
+    holder: [Option<usize>; FBS],
+    /// The seat's picture was lost (its framebuffer taken away) since it
+    /// was last shown: `SHOWN` asks it to draw everything again.
+    lost: [bool; SEATS],
     front: Option<usize>,
     /// After a change, the new front sees no touch until every finger is up.
     hold_touch: bool,
+    /// Bumped when a framebuffer is taken away: a core reloads its
+    /// process's PMP before it runs it again.
+    generation: u32,
 }
 
-static mut SEAT: Seats = Seats { pid: [None; SEATS], front: None, hold_touch: false };
+static mut SEAT: Seats =
+    Seats { pid: [None; SEATS], home: [0; SEATS], holder: [None; FBS], lost: [false; SEATS], front: None, hold_touch: false, generation: 0 };
 
 fn seats() -> &'static mut Seats {
     // Under the kernel lock.
@@ -303,7 +319,50 @@ fn seats() -> &'static mut Seats {
 
 /// Seat `i`'s framebuffer.
 fn seat_fb(i: usize) -> Option<usize> {
-    Current::display_buffer().map(|(fb, len)| fb + i * len)
+    Current::display_buffer().map(|(fb, len)| fb + seats().home[i] * len)
+}
+
+/// Whether seat `i` holds its framebuffer.
+fn holds(i: usize) -> bool {
+    seats().holder[seats().home[i]] == Some(i)
+}
+
+/// Whether `pid` has a seat whose framebuffer was taken away: the
+/// framebuffer is left out of its PMP, and touching it waits.
+pub fn taken_away(pid: u32) -> bool {
+    let st = seats();
+    st.pid.iter().position(|&p| p == Some(pid)).is_some_and(|i| !holds(i))
+}
+
+/// Changes when a framebuffer is taken away (see `Seats::generation`).
+pub fn generation() -> u32 {
+    seats().generation
+}
+
+/// Lends seat `i` its framebuffer, taking it from the seat that has it
+/// (behind: the front's is never asked for). Clears it: the picture there
+/// is another's.
+fn lend(i: usize) {
+    let st = seats();
+    let f = st.home[i];
+    if st.holder[f] == Some(i) {
+        return;
+    }
+    if let Some(o) = st.holder[f] {
+        st.lost[o] = true;
+        st.generation = st.generation.wrapping_add(1);
+        // The other core may be running that process with the
+        // framebuffer in its PMP: it reloads it before running a process
+        // again, and it cannot until this core lets go of the lock.
+        crate::smp::quiesce();
+        event!(Info, "screen.taken_away", pid = st.pid[o].unwrap_or(0), by = st.pid[i].unwrap_or(0));
+    }
+    st.holder[f] = Some(i);
+    if let Some((fb, len)) = Current::display_buffer() {
+        let base = fb + f * len;
+        unsafe { core::ptr::write_bytes(base as *mut u8, 0, len) };
+        Current::display_flush(base, len);
+    }
 }
 
 /// The framebuffer shown (`capture` sends it).
@@ -334,6 +393,9 @@ fn set_front(to: Option<usize>, reason: &'static str) {
         return;
     }
     let from = st.front.and_then(|i| st.pid[i]);
+    if let Some(i) = to {
+        lend(i);
+    }
     st.front = to;
     if let Some(fb) = to.and_then(seat_fb) {
         Current::display_show(fb);
@@ -379,9 +441,10 @@ pub fn switch(reason: &'static str) {
 /// A handle on `display`: the process's seat.
 pub struct DisplayHandle {
     seat: usize,
-    /// Whether the process was last told its seat is in front (`SHOWN`)
-    /// or behind (`HIDDEN`); at first, where it opened.
-    shown: bool,
+    /// What the process was last told (`SHOWN`/`HIDDEN`): whether its seat
+    /// is in front, and whether it holds its framebuffer; at first, where
+    /// it opened.
+    told: (bool, bool),
     seen_frames: u32,
     /// 2D requests (finished, failed) the process has been told about.
     seen_done: (u32, u32),
@@ -389,7 +452,7 @@ pub struct DisplayHandle {
 
 impl DisplayHandle {
     pub fn open(pid: u32) -> Result<DisplayHandle, Error> {
-        let (fb, len) = Current::display_buffer().ok_or(Error::NoDevice)?;
+        Current::display_buffer().ok_or(Error::NoDevice)?;
         let st = seats();
         // One seat per process.
         if st.pid.contains(&Some(pid)) {
@@ -397,10 +460,11 @@ impl DisplayHandle {
         }
         let seat = st.pid.iter().position(Option::is_none).ok_or(Error::Busy)?;
         st.pid[seat] = Some(pid);
-        // Not the previous holder's picture.
-        let base = fb + seat * len;
-        unsafe { core::ptr::write_bytes(base as *mut u8, 0, len) };
-        Current::display_flush(base, len);
+        // The framebuffer not shown: the one a seat behind uses, if
+        // another is in front. Taken from the seat behind that has it.
+        st.home[seat] = st.front.map_or(0, |i| (st.home[i] + 1) % FBS);
+        lend(seat);
+        st.lost[seat] = false;
         // In front if no one is, or if the front process started this one
         // (`term` -> `shell` -> `run mtdash`); else behind.
         let front_pid = st.front.and_then(|i| st.pid[i]);
@@ -409,8 +473,8 @@ impl DisplayHandle {
             Some(f) if crate::ident::descends_from(pid, f) => set_front(Some(seat), "child"),
             Some(_) => event!(Info, "screen.seat_behind", pid = pid, front = front_pid.unwrap_or(0)),
         }
-        let shown = st.front == Some(seat);
-        Ok(DisplayHandle { seat, shown, seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
+        let told = (st.front == Some(seat), true);
+        Ok(DisplayHandle { seat, told, seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
     }
 
     fn fb(&self) -> Result<usize, Error> {
@@ -430,6 +494,10 @@ impl DisplayHandle {
                 let (y0, y1) = ((arg & 0xFFFF) as usize, ((arg >> 16) & 0xFFFF) as usize);
                 if y0 >= y1 || y1 > h as usize {
                     return Err(Error::Invalid);
+                }
+                // Another seat's picture now.
+                if !holds(self.seat) {
+                    return Ok(0);
                 }
                 let row = len / h as usize;
                 Current::display_flush(fb + y0 * row, (y1 - y0) * row);
@@ -454,6 +522,9 @@ impl DisplayHandle {
             (op::FILL | op::COPY, _) => return Err(Error::Size),
             _ => return Err(Error::NoSupport),
         };
+        if !holds(self.seat) {
+            return Err(Error::Off);
+        }
         if Current::gfx_busy() {
             return Err(Error::Busy);
         }
@@ -469,10 +540,15 @@ impl DisplayHandle {
     /// the front, else FAILED or DONE with the 2D requests finished since
     /// the last one, else FRAME with the frames sent since the last.
     pub fn poll(&mut self) -> Option<(usize, usize)> {
-        let front = seats().front == Some(self.seat);
-        if front != self.shown {
-            self.shown = front;
-            return Some((if front { t5_abi::display::SHOWN } else { t5_abi::display::HIDDEN }, 0));
+        let st = seats();
+        let now = (st.front == Some(self.seat), holds(self.seat));
+        if now != self.told {
+            self.told = now;
+            return Some(if now.0 {
+                (t5_abi::display::SHOWN, core::mem::take(&mut st.lost[self.seat]) as usize)
+            } else {
+                (t5_abi::display::HIDDEN, !now.1 as usize)
+            });
         }
         let (done, failed) = Current::gfx_finished();
         if (done, failed) != self.seen_done {
@@ -493,9 +569,12 @@ impl Drop for DisplayHandle {
     fn drop(&mut self) {
         let st = seats();
         let pid = st.pid[self.seat].take();
+        if holds(self.seat) {
+            st.holder[st.home[self.seat]] = None;
+        }
         if st.front == Some(self.seat) {
-            // The other seat, if someone holds it.
-            let next = st.pid.iter().position(Option::is_some);
+            // A seat that kept its picture, else any.
+            let next = (0..SEATS).filter(|&i| st.pid[i].is_some()).max_by_key(|&i| holds(i));
             // `set_front` names who left; the seat is already empty.
             st.front = None;
             if next.is_some() {

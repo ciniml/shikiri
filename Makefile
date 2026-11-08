@@ -367,7 +367,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 
@@ -681,6 +681,22 @@ p4emu-run-29:
 	    --capture-out $(BUILD)/emu-capture-fg.png --expect-pixel 20,20,ffff \
 	    --expect-event paint.ready --expect-event paint.hidden --expect-event paint.shown \
 	    --expect-event shell.fg --expect-event screen.focus_by --expect-event capture.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-30:
+	@# Framebuffers taken away (doc/60 §10): paint 2 (101, keeps drawing,
+	@# knows nothing of seats) in front on framebuffer 0; two paints behind
+	@# share framebuffer 1, the second takes it from the first (HIDDEN 1);
+	@# with 102 in front, a fourth paint behind takes framebuffer 0 from 101,
+	@# which stops at its next write (no_screen); `focus 101` gives it back
+	@# and 101 goes on: the capture has its yellow square.
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run paint 2 30" --ctl "wait-ms 1000" --ctl "run paint 0 30" --ctl "wait-ms 1000" \
+	    --ctl "run paint 0 30" --ctl "wait-ms 1000" --ctl "focus 102" --ctl "wait-ms 500" \
+	    --ctl "run paint 0 30" --ctl "wait-ms 1000" --ctl "focus 101" --ctl "wait-ms 500" --ctl "serial capture" \
+	    --capture-out $(BUILD)/emu-capture-takeaway.png --expect-pixel 600,400,fee7 \
+	    --expect-event screen.taken_away --expect-event screen.no_screen --expect-event paint.hidden \
+	    --expect-event paint.shown --expect-event capture.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

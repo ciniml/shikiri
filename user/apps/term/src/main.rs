@@ -17,7 +17,7 @@
 mod keys;
 mod vt;
 
-use t5_rt::{Channel, Display, Error, FOREVER, Font, Handle, Listener, chan, event, kbd, rgb, rights, sleep_ms, spawn, time_ns, wait_raw};
+use t5_rt::{Channel, Display, Error, FOREVER, Font, Handle, Listener, chan, display, event, kbd, rgb, rights, sleep_ms, spawn, time_ns, wait_raw};
 use vt::{COLS, Cell, Color, Grid, ROWS, attr};
 
 t5_rt::entry!(main);
@@ -84,16 +84,8 @@ fn main(mode: usize, _: usize) -> usize {
         cursor_drawn: None,
         shown: unsafe { &mut *core::ptr::addr_of_mut!(SHOWN) },
     };
-    // Matches `SHOWN`'s blank cells. The 2D hardware writes memory itself
-    // (doc/44); the CPU's fill needs the flush.
-    let (w, h) = d.size();
-    if d.start_fill(0, 0, w, h, color(Color::Default, false)).and_then(|_| d.wait_done()).is_err() {
-        d.fill(color(Color::Default, false));
-        let _ = d.flush_all();
-    }
     connect_font(time_ns());
-    t.screen.mark_all();
-    t.draw(&mut d);
+    t.repaint(&mut d);
     if mode == 1 || mode == 2 {
         bench(&mut t, &mut d, mode == 2);
     }
@@ -102,22 +94,42 @@ fn main(mode: usize, _: usize) -> usize {
     let mut client: Option<Channel> = None;
     let mut restart_at = Some(0u64);
     let mut repeat = keys::Repeat::default();
+    // Whether the framebuffer is ours (doc/60 §10): while it is not, the
+    // screen's changes wait for `display::SHOWN`.
+    let mut screen = true;
     loop {
         let now = time_ns();
         if client.is_none() && restart_at.is_some_and(|at| now >= at) {
             restart_at = None;
             start_shell(launcher.as_ref());
         }
-        // What may wake us: the keyboard, a connection, the client.
-        let mut handles = [0u32; 3];
+        // What may wake us: the display (a seat change), the keyboard, a
+        // connection, the client.
+        let mut handles = [0u32; 4];
         let mut n = 0;
-        for h in [keyboard.as_ref().map(|k| k.raw()), Some(listener.0.raw()), client.as_ref().map(|c| c.0.raw())].into_iter().flatten() {
+        for h in [Some(d.handle.raw()), keyboard.as_ref().map(|k| k.raw()), Some(listener.0.raw()), client.as_ref().map(|c| c.0.raw())]
+            .into_iter()
+            .flatten()
+        {
             handles[n] = h;
             n += 1;
         }
         let deadline = [repeat.due(), restart_at.filter(|_| client.is_none())].into_iter().flatten().min();
         let timeout = deadline.map_or(FOREVER, |at| at.saturating_sub(now));
-        let _ = wait_raw(&handles[..n], timeout);
+        if let Ok(ev) = wait_raw(&handles[..n], timeout)
+            && ev.index == 0
+        {
+            match ev.kind {
+                display::HIDDEN => screen = ev.value == 0,
+                display::SHOWN => {
+                    screen = true;
+                    if ev.value == 1 {
+                        t.repaint(&mut d);
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let now = time_ns();
         let mut out = [0u8; 64];
@@ -188,7 +200,9 @@ fn main(mode: usize, _: usize) -> usize {
             client = None;
             restart_at = Some(now + RESTART_MS * 1_000_000);
         }
-        t.draw(&mut d);
+        if screen {
+            t.draw(&mut d);
+        }
     }
 }
 
@@ -257,6 +271,22 @@ struct Term {
 }
 
 impl Term {
+    /// Clears the framebuffer and draws every cell: at the start, and when
+    /// shown after the framebuffer was taken away (doc/60 §10).
+    fn repaint(&mut self, d: &mut Display) {
+        // Matches `SHOWN`'s blank cells. The 2D hardware writes memory
+        // itself (doc/44); the CPU's fill needs the flush.
+        let (w, h) = d.size();
+        if d.start_fill(0, 0, w, h, color(Color::Default, false)).and_then(|_| d.wait_done()).is_err() {
+            d.fill(color(Color::Default, false));
+            let _ = d.flush_all();
+        }
+        self.shown.iter_mut().for_each(|r| r.fill((BLANK_GRID[0][0], false)));
+        self.cursor_drawn = None;
+        self.screen.mark_all();
+        self.draw(d);
+    }
+
     /// Draws the changed cells and the cursor, and flushes those rows.
     fn draw(&mut self, d: &mut Display) {
         if connect_font(time_ns()) {
