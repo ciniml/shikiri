@@ -147,6 +147,9 @@ fn hid_usage(c: char) -> Option<(u8, u8)> {
         // `<pgup>`, `<pgdn>`: Shift+PgUp, Shift+PgDn.
         '\u{E001}' => Some((1 << 1, 0x4B)),
         '\u{E002}' => Some((1 << 1, 0x4E)),
+        // `<alt-up>`, `<alt-down>`: left Alt + Up, Down.
+        '\u{E003}' => Some((1 << 2, 0x52)),
+        '\u{E004}' => Some((1 << 2, 0x51)),
         ' ' => plain(0x2C),
         '-' => plain(0x2D),
         '=' => plain(0x2E),

@@ -469,6 +469,11 @@ impl Screen {
         if line < self.hist_len { &self.history[(self.hist_head + line) % HISTORY][col] } else { &self.grids[self.p.g][line - self.hist_len][col] }
     }
 
+    /// Whether the alternate screen (a full-screen app's) is shown.
+    pub fn alt(&self) -> bool {
+        self.alt_active
+    }
+
     /// How many lines back the view is, and how many there are.
     pub fn view(&self) -> (usize, usize) {
         (self.view, self.hist_len)

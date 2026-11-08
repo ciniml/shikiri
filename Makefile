@@ -710,11 +710,12 @@ p4emu-run-31:
 p4emu-run-32:
 	@# Tab completion and the history (doc/62): `upt<Tab>` runs uptime,
 	@# `fg ter<Tab>` puts term in front by name; after help's lines,
-	@# Shift+PgUp moves the view back (term.view back>0) and the capture
+	@# Alt+Up (and Shift+PgUp) move the view back, Alt+Down forward
+	@# (term.view), and the capture
 	@# shows the label at the top right (reversed: not the background).
 	$(T5EMU) --quiet --max-ms 50000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --ctl "run term" --ctl "wait-ms 3000" --ctl "keys upt\t\n" --ctl "wait-ms 800" --ctl "keys fg ter\t\n" --ctl "wait-ms 800" \
-	    --ctl "keys help\n" --ctl "wait-ms 1500" --ctl "keys <pgup>" --ctl "wait-ms 800" --ctl "serial capture" \
+	    --ctl "keys help\n" --ctl "wait-ms 1500" --ctl "keys <alt-up><pgup><alt-down><alt-up>" --ctl "wait-ms 800" --ctl "serial capture" \
 	    --capture-out $(BUILD)/emu-capture-history.png --expect-pixel 1270,4,d69a \
 	    --expect-event shell.fg --expect-event term.view --expect-event capture.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf

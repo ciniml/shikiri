@@ -6,13 +6,16 @@ const MOD_CTRL: u8 = 0x01 | 0x10;
 const MOD_SHIFT: u8 = 0x02 | 0x20;
 const MOD_ALT: u8 = 0x04 | 0x40;
 
-/// Shift+PgUp / Shift+PgDn (doc/62): moves the view through the history
-/// by `page` lines instead of going to the client. Positive: back.
+/// Alt+Up / Alt+Down (the Tab5's keyboard has no Shift or PgUp), or
+/// Shift+PgUp / Shift+PgDn (doc/62): moves the view through the history by
+/// `page` lines instead of going to the client. Positive: back.
 pub fn view_scroll(modifiers: u8, usage: u8, page: isize) -> Option<isize> {
+    let only = |m: u8| modifiers & m != 0 && modifiers & !m == 0;
     match usage {
-        _ if modifiers & MOD_SHIFT == 0 || modifiers & (MOD_CTRL | MOD_ALT) != 0 => None,
-        PAGE_UP => Some(page),
-        PAGE_DOWN => Some(-page),
+        UP if only(MOD_ALT) => Some(page),
+        DOWN if only(MOD_ALT) => Some(-page),
+        PAGE_UP if only(MOD_SHIFT) => Some(page),
+        PAGE_DOWN if only(MOD_SHIFT) => Some(-page),
         _ => None,
     }
 }

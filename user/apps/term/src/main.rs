@@ -38,7 +38,7 @@ const BLANK_GRID: Grid = [[Cell { ch: '\0', fg: Color::Default, bg: Color::Defau
 static mut GRIDS: [Grid; 2] = [BLANK_GRID; 2];
 /// The lines scrolled off the top (doc/62), zero like the grids: in `.bss`.
 static mut HISTORY: vt::History = [BLANK_GRID[0]; vt::HISTORY];
-/// Lines Shift+PgUp/PgDn move the view.
+/// Lines Alt+Up/Down (Shift+PgUp/PgDn) move the view.
 const VIEW_PAGE: isize = ROWS as isize - 2;
 /// What each cell on the screen shows: the cell, and whether the cursor is
 /// on it. Cells that would be drawn the same are skipped (doc/42).
@@ -211,7 +211,8 @@ fn main(mode: usize, _: usize) -> usize {
 /// A key pressed (or repeated): moves the view through the history
 /// (doc/62), or goes to the client as bytes, bringing the view back first.
 fn key(t: &mut Term, modifiers: u8, usage: u8, send: &mut dyn FnMut(&[u8])) {
-    if let Some(lines) = keys::view_scroll(modifiers, usage, VIEW_PAGE) {
+    // Full-screen apps (the alternate screen) get these keys.
+    if let Some(lines) = keys::view_scroll(modifiers, usage, VIEW_PAGE).filter(|_| !t.screen.alt()) {
         t.screen.scroll_view(lines);
         let (back, of) = t.screen.view();
         event!(Info, "term.view", back = back as u32, lines = of as u32);

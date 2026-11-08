@@ -58,7 +58,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [59](59-emu-speed.md) | t5emu の高速化（毎命令の付けたし: SipHash の `HashMap`、CLIC の線の作り直し、128 ビットの割り算、PMP の範囲の解き直しを除く。命令の数は同じまま 2.3 倍）と、`test-p4emu` の 26 回を別のターゲットにして `make -j` で並列（約 40 分 → 約 160 秒） |
 | [60](60-foreground-seats.md) | フォアグラウンドアプリの切り替え: カーネルの席（`display` を開いたプロセスごとに席と専用のフレームバッファ、前の 1 枚だけを表示、`kbd`/`touch` は前の席にだけ）。案の比べ（合成、席、`term` の多重）と段取り F1〜F4 |
 | [61](61-memory-in-top.md) | `top` のメモリ表示: PSRAM（アプリの領域、共有メモリ、表示）と内蔵 SRAM（カーネル、スタック、リング）、プロセスごとの RAM とスロットの割合。`proc:mem`、`display::FRAMES`（ABI 24） |
-| [62](62-term-history-completion.md) | `term` の履歴（Shift+PgUp/PgDn、200 行）と `shell` の Tab 補完（コマンド、アプリ、プロセス、ファイル）、`more` |
+| [62](62-term-history-completion.md) | `term` の履歴（Alt+↑/↓、200 行）と `shell` の Tab 補完（コマンド、アプリ、プロセス、ファイル）、`more` |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |
