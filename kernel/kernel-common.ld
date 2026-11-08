@@ -15,6 +15,7 @@ SECTIONS
     /* The read-only data of .hot_text's modules (jump tables and such),
      * beside it. Before .rodata so that its patterns take these first. */
     .hot_rodata : ALIGN(4) {
+        __hot_start = .;
         *(.rodata.*9t5_kernel5sched* .rodata.*9t5_kernel7process* .rodata.*9t5_kernel6handle*)
         *(.rodata.*9t5_kernel7channel* .rodata.*9t5_kernel3eth* .rodata.*9t5_kernel4wlan*)
         *(.rodata.*9esp32p4v14emac* .rodata.*9esp32p4v14sdio*)

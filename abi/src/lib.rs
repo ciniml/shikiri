@@ -35,8 +35,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// Minor 19 (doc/48): `bt:hci`. Minor 20 (doc/56): `permit_drop`,
 /// `Error::Limit`, `spawn::RESTART`. Minor 21 (doc/58 R5): `wait` returns
 /// the time too. Minor 22 (doc/60 F2): `display::HIDDEN`/`SHOWN`. Minor
-/// 23 (doc/60 F3): `display:focus`.
-pub const ABI_MINOR: u16 = 23;
+/// 23 (doc/60 F3): `display:focus`. Minor 24 (doc/61): `proc:mem`, the
+/// text size in `proc:list`.
+pub const ABI_MINOR: u16 = 24;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -598,10 +599,21 @@ pub mod proc {
     /// `proc:kill/own` (doc/52 §3.3): only processes this one started (and
     /// theirs); `proc:kill` or `proc:kill/any`: any (system key only).
     pub const KILL: &str = "proc:kill";
+    /// `proc:mem` (doc/61): `read` gives `MEM_INFO` bytes, little-endian
+    /// u32s, in bytes: the app pool, one slot of it (a process's memory:
+    /// text, data, bss and stack must fit), the slots (a count), shared
+    /// memory, the display's framebuffers (these three in the PSRAM, 0 if
+    /// none), the PSRAM (0: none, the app pool is in the internal RAM),
+    /// then the internal RAM the kernel lays out, of it the kernel's image
+    /// (code run from RAM, data, bss), its stacks, and the network rings
+    /// in the former app pool (0 if the pool is still the apps').
+    pub const MEM: &str = "proc:mem";
+    pub const MEM_INFO: usize = 40;
 
-    /// A `proc:list` record: `u32 pid | u8 state | u8 handles | u16 0 |
-    /// u32 cpu_ms | u32 ram (bytes: data, bss and stack) | name[16]`
-    /// (NUL-padded, cut if longer).
+    /// A `proc:list` record: `u32 pid | u8 state | u8 handles | u16 text
+    /// (KiB in RAM, rounded up; 0 when it runs from flash, XIP) | u32
+    /// cpu_ms | u32 ram (bytes: data, bss and stack) | name[16]`
+    /// (NUL-padded, cut if longer). Before ABI minor 24 the text was 0.
     pub const PROC_RECORD: usize = 32;
     pub const STATE_READY: u8 = 0;
     pub const STATE_SLEEPING: u8 = 1;
@@ -668,6 +680,10 @@ pub mod display {
     /// ctl: returns the orientation in quarter turns clockwise (0-3): how
     /// far the panel's top is turned from the top the user sees.
     pub const ORIENTATION: usize = 4;
+    /// ctl: a2 = 0 stops `FRAME` events on this handle, 1 brings them back
+    /// (ABI minor 24): an app waiting only for `HIDDEN`/`SHOWN` and its 2D
+    /// requests is not woken every frame.
+    pub const FRAMES: usize = 5;
     /// `wait` event: frames were sent to the panel (value = how many).
     pub const FRAME: usize = 1;
     /// `wait` event: 2D requests finished (value = how many; doc/44). One

@@ -295,6 +295,8 @@ fn run() -> Result<(), u32> {
         event!(Warn, "mtdash.no_display", busy = e == Error::Busy);
         1u32
     })?;
+    // Woken by seat changes, not every frame.
+    let _ = d.handle.ctl(display::FRAMES, 0);
     let t = Touch::open().map_err(|_| 2u32)?;
     let mut s = Dash { entries: heapless::Vec::new(), reachable: false, note: FmtBuf::new() };
     poll(&mut s);

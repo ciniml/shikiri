@@ -691,6 +691,25 @@ fn word(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
 }
 
+/// A `proc:list` record's memory in KiB: text in RAM, data, bss, stack.
+fn ram_kb(r: &[u8]) -> u64 {
+    u16::from_le_bytes([r[6], r[7]]) as u64 + word(r, 12).div_ceil(1024) as u64
+}
+
+/// `proc:mem` (doc/61): the app pool, a slot, the slots, shared memory,
+/// the display, the PSRAM, the internal RAM, the kernel's image, its stacks,
+/// the network rings (bytes).
+fn mem_info() -> Option<[u32; proc::MEM_INFO / 4]> {
+    let h = Handle::open(proc::MEM, rights::READ).ok()?;
+    let mut b = [0u8; proc::MEM_INFO];
+    h.read(&mut b).ok()?;
+    let mut v = [0u32; proc::MEM_INFO / 4];
+    for (o, c) in v.iter_mut().zip(b.chunks(4)) {
+        *o = word(c, 0);
+    }
+    Some(v)
+}
+
 fn name_of(b: &[u8]) -> &str {
     let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     core::str::from_utf8(&b[..n]).unwrap_or("?")
@@ -717,7 +736,7 @@ fn ps(o: &mut Out) {
             9,
         );
         o.num_col(r[5] as u64, 8);
-        o.num_col(word(r, 12).div_ceil(1024) as u64, 10);
+        o.num_col(ram_kb(r), 10);
         let ms = word(r, 8) as u64;
         o.num_col(ms / 1000, 7);
         o.raw(b'.');
@@ -845,8 +864,47 @@ fn top(o: &mut Out) {
         o.str("\x1b[H\x1b[2J");
         o.str("top: CPU per process over ");
         o.num(window_ms as u64);
-        o.str(" ms (100% = one core). Any key ends.\n\n");
-        o.str("  PID NAME             STATE        CPU%    CPU s\n");
+        o.str(" ms (100% = one core). Any key ends.\n");
+        // Memory (doc/61): what the processes use of the app pool, where
+        // each has a slot.
+        let used: u64 = buf[..len].chunks(proc::PROC_RECORD).map(ram_kb).sum();
+        let mem = mem_info();
+        if let Some([pool, slot, slots, shm, fb, psram, sram, kernel, stacks, rings]) = mem {
+            let kb = |v: u32| v as u64 / 1024;
+            o.str(if psram > 0 { "PSRAM " } else { "pool " });
+            o.num(kb(if psram > 0 { psram } else { pool }));
+            o.str(" KB: apps ");
+            o.num(used);
+            o.str(" of ");
+            o.num(kb(pool));
+            o.str(" (");
+            o.num(slots as u64);
+            o.str(" x ");
+            o.num(kb(slot));
+            o.str("), shm ");
+            o.num(kb(shm));
+            o.str(", fb ");
+            o.num(kb(fb));
+            o.str("\n");
+            if sram > 0 {
+                o.str("SRAM ");
+                o.num(kb(sram));
+                o.str(" KB: kernel ");
+                o.num(kb(kernel));
+                o.str(", stacks ");
+                o.num(kb(stacks));
+                o.str(", net rings ");
+                o.num(kb(rings));
+                o.str(", other ");
+                o.num(kb(sram.saturating_sub(kernel + stacks + rings)));
+                o.str("\n");
+            }
+        }
+        o.str("\n  PID NAME             STATE        CPU%    CPU s  RAM KB  SLOT%\n");
+        let slot_kb = mem.map_or(0, |m| m[1] as u64 / 1024);
+        if first {
+            event!(Info, "shell.top", used_kb = used as u32, pool_kb = mem.map_or(0, |m| m[0] / 1024), slot_kb = slot_kb as u32);
+        }
         let mut next = [(0u32, 0u32); proc::MAX_PROCS];
         for (i, r) in buf[..len].chunks(proc::PROC_RECORD).enumerate() {
             let (pid, ms) = (word(r, 0), word(r, 8));
@@ -876,6 +934,10 @@ fn top(o: &mut Out) {
             o.num_col(ms as u64 / 1000, 7);
             o.raw(b'.');
             o.num(ms as u64 / 100 % 10);
+            o.num_col(ram_kb(r), 8);
+            if slot_kb > 0 {
+                o.num_col(ram_kb(r) * 100 / slot_kb, 7);
+            }
             o.str("\n");
         }
         o.flush();

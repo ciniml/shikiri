@@ -17,6 +17,9 @@ pub trait Platform {
     const MTVEC_MODE: usize;
     /// Memory the kernel may hand to processes.
     const APP_POOL: core::ops::Range<usize>;
+    /// The internal RAM the kernel lays out (its image, stacks, `APP_POOL`;
+    /// doc/61), in bytes: 0 where it is not worth telling (virt).
+    const INTERNAL_RAM: usize = 0;
     /// An MMIO address U-mode must never reach (used by the self-test).
     const PROTECTED_MMIO: usize;
     /// After the self-test: keep running and take control commands

@@ -48,7 +48,7 @@ PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit sv
 PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn/shell --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs/rw: --permit svc:net/tcp-connect --permit svc:net/ping \
-                 --permit svc:net/resolve --permit svc:net/info --permit proc:spawn --permit proc:list --permit proc:apps \
+                 --permit svc:net/resolve --permit svc:net/info --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:mem \
                  --permit proc:kill/own --permit display:focus --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
                  --permit svc:cfg/r: --permit svc:cfg/w: --stack 32768
 # What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a
@@ -367,7 +367,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 
@@ -697,6 +697,14 @@ p4emu-run-30:
 	    --capture-out $(BUILD)/emu-capture-takeaway.png --expect-pixel 600,400,fee7 \
 	    --expect-event screen.taken_away --expect-event screen.no_screen --expect-event paint.hidden \
 	    --expect-event paint.shown --expect-event capture.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-31:
+	@# Memory in top (doc/61): proc:mem and the text size in proc:list;
+	@# shell.top logs what the first screen showed.
+	$(T5EMU) --quiet --max-ms 40000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run term" --ctl "wait-ms 3000" --ctl "keys top\n" --ctl "wait-ms 2500" --ctl "keys q" --ctl "wait-ms 500" \
+	    --expect-event term.ready --expect-event shell.top \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

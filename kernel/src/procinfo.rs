@@ -79,6 +79,8 @@ pub fn poll(s: &mut sched::Scheduler, store: &store::Store) {
                 process::State::Exited(_) => proc::STATE_EXITED,
             };
             r[5] = p.handles.count() as u8;
+            let text = if p.xip_extents.is_some() { 0 } else { p.region.text.len().div_ceil(1024) };
+            r[6..8].copy_from_slice(&(text.min(u16::MAX as usize) as u16).to_le_bytes());
             let cpu_ms = crate::time::ticks_to_ns(p.cpu) / 1_000_000;
             r[8..12].copy_from_slice(&(cpu_ms as u32).to_le_bytes());
             r[12..16].copy_from_slice(&(p.region.data.len() as u32).to_le_bytes());
@@ -167,4 +169,21 @@ impl KillHandle {
         st.n_kills += 1;
         Ok(req.len())
     }
+}
+
+/// What `proc:mem` reads (doc/61), set at boot.
+static mut MEM: [u32; t5_abi::proc::MEM_INFO / 4] = [0; t5_abi::proc::MEM_INFO / 4];
+
+/// From boot: the app pool, a slot, the slots, shared memory, the display.
+pub fn set_mem(v: [u32; t5_abi::proc::MEM_INFO / 4]) {
+    unsafe { *core::ptr::addr_of_mut!(MEM) = v };
+}
+
+/// `read` on `proc:mem`.
+pub fn read_mem(buf: &mut [u8]) -> Result<usize, Error> {
+    let out = buf.get_mut(..t5_abi::proc::MEM_INFO).ok_or(Error::Size)?;
+    for (o, v) in out.chunks_mut(4).zip(unsafe { *core::ptr::addr_of!(MEM) }) {
+        o.copy_from_slice(&v.to_le_bytes());
+    }
+    Ok(t5_abi::proc::MEM_INFO)
 }

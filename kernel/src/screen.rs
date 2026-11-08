@@ -445,6 +445,8 @@ pub struct DisplayHandle {
     /// is in front, and whether it holds its framebuffer; at first, where
     /// it opened.
     told: (bool, bool),
+    /// Whether `FRAME` events are wanted (`display::FRAMES`).
+    frames: bool,
     seen_frames: u32,
     /// 2D requests (finished, failed) the process has been told about.
     seen_done: (u32, u32),
@@ -474,7 +476,7 @@ impl DisplayHandle {
             Some(_) => event!(Info, "screen.seat_behind", pid = pid, front = front_pid.unwrap_or(0)),
         }
         let told = (st.front == Some(seat), true);
-        Ok(DisplayHandle { seat, told, seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
+        Ok(DisplayHandle { seat, told, frames: true, seen_frames: Current::display_frames(), seen_done: Current::gfx_finished() })
     }
 
     fn fb(&self) -> Result<usize, Error> {
@@ -504,6 +506,11 @@ impl DisplayHandle {
                 Ok(0)
             }
             ORIENTATION => Ok(orientation() as usize),
+            FRAMES => {
+                self.frames = arg != 0;
+                self.seen_frames = Current::display_frames();
+                Ok(0)
+            }
             _ => Err(Error::NoSupport),
         }
     }
@@ -557,7 +564,7 @@ impl DisplayHandle {
             return Some(if bad != 0 { (t5_abi::display::FAILED, bad as usize) } else { (t5_abi::display::DONE, n as usize) });
         }
         let f = Current::display_frames();
-        (f != self.seen_frames).then(|| {
+        (self.frames && f != self.seen_frames).then(|| {
             let n = f.wrapping_sub(self.seen_frames);
             self.seen_frames = f;
             (t5_abi::display::FRAME, n as usize)

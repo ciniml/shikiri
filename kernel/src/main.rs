@@ -181,8 +181,10 @@ pub extern "C" fn kmain() -> ! {
     // Apps run from PSRAM when there is one (M4a), else from the L2MEM pool.
     // Apps get the PSRAM but its last `FB_RESERVE`, the display's (doc/17
     // §3), and the `SHM_RESERVE` below it, shared memory's (doc/19 §2).
+    let mut psram_size = 0;
     let framebuffer = match Current::psram_init() {
         Ok((window, size)) if size > 2 * (FB_RESERVE + SHM_RESERVE) => {
+            psram_size = size;
             let shm_base = window + size - FB_RESERVE - SHM_RESERVE;
             set_pool(window..shm_base);
             shm::init(shm_base, SHM_RESERVE);
@@ -194,6 +196,7 @@ pub extern "C" fn kmain() -> ! {
             Some(window + size - FB_RESERVE)
         }
         Ok((window, size)) => {
+            psram_size = size;
             set_pool(window..window + size);
             None
         }
@@ -202,6 +205,20 @@ pub extern "C" fn kmain() -> ! {
             None
         }
     };
+    // What `proc:mem` reads (doc/61).
+    let (image, stacks) = rv::kernel_ram();
+    procinfo::set_mem([
+        pool().len() as u32,
+        slot(0).1 as u32,
+        sched::MAX_PROCS as u32,
+        if shm::available() { SHM_RESERVE as u32 } else { 0 },
+        if framebuffer.is_some() { FB_RESERVE as u32 } else { 0 },
+        psram_size as u32,
+        Current::INTERNAL_RAM as u32,
+        image as u32,
+        stacks as u32,
+        if Current::INTERNAL_RAM > 0 && psram_size > 0 { Current::APP_POOL.len() as u32 } else { 0 },
+    ]);
     Current::clock_init();
     // The panel and touch (M6a). Not part of the self-test's result: a
     // kernel must be able to confirm itself without them (doc/17 §2).

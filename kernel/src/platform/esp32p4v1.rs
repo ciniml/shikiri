@@ -543,6 +543,12 @@ impl Platform for Esp32p4v1 {
     // the kernel's .bss below it (RAM_HI, doc/30 §2). Apps only use it when
     // there is no PSRAM.
     const APP_POOL: core::ops::Range<usize> = 0x4FF8_0000..0x4FFA_0000;
+    // L2MEM below the L2 cache's part (link-esp32p4v1.ld,
+    // link-esp32p4v3.ld): from its start on v1.x, above the cache on v3.x.
+    #[cfg(not(feature = "chip-v3"))]
+    const INTERNAL_RAM: usize = 0x4FFA_0000 - 0x4FF0_0000;
+    #[cfg(feature = "chip-v3")]
+    const INTERNAL_RAM: usize = 0x4FFA_0000 - 0x4FF2_0000;
     const PROTECTED_MMIO: usize = USJ_BASE;
     const SERVE: bool = true;
     const TIMER_HZ: u64 = 16_000_000;

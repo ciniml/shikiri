@@ -76,6 +76,8 @@ fn keep_drawing(seconds: u64) -> Result<(), u32> {
 
 fn paint(seconds: u64) -> Result<(), u32> {
     let mut d = Display::open().map_err(|_| 1u32)?;
+    // Woken by seat changes and the touch, not every frame.
+    let _ = d.handle.ctl(display::FRAMES, 0);
     let t = Touch::open().map_err(|_| 2u32)?;
     let (w, _) = d.size();
     frame(&mut d)?;

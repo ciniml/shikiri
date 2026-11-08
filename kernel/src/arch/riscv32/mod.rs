@@ -60,6 +60,23 @@ const STACK_PAINT: u32 = 0x5AC4_5AC4;
 unsafe extern "C" {
     static __stack_bottom: u32;
     static __stack_top: u32;
+    static __ram_text_start: u32;
+    static __hot_start: u32;
+    static __bss_end: u32;
+    static __stack1_bottom: u32;
+    static __stack1_top: u32;
+}
+
+/// The kernel's RAM (doc/61): its image (code run from RAM, data, the hot
+/// code and bss) and its stacks (both cores'), in bytes.
+pub fn kernel_ram() -> (usize, usize) {
+    let a = |s: &u32| s as *const u32 as usize;
+    unsafe {
+        let stacks = a(&__stack_top) - a(&__stack_bottom) + a(&__stack1_top) - a(&__stack1_bottom);
+        let low = a(&__stack_bottom) - a(&__ram_text_start);
+        let high = a(&__bss_end).saturating_sub(a(&__hot_start));
+        (low + high, stacks)
+    }
 }
 
 /// This core's cycle counter (low 32 bits of `mcycle`): cheap, unlike the

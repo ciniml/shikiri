@@ -72,6 +72,8 @@ fn main(mode: usize, _: usize) -> usize {
         event!(Error, "term.no_display");
         return 1;
     };
+    // Woken by seat changes, not every frame.
+    let _ = d.handle.ctl(display::FRAMES, 0);
     let keyboard = Handle::open(kbd::NAME, rights::READ | rights::WAIT).ok();
     let Ok(listener) = Listener::open("tty") else {
         event!(Error, "term.no_listener");

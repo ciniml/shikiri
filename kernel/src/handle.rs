@@ -34,6 +34,8 @@ pub enum Object {
     Kill(crate::procinfo::KillHandle),
     /// `display:focus` (doc/60 F3): the opener's pid.
     Focus(u32),
+    /// `proc:mem` (doc/61).
+    Mem,
     Random,
     CfgFlash(crate::flash::CfgFlash),
     /// Held for its `Drop`: the mark goes down with the handle.
@@ -136,6 +138,7 @@ impl Object {
                 Ok((Object::Kill(crate::procinfo::KillHandle { pid, any }), rights::WRITE))
             }
             n if n == display::FOCUS.as_bytes() => Ok((Object::Focus(pid), rights::WRITE)),
+            n if n == proc::MEM.as_bytes() => Ok((Object::Mem, rights::READ)),
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == t5_abi::cfgflash::NAME.as_bytes() => {
                 Ok((Object::CfgFlash(crate::flash::CfgFlash::open()?), rights::READ | rights::WRITE | rights::CTL))
@@ -292,7 +295,7 @@ impl Table {
             Object::ApDev(d) => d.ctl(op, arg),
             Object::CfgFlash(f) => f.ctl(op, arg),
             Object::Spawn(s) => s.ctl(op, arg),
-            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
+            Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
                 Err(Error::NoSupport)
             }
         }
@@ -425,6 +428,7 @@ impl Table {
             Object::BtHci(b) => b.read(buf),
             Object::Kbd(k) => k.read(buf),
             Object::List(l) => l.read(buf),
+            Object::Mem => crate::procinfo::read_mem(buf),
             Object::Random => {
                 // Nothing from a read during which a health test failed
                 // (doc/47 §6).
@@ -493,7 +497,7 @@ impl Table {
             Object::ApDev(d) => d.poll().map(|(ev, v)| (i, ev, v)),
             Object::BtHci(b) => b.poll().map(|(ev, v)| (i, ev, v)),
             Object::Kbd(k) => k.poll().map(|(ev, v)| (i, ev, v)),
-            Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Random => None,
+            Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Random => None,
         })
     }
 
