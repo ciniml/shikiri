@@ -320,10 +320,22 @@ fn entries(permissions: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// serving a service, the devices a service owns, the keyboard, readiness
 /// marks, starting or stopping any app, files outside the app's own
 /// folder, secrets in the settings, changing the network, a CPU partition
-/// (doc/57), and the Wi-Fi chip's firmware (doc/58 R5).
+/// (doc/57), the Wi-Fi chip's firmware (doc/58 R5), and putting any
+/// app's screen in front (doc/60 F3).
 pub fn strong(entry: &[u8]) -> bool {
-    const EXACT: [&[u8]; 10] =
-        [b"sd", b"wlan:ctl", b"bt:hci", b"flash:cfg", b"kbd", b"proc:kill", b"proc:kill/any", b"proc:spawn", b"svc:net/link", b"svc:wifi/ota"];
+    const EXACT: [&[u8]; 11] = [
+        b"sd",
+        b"wlan:ctl",
+        b"bt:hci",
+        b"flash:cfg",
+        b"kbd",
+        b"proc:kill",
+        b"proc:kill/any",
+        b"proc:spawn",
+        b"svc:net/link",
+        b"svc:wifi/ota",
+        b"display:focus",
+    ];
     const PREFIX: [&[u8]; 7] = [b"listen:", b"netdev:", b"ready:", b"svc:fs/", b"svc:cfg/secret:", b"svc:wifi/join", b"cpu:"];
     EXACT.contains(&entry) || PREFIX.iter().any(|p| entry.starts_with(p))
 }

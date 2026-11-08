@@ -34,8 +34,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// 2D requests (`write`, `display::DONE`). Minor 18 (doc/46): `random`.
 /// Minor 19 (doc/48): `bt:hci`. Minor 20 (doc/56): `permit_drop`,
 /// `Error::Limit`, `spawn::RESTART`. Minor 21 (doc/58 R5): `wait` returns
-/// the time too. Minor 22 (doc/60 F2): `display::HIDDEN`/`SHOWN`.
-pub const ABI_MINOR: u16 = 22;
+/// the time too. Minor 22 (doc/60 F2): `display::HIDDEN`/`SHOWN`. Minor
+/// 23 (doc/60 F3): `display:focus`.
+pub const ABI_MINOR: u16 = 23;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -682,6 +683,9 @@ pub mod display {
     pub const HIDDEN: usize = 4;
     /// `wait` event: the seat came to the front (doc/60).
     pub const SHOWN: usize = 5;
+    /// `display:focus` (doc/60 F3, system key only): writing a `u32` pid
+    /// (LE) puts that process's seat in front. `Invalid` if it holds none.
+    pub const FOCUS: &str = "display:focus";
 
     /// 2D requests, written to the display handle (doc/44): little-endian
     /// u16s, in framebuffer pixels (the panel's, not the orientation's).

@@ -9,7 +9,7 @@
 //! proc:spawn --permit proc:list --permit proc:apps --permit proc:kill`.
 //! Exits 0 on `exit`, or 1 if there is no terminal.
 
-use t5_rt::{CfgError, Channel, Config, Error, Files, Handle, Net, chan, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
+use t5_rt::{CfgError, Channel, Config, Error, Files, Handle, Net, chan, display, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
 
 t5_rt::entry!(main);
 
@@ -327,6 +327,7 @@ impl Shell {
                  apps                  list the apps in the store\n\
                  ps                    list the processes\n\
                  kill PID              stop a process\n\
+                 fg PID|APP            put its screen in front\n\
                  ping HOST             ping an address or name\n\
                  ifconfig              the network interfaces\n\
                  top                   CPU use per process (any key ends)\n\
@@ -397,6 +398,10 @@ impl Shell {
             "kill" => match args.first().and_then(|a| a.parse::<u32>().ok()) {
                 Some(pid) => kill(o, pid),
                 None => o.str("usage: kill PID\n"),
+            },
+            "fg" => match args.first() {
+                Some(a) => fg(o, a),
+                None => o.str("usage: fg PID|APP\n"),
             },
             "ping" => match args.first() {
                 Some(h) => ping(o, h),
@@ -778,6 +783,33 @@ fn kill(o: &mut Out, pid: u32) {
         // `proc:kill/own` (doc/52): only what this shell started.
         Err(Error::Denied) => o.str("kill: not started from this shell\n"),
         Err(_) => o.str("kill: failed\n"),
+    }
+}
+
+/// `fg PID|APP` (doc/60 F3): puts the screen of the process (or of the
+/// first one running APP) in front.
+fn fg(o: &mut Out, arg: &str) {
+    let pid = match arg.parse::<u32>() {
+        Ok(p) => p,
+        Err(_) => {
+            let mut buf = [0u8; proc::PROC_RECORD * proc::MAX_PROCS];
+            let Ok(len) = snapshot(proc::LIST, &mut buf) else {
+                o.str("fg: cannot list the processes\n");
+                return;
+            };
+            match buf[..len].chunks(proc::PROC_RECORD).find(|r| name_of(&r[16..32]) == arg) {
+                Some(r) => word(r, 0),
+                None => {
+                    o.str("fg: no such process\n");
+                    return;
+                }
+            }
+        }
+    };
+    match Handle::open(display::FOCUS, rights::WRITE).and_then(|h| h.write(&pid.to_le_bytes())) {
+        Ok(_) => event!(Info, "shell.fg", pid = pid),
+        Err(Error::Invalid) => o.str("fg: it has no screen\n"),
+        Err(_) => o.str("fg: failed\n"),
     }
 }
 

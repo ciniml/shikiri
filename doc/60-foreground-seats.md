@@ -55,7 +55,7 @@
 |---|---|
 | F1 | 席を 2 つ、2 枚目のフレームバッファ、前の席の切り替え（GDMA の送り元）、`kbd`/`touch` を前の席にだけ、切り替えのときの「全部離した」、祖先の規則、閉じたらもう一方へ、ホストの `focus PID`、`screen.focus`、`capture` は前の 1 枚 |
 | F2 | カーネルが受ける切り替えのキーとタッチの操作。`display` の事象 `HIDDEN`/`SHOWN`（ABI の小版を上げる）。済み（§8） |
-| F3 | 強い許可 `display:focus` と `ctl(display, FRONT)`、`shell` の `fg PID` |
+| F3 | 強い許可 `display:focus`、`shell` の `fg PID`。済み（§9、`ctl(display, FRONT)` はやめた） |
 | F4 | 必要になれば 3 つ目からの席（手放しの返事を待つ VT_PROCESS 型）、`term` の多重（案 c） |
 
 ## 6. 決めていないこと
@@ -85,4 +85,10 @@
 - ホストの `tap`/`swipe` の指は、コントローラの点に替わるので、指がない所に下りたことにした（エミュレータのタッチは常に 1 点を返すので、そうしないと操作が始まらなかった）。
 - **試験**（p4emu-run-28）: `paint` を 2 つ、タップは前の 1 つ目へ、`<switch>` で 2 つ目が前（`reason=key`、1 つ目に `paint.hidden`、2 つ目に `paint.shown`）、左端からのスワイプで 1 つ目に戻る（`reason=swipe`）。写しは 1 つ目の画面で、タップの四角があり、スワイプの通り道は背景の色。
 - **実機（Tab5、2026-11-08、利用者が確認「うごいた」）**: カーネルを `good.t5k` で入れ、アプリ（ABI 22）を入れ直した（`font` はいつもの store full）。`mtdash`（pid 107）が前、ホストの `run term` で `term`（pid 110）が背後。キーで 5 回（`reason=key`）、左端からのスワイプで 2 回（`reason=swipe`）切り替わった。
-- **まだ**: キーとスワイプを本決めにするか（利用者の判断）。`shell` から `run mtdash` で前に出ること（子孫の規則）の実機での確かめ。
+- **まだ**: キーとスワイプを本決めにするか（利用者の判断）。
+
+## 9. F3 でしたこと（2026-11-08）
+- **`display:focus`**（ABI の小版 23、`t5_abi::display::FOCUS`）: 開いて `u32` の pid（LE）を書くと、そのプロセスの席を前にする。席がなければ `Invalid`。強い許可（システムの鍵の像だけ、`t5a::strong`）。`screen.focus_by`（by、pid）と `screen.focus`（reason=app）を記録する。
+- **`ctl(display, FRONT)` はやめた**: 席を持つアプリが自分で前に出る道になり、§4 の「背後のアプリが自分で前に出る道はない」に反する。前に出したいアプリは `display:focus` を持つ（システムの鍵の）ものに頼む。
+- **`shell` の `fg PID|APP`**: 数でなければ `proc:list` で名前を引き、最初の 1 つ。`shell` に `--permit display:focus` を足した。`shell.fg` を記録する。席のないプロセスなら「fg: it has no screen」。
+- **試験**（p4emu-run-29）: `term` の `shell` で `run paint 0 30` → `paint` が自分で前に出る（`reason=child`、子孫の規則のエミュレータでの確かめ）→ `<switch>` で `term`（`reason=key`、`paint.hidden`）→ `term` で `fg paint`（`screen.focus_by by=102 pid=103`、`reason=app`、`paint.shown`）。写しは `paint` の画面（白い角）。

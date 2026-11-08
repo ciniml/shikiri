@@ -49,7 +49,7 @@ PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn/shell --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs/rw: --permit svc:net/tcp-connect --permit svc:net/ping \
                  --permit svc:net/resolve --permit svc:net/info --permit proc:spawn --permit proc:list --permit proc:apps \
-                 --permit proc:kill/own --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
+                 --permit proc:kill/own --permit display:focus --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
                  --permit svc:cfg/r: --permit svc:cfg/w: --stack 32768
 # What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a
 # service listens) or `ready:NAME` (a process raised the mark). The kernel
@@ -367,7 +367,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb
 
@@ -668,6 +668,19 @@ p4emu-run-28:
 	    --capture-out $(BUILD)/emu-capture-switch.png --expect-pixel 600,400,fa8a --expect-pixel 200,400,18c4 \
 	    --expect-event paint.hidden --expect-event paint.shown --expect-event screen.focus \
 	    --expect-event touch.injected --expect-event capture.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
+
+p4emu-run-29:
+	@# fg and the child rule (doc/60 F3): paint started from term's shell
+	@# comes in front by itself (term is its ancestor); the switch key
+	@# puts term back, and `fg paint` typed in term puts paint in front
+	@# again through display:focus. The capture is paint's screen.
+	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run term" --ctl "wait-ms 3000" --ctl "keys run paint 0 30\n" --ctl "wait-ms 2000" \
+	    --ctl "keys <switch>" --ctl "wait-ms 500" --ctl "keys fg paint\n" --ctl "wait-ms 1000" --ctl "serial capture" \
+	    --capture-out $(BUILD)/emu-capture-fg.png --expect-pixel 20,20,ffff \
+	    --expect-event paint.ready --expect-event paint.hidden --expect-event paint.shown \
+	    --expect-event shell.fg --expect-event screen.focus_by --expect-event capture.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:

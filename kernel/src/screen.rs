@@ -355,6 +355,16 @@ pub fn focus(pid: u32) -> Result<u32, &'static str> {
     Ok(pid)
 }
 
+/// A write to `display:focus` (doc/60 F3): `by` puts the seat of `pid` in
+/// front.
+pub fn focus_by(pid: u32, by: u32) -> Result<(), Error> {
+    let st = seats();
+    let i = st.pid.iter().position(|&p| p == Some(pid)).ok_or(Error::Invalid)?;
+    event!(Info, "screen.focus_by", by = by, pid = pid);
+    set_front(Some(i), "app");
+    Ok(())
+}
+
 /// The switch key or gesture (doc/60 §8): puts the next held seat in
 /// front.
 pub fn switch(reason: &'static str) {
