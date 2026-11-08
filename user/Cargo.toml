@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["rt", "mtport", "apps/hello", "apps/fault", "apps/ticker", "apps/spin", "apps/timers", "apps/xipcheck", "apps/echo", "apps/paint", "apps/fs", "apps/fstest", "apps/net", "apps/nettest", "apps/wifi", "apps/netctl", "apps/init", "apps/keylog", "apps/term", "apps/shell", "apps/font", "apps/hcitest", "apps/ble", "apps/blescan", "apps/blegatt", "apps/bleecho", "apps/mtbench", "apps/matter", "apps/mtreq", "apps/mtep", "apps/mtpanel", "apps/mtdash", "apps/cfg", "apps/cfgctl", "apps/c6ota", "apps/ota", "kumiki-t5os", "apps/kgfx", "apps/imu"]
+members = ["rt", "mtport", "apps/hello", "apps/fault", "apps/ticker", "apps/spin", "apps/timers", "apps/xipcheck", "apps/echo", "apps/paint", "apps/fs", "apps/fstest", "apps/net", "apps/nettest", "apps/wifi", "apps/netctl", "apps/init", "apps/keylog", "apps/term", "apps/shell", "apps/font", "apps/hcitest", "apps/ble", "apps/blescan", "apps/blegatt", "apps/bleecho", "apps/mtbench", "apps/matter", "apps/mtreq", "apps/mtep", "apps/mtpanel", "apps/mtdash", "apps/cfg", "apps/cfgctl", "apps/c6ota", "apps/ota", "kumiki-t5os", "apps/kgfx", "apps/imu", "apps/beep", "apps/mic"]
 
 [profile.release]
 opt-level = "s"

@@ -56,6 +56,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
+name = "beep"
+version = "0.1.0"
+dependencies = [
+ "t5-rt",
+]
+
+[[package]]
 name = "bitbybit"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -768,6 +775,13 @@ dependencies = [
  "heapless",
  "mtport",
  "simple-matter",
+ "t5-rt",
+]
+
+[[package]]
+name = "mic"
+version = "0.1.0"
+dependencies = [
  "t5-rt",
 ]
 

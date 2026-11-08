@@ -1116,6 +1116,36 @@ impl Platform for Esp32p4v1 {
         audio::log_stats()
     }
 
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_rate() -> u32 {
+        audio::rate()
+    }
+
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_space() -> usize {
+        audio::space()
+    }
+
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_push(data: &[u8]) -> usize {
+        audio::push(data)
+    }
+
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_pop(out: &mut [u8]) -> usize {
+        audio::pop(out)
+    }
+
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_interrupts(on: bool) {
+        audio::interrupts(on)
+    }
+
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_service() {
+        audio::service()
+    }
+
     fn board_init() -> super::Panel {
         t5_abi::event!(Info, "board.name", name = board::NAME);
         board::init()

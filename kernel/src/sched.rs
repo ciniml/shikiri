@@ -305,6 +305,7 @@ pub fn run(this: *mut Scheduler, limit_ms: Option<u64>, poll: &mut dyn FnMut(&mu
         crate::hostlink::poll();
         crate::wlan::poll();
         crate::eth::poll();
+        crate::audio::poll();
         crate::capture::poll();
         let now = Current::now();
         if now >= next_feed {
@@ -598,9 +599,11 @@ fn run_slice(this: *mut Scheduler, p: *mut Process, i: usize, core: usize, deadl
             }
             Trap::Interrupt { code } if Current::handle_irq(code) => {
                 // The SDIO interrupt may be the end of a frame's DMA: the
-                // next one goes (doc/37).
+                // next one goes (doc/37). The audio stream's may have made
+                // room: the queues are mixed in (doc/70).
                 if core == 0 {
                     crate::wlan::flush_tx();
+                    crate::audio::poll();
                 }
             }
             Trap::Interrupt { code } => panic!("unexpected interrupt {code}"),

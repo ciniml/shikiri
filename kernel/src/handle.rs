@@ -40,6 +40,9 @@ pub enum Object {
     Update(crate::update::UpdateHandle),
     /// A device on the internal I²C bus (doc/69).
     I2c(I2cDev),
+    /// The speaker and the microphones (doc/70).
+    AudioOut(crate::audio::OutHandle),
+    AudioIn(crate::audio::InHandle),
     Random,
     CfgFlash(crate::flash::CfgFlash),
     /// Held for its `Drop`: the mark goes down with the handle.
@@ -183,6 +186,10 @@ impl Object {
                 let addr = t5_abi::i2c::address(n).ok_or(Error::Invalid)?;
                 Ok((Object::I2c(I2cDev { addr, rx: [0; t5_abi::i2c::MAX], len: 0 }), rights::READ | rights::WRITE))
             }
+            n if n == t5_abi::audio::OUT.as_bytes() => {
+                Ok((Object::AudioOut(crate::audio::OutHandle::open()?), rights::WRITE | rights::CTL | rights::WAIT))
+            }
+            n if n == t5_abi::audio::IN.as_bytes() => Ok((Object::AudioIn(crate::audio::InHandle::open()?), rights::READ | rights::CTL | rights::WAIT)),
             n if n == t5_abi::update::NAME.as_bytes() => Ok((Object::Update(crate::update::UpdateHandle::open(pid)?), rights::READ | rights::WRITE | rights::WAIT)),
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == t5_abi::cfgflash::NAME.as_bytes() => {
@@ -340,6 +347,8 @@ impl Table {
             Object::ApDev(d) => d.ctl(op, arg),
             Object::CfgFlash(f) => f.ctl(op, arg),
             Object::Spawn(s) => s.ctl(op, arg),
+            Object::AudioOut(a) => a.ctl(op, arg),
+            Object::AudioIn(a) => a.ctl(op, arg),
             Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Update(_) | Object::I2c(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
                 Err(Error::NoSupport)
             }
@@ -451,6 +460,7 @@ impl Table {
             Object::Kill(k) => k.write(buf),
             Object::Update(u) => u.write(buf),
             Object::I2c(d) => d.write(buf),
+            Object::AudioOut(a) => a.write(buf),
             Object::Focus(by) => {
                 let pid = u32::from_le_bytes(buf.try_into().map_err(|_| Error::Size)?);
                 crate::screen::focus_by(pid, *by).map(|_| buf.len())
@@ -478,6 +488,7 @@ impl Table {
             Object::Mem => crate::procinfo::read_mem(buf),
             Object::Update(u) => u.read(buf),
             Object::I2c(d) => d.read(buf),
+            Object::AudioIn(a) => a.read(buf),
             Object::Random => {
                 // Nothing from a read during which a health test failed
                 // (doc/47 §6).
@@ -547,6 +558,8 @@ impl Table {
             Object::BtHci(b) => b.poll().map(|(ev, v)| (i, ev, v)),
             Object::Kbd(k) => k.poll().map(|(ev, v)| (i, ev, v)),
             Object::Update(u) => u.poll().map(|(ev, v)| (i, ev, v)),
+            Object::AudioOut(a) => a.poll().map(|(ev, v)| (i, ev, v)),
+            Object::AudioIn(a) => a.poll().map(|(ev, v)| (i, ev, v)),
             Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::I2c(_) | Object::Random => None,
         })
     }

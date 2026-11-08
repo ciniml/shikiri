@@ -328,7 +328,7 @@ pub fn strong(entry: &[u8]) -> bool {
     if entry.starts_with(b"i2c:") {
         return !crate::i2c::address(entry).is_some_and(|a| crate::i2c::APP_DEVICES.contains(&a));
     }
-    const EXACT: [&[u8]; 12] = [
+    const EXACT: [&[u8]; 13] = [
         b"sd",
         b"wlan:ctl",
         b"bt:hci",
@@ -341,6 +341,8 @@ pub fn strong(entry: &[u8]) -> bool {
         b"svc:wifi/ota",
         b"display:focus",
         b"update",
+        // The microphones (doc/70).
+        b"audio:in",
     ];
     const PREFIX: [&[u8]; 7] = [b"listen:", b"netdev:", b"ready:", b"svc:fs/", b"svc:cfg/secret:", b"svc:wifi/join", b"cpu:"];
     EXACT.contains(&entry) || PREFIX.iter().any(|p| entry.starts_with(p))
@@ -455,5 +457,11 @@ mod tests {
         assert!(!strong(b"i2c:int/0x69"));
         assert!(strong(b"i2c:int/68"));
         assert!(strong(b"i2c:ext/0x68"));
+    }
+
+    #[test]
+    fn audio_permits() {
+        assert!(strong(b"audio:in"));
+        assert!(!strong(b"audio:out"));
     }
 }

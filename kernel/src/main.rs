@@ -13,6 +13,7 @@
 #![no_main]
 
 mod arch;
+mod audio;
 mod capture;
 mod channel;
 mod eth;
@@ -229,10 +230,15 @@ pub extern "C" fn kmain() -> ! {
     Current::clock_init();
     // Audio before the display: the ES8388 stays silent when it is set up
     // after the display's power sequence (kumiki, doc/70 §1).
-    if let Some(area) = audio_area
-        && let Err(why) = Current::audio_init(area)
-    {
-        event!(Warn, "audio.failed", error = why);
+    if let Some(area) = audio_area {
+        match Current::audio_init(area) {
+            // The apps' queues after the stream's rings (doc/70).
+            Ok(()) => {
+                let queues = (area + Current::AUDIO_RING_BYTES).next_multiple_of(64);
+                audio::init(queues, Current::APP_POOL.end.saturating_sub(queues));
+            }
+            Err(why) => event!(Warn, "audio.failed", error = why),
+        }
     }
     // The panel and touch (M6a). Not part of the self-test's result: a
     // kernel must be able to confirm itself without them (doc/17 §2).

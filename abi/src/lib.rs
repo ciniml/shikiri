@@ -38,7 +38,7 @@ pub const ABI_MAJOR: u16 = 0;
 /// 23 (doc/60 F3): `display:focus`. Minor 24 (doc/61): `proc:mem`, the
 /// text size in `proc:list`. Minor 25 (doc/67): `update`. Minor 26
 /// (doc/69): `i2c:int/ADDR`.
-pub const ABI_MINOR: u16 = 26;
+pub const ABI_MINOR: u16 = 27;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -794,6 +794,41 @@ pub mod i2c {
         let v = core::str::from_utf8(hex).ok()?;
         u8::from_str_radix(v, 16).ok().filter(|&a| a < 0x80)
     }
+}
+
+/// Sound (doc/70): the speaker and the microphones, as PCM frames of
+/// 16-bit little-endian stereo (left first, `FRAME` bytes) at the rate
+/// `ctl(RATE)` gives (the hardware's; an app converts).
+///
+/// - `audio:out`: `write` queues frames (whole frames; as many as fit, the
+///   count of bytes taken is returned, 0 when full). The kernel mixes every
+///   open `audio:out` (saturating) into the stream. `wait` gives
+///   `WRITABLE` (value: bytes free) while at least half of the queue is
+///   free. A process may hold it whether its seat is in front or not.
+/// - `audio:in` (a strong permission: system-key images only): `read`
+///   takes recorded frames (every open `audio:in` gets the same); `wait`
+///   gives `READABLE` (value: bytes waiting). Frames that do not fit are
+///   dropped.
+///
+/// `NoDevice` on boards without audio, `Busy` when every slot is taken.
+pub mod audio {
+    pub const OUT: &str = "audio:out";
+    pub const IN: &str = "audio:in";
+    /// Bytes per frame (16-bit stereo).
+    pub const FRAME: usize = 4;
+    /// `ctl`: the sample rate in Hz.
+    pub const RATE: usize = 1;
+    /// `ctl`: bytes free in the queue (`audio:out`), bytes waiting
+    /// (`audio:in`).
+    pub const QUEUED: usize = 2;
+    /// `ctl` on `audio:out`, `arg` 0..=100: this stream's level (100: as
+    /// written; the default).
+    pub const VOLUME: usize = 3;
+    /// `ctl` on `audio:in`: frames dropped for a full queue.
+    pub const LOST: usize = 4;
+    /// `wait` events.
+    pub const WRITABLE: usize = 1;
+    pub const READABLE: usize = 2;
 }
 
 /// Random bytes (doc/46 §4): `read` fills up to `MAX` bytes. On the

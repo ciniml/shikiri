@@ -156,6 +156,28 @@ pub trait Platform {
     fn audio_stats() -> Result<u32, &'static str> {
         Err("no audio")
     }
+    /// The stream's sample rate in Hz; 0 while there is no stream.
+    fn audio_rate() -> u32 {
+        0
+    }
+    /// Bytes `audio_push` takes now.
+    fn audio_space() -> usize {
+        0
+    }
+    /// Queues PCM bytes (whole frames) for playing; how many it took.
+    fn audio_push(_data: &[u8]) -> usize {
+        0
+    }
+    /// Takes recorded PCM bytes; how many.
+    fn audio_pop(_out: &mut [u8]) -> usize {
+        0
+    }
+    /// The stream's interrupt on (someone uses it) or off.
+    fn audio_interrupts(_on: bool) {}
+    /// Services the stream as its interrupt would (clears it, moves the
+    /// rings on): the scheduler loop idles with interrupts masked, taking
+    /// them only while a process runs.
+    fn audio_service() {}
     /// Board devices around the display (M6a, doc/17 §5): releases the
     /// panel and touch resets and identifies the panel.
     fn board_init() -> Panel {

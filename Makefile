@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu beep mic
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -42,6 +42,8 @@ PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w
 PERMIT_c6ota  := --permit svc:net/tcp-connect --permit svc:wifi/ota
 PERMIT_kgfx   := --permit display
 PERMIT_imu    := --permit i2c:int/0x68 --permit i2c:int/0x69
+PERMIT_beep   := --permit audio:out
+PERMIT_mic    := --permit audio:in
 PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
@@ -119,7 +121,7 @@ APP_KEY       ?= $(HOME)/.config/tab5-os/app-ed25519.key
 APP_PUB       := keys/app-ed25519.pub
 # Signed with the system key (DEV_KEY): the services and the apps that need
 # strong permissions. The rest get APP_KEY.
-SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota ota
+SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota ota mic
 KEY_OF         = $(if $(filter $(1),$(SYSTEM_APPS)),$(DEV_KEY),$(APP_KEY))
 # A key the kernel does not trust, for the rejection test. Not a secret.
 UNTRUSTED_KEY := $(BUILD)/keys/untrusted.key
@@ -371,7 +373,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
@@ -913,6 +915,25 @@ p4emu-run-43:
 	grep -Eq "t5emu: audio: [0-9]{4,} descriptor\(s\) sent" $(BUILD)/emu-audio.txt
 	grep -B100 "audio.started" $(BUILD)/emu-audio.txt | grep -q "board.ready" && { echo "audio after the display"; false; } || true
 	python3 -c "import sys; d = open(sys.argv[1], 'rb').read()[44:]; sys.exit(0 if len(d) > 100000 and not any(d) else 1)" $(BUILD)/emu-audio.wav
+
+p4emu-run-44:
+	@# Audio stage A2 (doc/70): `beep` plays 1 kHz for 500 ms through
+	@# audio:out (the kernel's queue, mixed into the stream; the WAV holds
+	@# it at a quarter of full scale) while `mic` reads audio:in (the
+	@# emulator's 440 Hz tone at 4096: peak about 4096, RMS about 2896).
+	@# `mic` starts once `beep` plays: loading it holds the kernel ~170 ms
+	@# (the signature at 40 MHz), longer than the rings last: the stream is
+	@# restarted once (restarts=1), a dropout of about 90 ms in the 1.5 s
+	@# tone (at most 1700 ms: a ring left unpolled would repeat forever).
+	$(T5EMU) --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --audio-out $(BUILD)/emu-beep.wav --ctl "run beep 1000 1500" --ctl "wait-ms 300" --ctl "run mic 500" --ctl "wait-ms 3000" --ctl audio \
+	    --expect-event beep.start --expect-event beep.done --expect-event mic.level --expect-event mic.done \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-beep.txt 2>&1 || { tail -20 $(BUILD)/emu-beep.txt; false; }
+	grep -q "beep.done frames=72000" $(BUILD)/emu-beep.txt
+	grep -Eq "mic.level n=2 peak=40[0-9][0-9] rms=28[0-9][0-9]" $(BUILD)/emu-beep.txt
+	grep -Eq "mic.done frames=24[0-9]{3} lost=0" $(BUILD)/emu-beep.txt
+	grep -Eq "audio.stats .* restarts=1$$" $(BUILD)/emu-beep.txt
+	tools/wavcheck.py $(BUILD)/emu-beep.wav 1000 8000 1700
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target
