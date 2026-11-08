@@ -7,9 +7,10 @@
 //! and replies are channel messages (`t5_abi::fs`). Each client may use
 //! its own folder and the paths its grants name (doc/52, `t5_abi::fs`);
 //! the rest is refused (`fs.denied`). Open files belong to the client that
-//! opened them. Long names (doc/63) work for what exists: each part of a
-//! path is looked up by its long or 8.3 name, either case, and used by its
-//! 8.3 name; new names must be 8.3.
+//! opened them. Long names (doc/63): each part of a path is looked up by
+//! its long or 8.3 name, either case, and used by its 8.3 name; a new file
+//! or directory whose name is not an upper case 8.3 name gets it as a long
+//! name, beside an 8.3 alias (`NAME~1.EXT`).
 //!
 //! Built with `--permit sd --permit shm --permit listen:fs`.
 
@@ -164,7 +165,7 @@ impl Client {
     /// Whether `path` is a directory above a place it may write (making it
     /// is harmless).
     fn above_allowed(&self, path: &[u8]) -> bool {
-        let above = |p: &[u8]| p.len() > path.len() && p.starts_with(path) && p[path.len()] == b'/';
+        let above = |p: &[u8]| p.len() > path.len() && p[..path.len()].eq_ignore_ascii_case(path) && p[path.len()] == b'/';
         above(self.own())
             || self.grants.iter().filter_map(|g| g.strip_prefix(b"rw:")).any(|p| {
                 let mut buf = [0u8; PATH_MAX];
@@ -177,9 +178,10 @@ impl Client {
     }
 }
 
-/// Whether `path` is `p` or under it (an empty `p`: everything).
+/// Whether `path` is `p` or under it (an empty `p`: everything), either
+/// case.
 fn under(path: &[u8], p: &[u8]) -> bool {
-    p.is_empty() || path == p || (path.len() > p.len() && path.starts_with(p) && path[p.len()] == b'/')
+    p.is_empty() || (path.len() >= p.len() && path[..p.len()].eq_ignore_ascii_case(p) && (path.len() == p.len() || path[p.len()] == b'/'))
 }
 
 /// A grant's path as the card compares it.
@@ -193,8 +195,9 @@ fn upper<'b>(p: &[u8], buf: &'b mut [u8; PATH_MAX]) -> &'b [u8] {
     &buf[..n]
 }
 
-/// `path` as the card compares it: upper case, no leading or trailing `/`,
-/// `~` for the client's own folder; `None` for `.`, `..` or empty parts.
+/// `path` as the card compares it: no leading or trailing `/`, `~` for the
+/// client's own folder; `None` for `.`, `..` or empty parts. The case is
+/// kept (a new long name keeps it, doc/63); comparisons ignore it.
 fn normalise<'b>(path: &str, own: &[u8], out: &'b mut [u8; PATH_MAX]) -> Option<&'b str> {
     let path = path.trim_matches('/');
     let rest = if path == "~" { Some("") } else { path.strip_prefix("~/") };
@@ -222,9 +225,7 @@ fn normalise<'b>(path: &str, own: &[u8], out: &'b mut [u8; PATH_MAX]) -> Option<
             if i > 0 {
                 put(b"/")?;
             }
-            for b in part.bytes() {
-                put(&[b.to_ascii_uppercase()])?;
-            }
+            put(part.as_bytes())?;
         }
     }
     core::str::from_utf8(&out[..n]).ok()
@@ -274,6 +275,36 @@ impl Name {
     }
 }
 
+/// Characters an 8.3 name may have besides letters and digits.
+const SHORT_EXTRA: &[u8] = b"$%'-_@~`!(){}^#&";
+
+/// `part` (of a long name) as an 8.3 name part: upper case, letters,
+/// digits and `SHORT_EXTRA`; spaces and dots dropped, anything else `_`.
+/// Whether nothing but the case changed.
+fn short_part(part: &str, max: usize, out: &mut [u8; 8]) -> (usize, bool) {
+    let (mut n, mut exact) = (0, true);
+    for c in part.chars() {
+        let b = match c {
+            ' ' | '.' => {
+                exact = false;
+                continue;
+            }
+            c if c.is_ascii_alphanumeric() || (c.is_ascii() && SHORT_EXTRA.contains(&(c as u8))) => c.to_ascii_uppercase() as u8,
+            _ => {
+                exact = false;
+                b'_'
+            }
+        };
+        if n == max {
+            exact = false;
+            break;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    (n, exact)
+}
+
 /// A buffer for any long name (255 UTF-16 units, 3 bytes each at most).
 const LFN_BYTES: usize = 255 * 3;
 
@@ -297,6 +328,79 @@ impl Service<'_> {
             ControlFlow::Continue(())
         });
         found
+    }
+
+    /// An 8.3 name for the new entry `long` in `dir` (doc/63): the name
+    /// itself in upper case if that is all it takes, else `BASE~N.EXT` with
+    /// the first N free.
+    fn alias(&self, dir: RawDirectory, long: &str) -> Option<Short> {
+        let (base, ext) = match long.rfind('.') {
+            Some(i) if i > 0 => (&long[..i], &long[i + 1..]),
+            _ => (long, ""),
+        };
+        let (mut b, mut e) = ([0u8; 8], [0u8; 8]);
+        let (bn, b_exact) = short_part(base, 8, &mut b);
+        let (en, e_exact) = short_part(ext, 3, &mut e);
+        let make = |base: &[u8], tail: &[u8]| {
+            let mut s = Short { buf: [0; 12], len: 0 };
+            for &c in base.iter().chain(tail) {
+                s.buf[s.len] = c;
+                s.len += 1;
+            }
+            if en > 0 {
+                s.buf[s.len] = b'.';
+                s.len += 1;
+                for &c in &e[..en] {
+                    s.buf[s.len] = c;
+                    s.len += 1;
+                }
+            }
+            s
+        };
+        if b_exact && e_exact && bn > 0 && long.matches('.').count() <= 1 {
+            let s = make(&b[..bn], b"");
+            if self.lookup(dir, s.as_str()).is_none() {
+                return Some(s);
+            }
+        }
+        let base = if bn == 0 { &b"_"[..] } else { &b[..bn] };
+        for n in 1..1000u32 {
+            // `~` and n in decimal.
+            let digits = if n < 10 { 1 } else if n < 100 { 2 } else { 3 };
+            let mut tail = [b'~'; 4];
+            let mut v = n;
+            for k in (1..=digits).rev() {
+                tail[k] = b'0' + (v % 10) as u8;
+                v /= 10;
+            }
+            let t = 1 + digits;
+            let s = make(&base[..base.len().min(8 - t)], &tail[..t]);
+            if self.lookup(dir, s.as_str()).is_none() {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    /// Makes the new entry `name` in `dir` with `make` (given its 8.3
+    /// name): as is if it is an upper case 8.3 name, else as a long name
+    /// beside an alias (doc/63).
+    fn create<R>(
+        &self,
+        dir: RawDirectory,
+        name: &str,
+        make: impl FnOnce(&str) -> Result<R, embedded_sdmmc::Error<CardError>>,
+    ) -> Result<R, u32> {
+        let plain = embedded_sdmmc::ShortFileName::create_from_str(name).is_ok() && !name.bytes().any(|b| b.is_ascii_lowercase());
+        if plain {
+            return make(name).map_err(|e| status_of(&e));
+        }
+        let alias = self.alias(dir, name).ok_or(status::FULL)?;
+        self.vm.set_long_name(self.volume, Some(name)).map_err(|_| status::BAD_NAME)?;
+        let r = make(alias.as_str()).map_err(|e| status_of(&e));
+        // Not left for the next entry if this one failed before it.
+        let _ = self.vm.set_long_name(self.volume, None);
+        r
     }
 
     /// Opens the directory that holds the last component of `path`, and
@@ -352,7 +456,9 @@ impl Service<'_> {
     fn make_dirs(&self, path: &str) {
         for (i, _) in path.match_indices('/').map(|(i, s)| (i, s)).chain(core::iter::once((path.len(), ""))) {
             if let Ok((dir, name)) = self.parent(&path[..i]) {
-                let _ = self.vm.make_dir_in_dir(dir, name.as_str(&path[..i]));
+                if let Name::Given(_) = name {
+                    let _ = self.create(dir, name.as_str(&path[..i]), |n| self.vm.make_dir_in_dir(dir, n));
+                }
                 let _ = self.vm.close_dir(dir);
             }
         }
@@ -392,9 +498,17 @@ impl Service<'_> {
                 };
                 let slot = self.files.iter().position(Option::is_none).ok_or(status::TOO_MANY_OPEN)?;
                 let (dir, name) = self.parent(path)?;
-                let f = self.vm.open_file_in_dir(dir, name.as_str(path), mode);
+                let f = match name {
+                    Name::Short(s) => self.vm.open_file_in_dir(dir, s.as_str(), mode).map_err(|e| status_of(&e)),
+                    // A new file: made if asked to.
+                    Name::Given(_) if flags & flag::CREATE != 0 => {
+                        let given = name.as_str(path);
+                        self.create(dir, given, |n| self.vm.open_file_in_dir(dir, n, mode))
+                    }
+                    Name::Given(_) => Err(status::NOT_FOUND),
+                };
                 let _ = self.vm.close_dir(dir);
-                let file = f.map_err(|e| status_of(&e))?;
+                let file = f?;
                 let len = self.vm.file_length(file).unwrap_or(0);
                 self.files[slot] = Some(Open { client, file });
                 Ok((slot as u32, len))
@@ -511,9 +625,12 @@ impl Service<'_> {
                     return Err(denied("mkdir"));
                 }
                 let (dir, name) = self.parent(path)?;
-                let r = self.vm.make_dir_in_dir(dir, name.as_str(path));
+                let r = match name {
+                    Name::Short(_) => Err(status::EXISTS),
+                    Name::Given(_) => self.create(dir, name.as_str(path), |n| self.vm.make_dir_in_dir(dir, n)),
+                };
                 let _ = self.vm.close_dir(dir);
-                r.map_err(|e| status_of(&e))?;
+                r?;
                 Ok((0, 0))
             }
             _ => Err(status::BAD_REQUEST),

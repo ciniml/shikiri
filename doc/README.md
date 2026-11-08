@@ -59,7 +59,7 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [60](60-foreground-seats.md) | フォアグラウンドアプリの切り替え: カーネルの席（`display` を開いたプロセスごとに席と専用のフレームバッファ、前の 1 枚だけを表示、`kbd`/`touch` は前の席にだけ）。案の比べ（合成、席、`term` の多重）と段取り F1〜F4 |
 | [61](61-memory-in-top.md) | `top` のメモリ表示: PSRAM（アプリの領域、共有メモリ、表示）と内蔵 SRAM（カーネル、スタック、リング）、プロセスごとの RAM とスロットの割合。`proc:mem`、`display::FRAMES`（ABI 24） |
 | [62](62-term-history-completion.md) | `term` の履歴（Alt+↑/↓、200 行）と `shell` の Tab 補完（コマンド、アプリ、プロセス、ファイル）、`more` |
-| [63](63-long-file-names.md) | 長いファイル名: 段 1 は今ある長い名前で開く・一覧（`LIST_LONG`）、段 2 は作る |
+| [63](63-long-file-names.md) | 長いファイル名: 今ある長い名前で開く・一覧（`LIST_LONG`）、長い名前で作る・消す（embedded-sdmmc を取り込んで LFN の作成と削除を足した） |
 | [64](64-emulator-sd.md) | エミュレータの microSD: SDMMC ホストと SDHC カード（`--sd`、`--sd-out`）、mtools の試験用の像、p4emu-run-33 |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |

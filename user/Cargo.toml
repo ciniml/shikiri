@@ -15,3 +15,6 @@ panic = "abort"
 # stays in the past after the last router solicitation.
 [patch.crates-io]
 smoltcp = { path = "../third_party/smoltcp-0.14.0" }
+# embedded-sdmmc that can make long file names (third_party/README.md,
+# doc/63).
+embedded-sdmmc = { path = "../third_party/embedded-sdmmc-0.10.0" }

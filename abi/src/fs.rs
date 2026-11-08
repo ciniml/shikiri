@@ -6,8 +6,9 @@
 //! - request: `u8 op | u8 flags | u16 0 | u32 a | u32 b | path (UTF-8, '/'-separated)`
 //!
 //! A path's parts are 8.3 names or long names (doc/63), matched without
-//! regard to (ASCII) case. Long names can be used for what exists already;
-//! files and directories are made with 8.3 names only (`BAD_NAME`).
+//! regard to (ASCII) case. A new file or directory whose name is not an
+//! upper case 8.3 name is made with it as its long name (case kept) beside
+//! an 8.3 alias.
 //! - reply: `u32 status | u32 v0 | u32 v1`
 //!
 //! | op | a | b | path | v0 / v1 |
@@ -27,8 +28,8 @@
 //! made on first use), and what its grants say: `svc:fs/r:PATH` (read,
 //! list) and `svc:fs/rw:PATH` (also write, delete, make directories), PATH
 //! and everything under it (an empty PATH: the whole card). Making the
-//! directories above an allowed place is allowed. Paths are compared in
-//! upper case; `.` and `..` are refused. Anything else is `DENIED`.
+//! directories above an allowed place is allowed. Paths are compared
+//! without regard to case; `.` and `..` are refused. Anything else is `DENIED`.
 
 pub const SERVICE: &str = "fs";
 pub const SLICE: usize = 64 << 10;

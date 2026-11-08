@@ -726,17 +726,31 @@ $(BUILD)/sd-test.img: tools/mksdimg.sh
 p4emu-run-33:
 	@# The microSD card (doc/64) and long names (doc/63): fs on an image
 	@# made by mtools; a long-named folder and file, with an escaped space
-	@# and in quotes in another case, are read (shell.cat); a new 8.3 file is
-	@# written and mtools reads it back from the card the run left.
+	@# and in quotes in another case, are read (shell.cat). Files and a
+	@# folder are made with long names and an 8.3 one, a long-named file is
+	@# deleted; mtools reads the card the run left, and fatcheck.py finds
+	@# every LFN entry in its place (no orphans).
 	$(T5EMU) --quiet --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --sd $(BUILD)/sd-test.img --sd-out $(BUILD)/sd-test-after.img \
 	    --ctl "run fs" --ctl "wait-ms 2000" --ctl "run term" --ctl "wait-ms 3000" \
 	    --ctl "keys cat My\\ Documents/notes-about-tab5.txt\n" --ctl "wait-ms 1500" \
 	    --ctl "keys cat \"long file name.txt\"\n" --ctl "wait-ms 1500" \
 	    --ctl "keys write new.txt made in emu\n" --ctl "wait-ms 1500" \
+	    --ctl "keys write \"Notes From Emu.txt\" hello long\n" --ctl "wait-ms 1500" \
+	    --ctl "keys write \"Notes From Emulator.txt\" second\n" --ctl "wait-ms 1500" \
+	    --ctl "keys mkdir \"New Folder\"\n" --ctl "wait-ms 1500" \
+	    --ctl "keys write New\\ Folder/inside.txt deep\n" --ctl "wait-ms 1500" \
+	    --ctl "keys write NOTES.TXT plain\n" --ctl "wait-ms 1500" \
+	    --ctl "keys rm \"long file name.txt\"\n" --ctl "wait-ms 1500" \
 	    --expect-event fs.ready --expect-event shell.cat \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf
-	MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M ::/NEW.TXT | grep -qx "made in emu"
+	MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M ::/new.txt | grep -qx "made in emu"
+	MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M "::/Notes From Emu.txt" | grep -qx "hello long"
+	MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M "::/New Folder/inside.txt" | grep -qx "deep"
+	MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M ::/NOTES.TXT | grep -qx "plain"
+	MTOOLS_SKIP_CHECK=1 mdir -i $(BUILD)/sd-test-after.img@@1M :: | grep -q "NOTESF~2 TXT .*Notes From Emulator.txt"
+	! MTOOLS_SKIP_CHECK=1 mtype -i $(BUILD)/sd-test-after.img@@1M "::/Long File Name.txt" >/dev/null 2>&1
+	python3 tools/fatcheck.py $(BUILD)/sd-test-after.img
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target
