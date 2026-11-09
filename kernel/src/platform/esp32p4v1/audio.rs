@@ -20,13 +20,18 @@
 //! the Tab5 for a 470 KB one). `fresh` restarts the stream instead (rings
 //! rebuilt silent) when a gap passed 3/4 of a turn: a short dropout.
 //!
+//! A reset leaves the stream's DMA running (a SoC reset does not stop the
+//! AHB-GDMA): `stop` before a software reset, and at boot for a reset that
+//! did not go through it (a debug probe's), as the display does (doc/70
+//! §9.3).
+//!
 //! Stage A1 without the codecs: the ES8388 and ES7210 (kumiki's crate, to
 //! come) are set up here before the display, then SPK_EN.
 
 use kumiki_p4v1_hal::{ahb_dma, gpio::AnyPin, i2s};
 
 use super::psram::{clear_bits, set_bits};
-use super::{Esp32p4v1, wr};
+use super::{Esp32p4v1, rd, wr};
 use crate::platform::Platform;
 use t5_abi::event;
 
@@ -46,6 +51,10 @@ const AHB_DMA: usize = 0x5008_5000;
 const MISC_CONF: usize = AHB_DMA + 0x64;
 const MISC_AHBM_RST_INTER: u32 = 1 << 0;
 const MISC_CLK_EN: u32 = 1 << 3;
+/// Channel 0's OUT_PERI_SEL: 0x3F (none) after reset, I2S0 while a stream
+/// uses it (kumiki ahb_dma.rs).
+const OUT0_PERI_SEL: usize = AHB_DMA + 0xD0 + 0x30;
+const PERI_NONE: u32 = 0x3F;
 const INTR_MEM_START: usize = AHB_DMA + 0x3C4;
 const INTR_MEM_END: usize = AHB_DMA + 0x3C8;
 /// The window the DMA may reach: L2MEM (as ESP-IDF sets it).
@@ -118,6 +127,24 @@ pub fn init(area: usize) -> Result<(), &'static str> {
     );
     unsafe { I2S = Some(s) };
     Ok(())
+}
+
+/// Stops the stream (I2S0 and both DMA channels) and resets the AHB-GDMA:
+/// before a software reset, and at boot before L2MEM and PSRAM are used,
+/// for a reset that left it writing the RX ring and reading the TX ring.
+/// Returns whether channel 0 served a peripheral (at boot: a previous
+/// boot's stream).
+pub fn stop() -> bool {
+    if let Some(s) = stream() {
+        s.stop();
+    }
+    if unsafe { rd(SOC_CLK_CTRL1) } & AHB_PDMA_SYS_CLK_EN == 0 {
+        return false;
+    }
+    let used = unsafe { rd(OUT0_PERI_SEL) } & PERI_NONE != PERI_NONE;
+    set_bits(HP_RST_EN1, RST_EN_AHB_PDMA);
+    clear_bits(HP_RST_EN1, RST_EN_AHB_PDMA);
+    used
 }
 
 fn stream() -> Option<&'static mut i2s::I2s> {

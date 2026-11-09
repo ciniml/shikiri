@@ -824,6 +824,8 @@ impl Platform for Esp32p4v1 {
 
     fn reset() -> ! {
         display::stop();
+        #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+        audio::stop();
         // As esp_restart_noos does (system_internal.c:113-146): hold core 1
         // in reset and clear its entry, so that after the reset it waits in
         // the ROM for the next kernel instead of jumping to this one's.
@@ -903,6 +905,11 @@ impl Platform for Esp32p4v1 {
         // PSRAM is set up again (doc/17 §10).
         if display::stop() {
             t5_abi::event!(Warn, "display.dma_was_running");
+        }
+        // The same for the audio stream's (doc/70 §9.3).
+        #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+        if audio::stop() {
+            t5_abi::event!(Warn, "audio.dma_was_running");
         }
         let size = psram::init()?;
         unsafe { PSRAM_SIZE = size };
