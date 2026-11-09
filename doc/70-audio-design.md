@@ -87,3 +87,10 @@
 - カーネルを `make kupdate T5K=build/kupdate/good.t5k` で入れ（自己試験が通り `kupdate.otadata state=valid`）、`make install-apps`（入らなかったものなし）、`fault` を入れ直して再起動した。起動で `audio.started rate_millihz=48000000 ring_us=85333`、`audio.queues size=8000`、画面は今までどおり `display.ready`。
 - `run beep 1000 1500` に続けて `run mic 500`: `beep.done frames=72000`、`mic.level` は 5 回とも `lost=0`、ピーク 200 前後・RMS 60 前後（コーデックを設定していないので、ES7210 が前の設定を保っているか雑音。声で変わるかは段 A1 の残りの後）。`audio.stats irqs=135 tx_underruns=1 restarts=0`（`rx_overruns` は誰も読んでいない間の受けの溢れで、kumiki の数え方）。音はまだ出ない。
 
+
+## 9. 段 A1 の残り: コーデックと SPK_EN（2026-11-09）
+- kumiki のドライバ `kumiki-es8388`・`kumiki-es7210`（m5-rs の drivers、まだコミットされていないのでパス依存）を使う。ブロッキング、依存は embedded-hal 1.0 だけ、待ち時間なし。カーネルは自分の I2C（`i2c::transfer`）を embedded-hal の `I2c` として渡す（`tab5.rs` の `Bus`、`Write` と `Write`＋`Read` の 2 つの形だけ）。
+- 順番（kumiki-boards で動いている順に合わせた）: I2S を start（MCLK が出る、`audio_init`）→ `board_init` で #1 の OUT の bit1 を落とす（SoC のリセットの前から点いていることがあるので、設定の間は切る。読んで書く）→ `Es8388::init`（28 回の書き込み、0 dB）→ `Es7210::init`（30 回）→ `board.codecs es8388=ok es7210=ok` → 画面の手順。画面の手順の OUT の書き込み（0x44、0x64）に、ES8388 が ok なら bit1 を足す（0x46、0x66）。ストリームが動いていない（`audio_rate() == 0`）ときはコーデックを触らない。
+- 音量は今のまま、カーネルがソフトで掛ける（DAC は 0 dB）。ES8388 の `set_volume` はあとで。
+- ES7210 は MIC1 が左、MIC2 が右、ゲインは init の既定（code 0x0B）。
+- エミュレータ: ES8388（0x10）と ES7210（0x40）が ACK を返し、書き込みを数える。p4emu-run-43 で、両方が ok、書き込みの数（28 と 30）、最初の書き込みのときに #1 の bit1 が 0、最後の #1 が DIR=0x6f OUT=0x66、コーデックが画面より前、を確かめる。

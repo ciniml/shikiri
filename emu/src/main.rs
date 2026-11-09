@@ -578,6 +578,14 @@ fn main() -> ExitCode {
             i2c.transfers, i2c.exp2_writes
         );
     }
+    if i2c.codec_writes != [0; 2] {
+        eprintln!(
+            "t5emu: codecs: {} ES8388 and {} ES7210 register write(s); expander #1 OUT={:#04x} before them",
+            i2c.codec_writes[0],
+            i2c.codec_writes[1],
+            i2c.out_at_codec.unwrap_or(0)
+        );
+    }
     let sd = &m.bus.sd;
     if sd.stats.0 > 0 {
         eprintln!("t5emu: SD: {} command(s), {} sector(s) read, {} written", sd.stats.0, sd.stats.1, sd.stats.2);

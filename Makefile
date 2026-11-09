@@ -913,6 +913,13 @@ p4emu-run-43:
 	grep -Eq "audio.started rate_millihz=4[78][0-9]{6} " $(BUILD)/emu-audio.txt
 	grep -Eq "audio.stats irqs=0 tx_descs=[0-9]+ tx_underruns=0 " $(BUILD)/emu-audio.txt
 	grep -Eq "t5emu: audio: [0-9]{4,} descriptor\(s\) sent" $(BUILD)/emu-audio.txt
+	@# The codecs (kumiki's drivers) before the display, the speaker amp
+	@# (expander #1 bit1) off during their set-up and on after, kept by the
+	@# display's writes (doc/70 §9).
+	grep -Eq "board.codecs es8388=ok es7210=ok" $(BUILD)/emu-audio.txt
+	grep -Eq "t5emu: codecs: 28 ES8388 and 30 ES7210 register write\(s\); expander #1 OUT=0x.[014589cd] before" $(BUILD)/emu-audio.txt
+	grep -Eq "expander #1 DIR=0x6f OUT=0x66; 0 write" $(BUILD)/emu-audio.txt
+	grep -B100 "board.codecs" $(BUILD)/emu-audio.txt | grep -q "display.panel" && { echo "codecs after the display"; false; } || true
 	grep -B100 "audio.started" $(BUILD)/emu-audio.txt | grep -q "board.ready" && { echo "audio after the display"; false; } || true
 	python3 -c "import sys; d = open(sys.argv[1], 'rb').read()[44:]; sys.exit(0 if len(d) > 100000 and not any(d) else 1)" $(BUILD)/emu-audio.wav
 

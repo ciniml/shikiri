@@ -1,7 +1,9 @@
 //! I2C1 (0x500C_5000) with the Tab5's internal bus devices that M6a talks
 //! to (doc/17 §7): the two PI4IOE5V6408 IO expanders (0x43, 0x44) and the
 //! GT911 touch controller (0x14) of the ILI9881C lot, as on the Tab5 at hand,
-//! reporting one fixed touch point, and the BMI270 IMU (0x68, doc/69).
+//! reporting one fixed touch point, the BMI270 IMU (0x68, doc/69), and the
+//! ES8388 (0x10) and ES7210 (0x40) audio codecs, whose register writes are
+//! only counted (doc/70).
 //! The command list runs at once when TRANS_START is set; timing is not
 //! modelled. Register layout: doc/research/m6-panel-touch.md §1.3.
 
@@ -237,11 +239,21 @@ pub struct I2c {
     imu: Bmi270,
     /// Device addressed since the last start, if it answered.
     target: Option<u8>,
+    /// Bytes written to a codec since the start.
+    codec_byte: u8,
     /// Transfers that ran, for tests.
     pub transfers: u64,
     /// Register writes to expander #2 (must stay 0).
     pub exp2_writes: u32,
+    /// Register writes to the ES8388 and the ES7210 (doc/70).
+    pub codec_writes: [u32; 2],
+    /// Expander #1's OUT when the first codec write came: the speaker amp
+    /// (bit1) must still be off then.
+    pub out_at_codec: Option<u8>,
 }
+
+pub const ES8388_ADDR: u8 = 0x10;
+pub const ES7210_ADDR: u8 = 0x40;
 
 impl Default for I2c {
     fn default() -> I2c {
@@ -254,8 +266,11 @@ impl Default for I2c {
             touch: Gt911::default(),
             imu: Bmi270::new(),
             target: None,
+            codec_byte: 0,
             transfers: 0,
             exp2_writes: 0,
+            codec_writes: [0; 2],
+            out_at_codec: None,
         }
     }
 }
@@ -364,6 +379,10 @@ impl I2c {
                 }
                 true
             }
+            ES8388_ADDR | ES7210_ADDR => {
+                self.codec_byte = 0;
+                true
+            }
             KBD_ADDR if self.kbd.is_some() => {
                 if !read {
                     self.kbd.as_mut().unwrap().written = 0;
@@ -391,6 +410,14 @@ impl I2c {
                 e.written += 1;
             }
             Some(BMI270_ADDR) => self.imu.write(b),
+            // Register, then value.
+            Some(a @ (ES8388_ADDR | ES7210_ADDR)) => {
+                self.codec_byte += 1;
+                if self.codec_byte == 2 {
+                    self.out_at_codec.get_or_insert(self.exp[0].regs[0x05]);
+                    self.codec_writes[(a == ES7210_ADDR) as usize] += 1;
+                }
+            }
             Some(KBD_ADDR) => {
                 // Register, then data (mode and interrupt settings: taken
                 // as given).

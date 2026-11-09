@@ -15,6 +15,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
+name = "kumiki-es7210"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
+]
+
+[[package]]
+name = "kumiki-es8388"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
+]
+
+[[package]]
 name = "kumiki-p4v1-hal"
 version = "0.1.0"
 dependencies = [
@@ -30,6 +44,9 @@ name = "t5-kernel"
 version = "0.1.0"
 dependencies = [
  "ed25519-compact",
+ "embedded-hal",
+ "kumiki-es7210",
+ "kumiki-es8388",
  "kumiki-p4v1-hal",
  "t5-abi",
 ]

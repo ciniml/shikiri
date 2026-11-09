@@ -1,7 +1,9 @@
 //! Tab5 board (M6a, doc/17 §5): IO expander #1 releases the LCD and touch
 //! resets, the touch controller on I2C tells which of the three panel lots
 //! this is, and touch points are read by polling
-//! (doc/research/m6-panel-touch.md §2, §3, §6). IO expander #2 (0x44) is
+//! (doc/research/m6-panel-touch.md §2, §3, §6). Before that, the audio
+//! codecs are set up and #1's bit1 (SPK_EN) turns the speaker amp on; the
+//! display's writes keep it (doc/70 §9). IO expander #2 (0x44) is
 //! read, and written only to set bit0 (the Wi-Fi chip's power,
 //! `wlan_power_on`): its bit4 powers the Tab5 off (doc/06 §1.3).
 
@@ -10,7 +12,7 @@ use t5_abi::event;
 use super::i2c::{self, func_out_sel, io_mux_reg};
 use super::psram::delay_us;
 use super::wr;
-use crate::platform::{Panel, TouchPoint};
+use crate::platform::{Current, Panel, Platform, TouchPoint};
 
 // PI4IOE5V6408 registers (datasheet table 2; m6-panel-touch.md §2.1).
 const EXP1: u8 = 0x43;
@@ -22,6 +24,8 @@ const EXP_OUT_H_IM: u8 = 0x07;
 const EXP_PULL_EN: u8 = 0x0B;
 const EXP_PULL_SEL: u8 = 0x0D;
 const EXP_IN: u8 = 0x0F;
+/// #1's bit1: the speaker amp (doc/70 §9).
+const SPK_EN: u8 = 1 << 1;
 
 // GPIO23 = touch INT (GT911 address select).
 const TP_INT: usize = 23;
@@ -58,6 +62,68 @@ fn exp_write(addr: u8, reg: u8, v: u8) -> Result<(), i2c::Error> {
 fn exp_read(addr: u8, reg: u8) -> Result<u8, i2c::Error> {
     let mut b = [0u8];
     i2c::transfer(addr, &[reg], &mut b).map(|_| b[0])
+}
+
+/// The kernel's I2C as embedded-hal's, for kumiki's codec drivers.
+struct Bus;
+
+#[derive(Debug)]
+struct BusError(i2c::Error);
+
+impl embedded_hal::i2c::Error for BusError {
+    fn kind(&self) -> embedded_hal::i2c::ErrorKind {
+        use embedded_hal::i2c::{ErrorKind, NoAcknowledgeSource};
+        match self.0 {
+            i2c::Error::Nack => ErrorKind::NoAcknowledge(NoAcknowledgeSource::Unknown),
+            i2c::Error::Bus => ErrorKind::Bus,
+            i2c::Error::TooLong => ErrorKind::Other,
+        }
+    }
+}
+
+impl embedded_hal::i2c::ErrorType for Bus {
+    type Error = BusError;
+}
+
+impl embedded_hal::i2c::I2c for Bus {
+    fn transaction(&mut self, addr: u8, ops: &mut [embedded_hal::i2c::Operation<'_>]) -> Result<(), BusError> {
+        use embedded_hal::i2c::Operation::{Read, Write};
+        match ops {
+            [Write(w)] => i2c::transfer(addr, w, &mut []),
+            [Write(w), Read(r)] => i2c::transfer(addr, w, r),
+            _ => Err(i2c::Error::TooLong),
+        }
+        .map_err(BusError)
+    }
+}
+
+fn codec_result<E>(r: &Result<(), kumiki_es8388::Error<E>>) -> &'static str {
+    match r {
+        Ok(()) => "ok",
+        Err(kumiki_es8388::Error::I2c(_)) => "i2c",
+        Err(kumiki_es8388::Error::Range) => "range",
+    }
+}
+
+/// Sets up the ES8388 (DAC) and the ES7210 (microphones) while I2S already
+/// drives MCLK and before the display's power-up, which kumiki found the
+/// ES8388 needs (doc/70 §1), with the amp off. SPK_EN if the DAC is set.
+fn codecs() -> u8 {
+    if Current::audio_rate() == 0 {
+        return 0;
+    }
+    // Off across the set-up (it may be on from before a SoC reset).
+    if let Ok(out) = exp_read(EXP1, EXP_OUT) {
+        let _ = exp_write(EXP1, EXP_OUT, out & !SPK_EN);
+    }
+    let dac = kumiki_es8388::Es8388::new(Bus, kumiki_es8388::ADDR).init();
+    let adc = match kumiki_es7210::Es7210::new(Bus, kumiki_es7210::ADDR).init() {
+        Ok(()) => "ok",
+        Err(kumiki_es7210::Error::I2c(_)) => "i2c",
+        Err(kumiki_es7210::Error::Range) => "range",
+    };
+    event!(Info, "board.codecs", es8388 = codec_result(&dac), es7210 = adc);
+    if dac.is_ok() { SPK_EN } else { 0 }
 }
 
 fn tp_int_output(high: bool) {
@@ -102,10 +168,11 @@ pub fn init() -> Panel {
         event!(Error, "board.no_expander", error = e.as_str());
         return Panel::None;
     }
+    let spk = codecs();
     // Both resets low first, so the result is the same whatever state the
     // expander kept across a SoC reset (m6-panel-touch.md §2.3, §7).
     let steps = [
-        (EXP_OUT, 0x44), // EXT5V_EN, CAM_RST high; LCD_RST, TP_RST, SPK_EN low
+        (EXP_OUT, 0x44 | spk), // EXT5V_EN, CAM_RST high; LCD_RST, TP_RST low
         (EXP_DIR, 0x7F), // bits 0-6 outputs, bit7 HP_DET input
         (EXP_OUT_H_IM, 0x00),
         (EXP_PULL_SEL, 0x7F),
@@ -121,7 +188,7 @@ pub fn init() -> Panel {
     ms(10);
     // LCD_RST released as an input pulled up, TP_RST driven high (as
     // upstream M5GFX and esp-bsp do).
-    let released = exp_write(EXP1, EXP_DIR, 0x6F).and_then(|_| exp_write(EXP1, EXP_OUT, 0x64));
+    let released = exp_write(EXP1, EXP_DIR, 0x6F).and_then(|_| exp_write(EXP1, EXP_OUT, 0x64 | spk));
     tp_int_input();
     if let Err(e) = released {
         event!(Error, "board.expander_failed", reg = EXP_DIR, error = e.as_str());
