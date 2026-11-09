@@ -82,3 +82,8 @@
 - **アプリ**: `beep HZ MS`（正弦波、フルスケールの 1/4、キューが空くまで待って閉じる。`--permit audio:out`）。`mic MS`（100 ms ごとに左チャネルのピークと RMS と、それまでに落としたフレーム数を `mic.level` に出す。`--permit audio:in`、システムの鍵）。
 - **試験 p4emu-run-44**: `beep 1000 1500` の 300 ms 後に `mic 500`。`beep.done frames=72000`、`mic.level` のピーク約 4096・RMS 約 2896（エミュレータの 440 Hz）、`mic.done lost=0`、`mic` の読み込みによる始め直しが 1 回。`tools/wavcheck.py` で、WAV の音が 1 kHz（±2 %）、ピーク 8000 以上、長さ 1700 ms 以下（実測 1591 ms、1.5 秒＋始め直しの途切れ）。
 - **残り**: Tab5 で音を確かめるのは、コーデックと SPK_EN の後（段 A1 の残り）。割り込みの回数を減らす件（kumiki に相談済み）。段 A4（混ぜる）の試験。混ぜるのはもう実装してあるので、残るのは 2 つの `beep` の和を確かめることだけ。
+
+### 8.1 Tab5 での確認（2026-11-09）
+- カーネルを `make kupdate T5K=build/kupdate/good.t5k` で入れ（自己試験が通り `kupdate.otadata state=valid`）、`make install-apps`（入らなかったものなし）、`fault` を入れ直して再起動した。起動で `audio.started rate_millihz=48000000 ring_us=85333`、`audio.queues size=8000`、画面は今までどおり `display.ready`。
+- `run beep 1000 1500` に続けて `run mic 500`: `beep.done frames=72000`、`mic.level` は 5 回とも `lost=0`、ピーク 200 前後・RMS 60 前後（コーデックを設定していないので、ES7210 が前の設定を保っているか雑音。声で変わるかは段 A1 の残りの後）。`audio.stats irqs=135 tx_underruns=1 restarts=0`（`rx_overruns` は誰も読んでいない間の受けの溢れで、kumiki の数え方）。音はまだ出ない。
+
