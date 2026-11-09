@@ -63,10 +63,12 @@ struct State {
     irq: bool,
     /// When the TX ring is silent again after the last push (ticks).
     quiet_at: u64,
+    /// `audio_wake` was called (the first `audio:out`).
+    woke: bool,
 }
 
 static mut S: State =
-    State { base: 0, size: 0, outs: [Queue::FREE; OUTS], gain: [256; OUTS], ins: [Queue::FREE; INS], lost: [0; INS], users: 0, irq: false, quiet_at: 0 };
+    State { base: 0, size: 0, outs: [Queue::FREE; OUTS], gain: [256; OUTS], ins: [Queue::FREE; INS], lost: [0; INS], users: 0, irq: false, quiet_at: 0, woke: false };
 
 /// Single core (core 0's scheduler loop and interrupt, with the lock held).
 fn st() -> &'static mut State {
@@ -138,6 +140,10 @@ impl OutHandle {
         opened()?;
         let s = st();
         let slot = s.outs.iter().position(|q| !q.used).ok_or(Error::Busy)?;
+        if !s.woke {
+            s.woke = true;
+            Current::audio_wake();
+        }
         s.outs[slot] = Queue { used: true, r: 0, w: 0 };
         s.gain[slot] = 256;
         add_user();

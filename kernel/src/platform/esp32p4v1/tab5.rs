@@ -105,6 +105,21 @@ fn codec_result<E>(r: &Result<(), kumiki_es8388::Error<E>>) -> &'static str {
     }
 }
 
+/// Powers the ES8388 down and sets it up (kumiki's `Es8388::init`), the
+/// amp off. After a SoC reset with the DAC playing it stays silent,
+/// registers and all, until powered down: the soft reset in `init` is not
+/// enough; `power_down` (DAC and chip power) for 1 ms was, but only once
+/// the stream had run a while, not at boot (doc/70 §9.2).
+fn dac() -> Result<(), kumiki_es8388::Error<BusError>> {
+    if let Ok(out) = exp_read(EXP1, EXP_OUT) {
+        let _ = exp_write(EXP1, EXP_OUT, out & !SPK_EN);
+    }
+    let mut codec = kumiki_es8388::Es8388::new(Bus, kumiki_es8388::ADDR);
+    let _ = codec.power_down();
+    ms(2);
+    codec.init()
+}
+
 /// Sets up the ES8388 (DAC) and the ES7210 (microphones) while I2S already
 /// drives MCLK and before the display's power-up, which kumiki found the
 /// ES8388 needs (doc/70 §1), with the amp off. SPK_EN if the DAC is set.
@@ -112,11 +127,7 @@ fn codecs() -> u8 {
     if Current::audio_rate() == 0 {
         return 0;
     }
-    // Off across the set-up (it may be on from before a SoC reset).
-    if let Ok(out) = exp_read(EXP1, EXP_OUT) {
-        let _ = exp_write(EXP1, EXP_OUT, out & !SPK_EN);
-    }
-    let dac = kumiki_es8388::Es8388::new(Bus, kumiki_es8388::ADDR).init();
+    let dac = dac();
     let adc = match kumiki_es7210::Es7210::new(Bus, kumiki_es7210::ADDR).init() {
         Ok(()) => "ok",
         Err(kumiki_es7210::Error::I2c(_)) => "i2c",
@@ -124,6 +135,20 @@ fn codecs() -> u8 {
     };
     event!(Info, "board.codecs", es8388 = codec_result(&dac), es7210 = adc);
     if dac.is_ok() { SPK_EN } else { 0 }
+}
+
+/// Sets the ES8388 up again (the first `audio:out` since boot, doc/70
+/// §9.2), if it was at boot (SPK_EN on), and turns the amp back on.
+pub fn dac_again() {
+    let Ok(out) = exp_read(EXP1, EXP_OUT) else { return };
+    if out & SPK_EN == 0 {
+        return;
+    }
+    let r = dac();
+    if r.is_ok() {
+        let _ = exp_write(EXP1, EXP_OUT, out);
+    }
+    event!(Info, "audio.dac_again", es8388 = codec_result(&r));
 }
 
 fn tp_int_output(high: bool) {

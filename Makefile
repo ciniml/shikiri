@@ -918,7 +918,7 @@ p4emu-run-43:
 	@# (expander #1 bit1) off during their set-up and on after, kept by the
 	@# display's writes (doc/70 §9).
 	grep -Eq "board.codecs es8388=ok es7210=ok" $(BUILD)/emu-audio.txt
-	grep -Eq "t5emu: codecs: 28 ES8388 and 30 ES7210 register write\(s\); expander #1 OUT=0x.[014589cd] before" $(BUILD)/emu-audio.txt
+	grep -Eq "t5emu: codecs: 30 ES8388 and 30 ES7210 register write\(s\); expander #1 OUT=0x.[014589cd] before" $(BUILD)/emu-audio.txt
 	grep -Eq "expander #1 DIR=0x6f OUT=0x66; 0 write" $(BUILD)/emu-audio.txt
 	grep -B100 "board.codecs" $(BUILD)/emu-audio.txt | grep -q "display.panel" && { echo "codecs after the display"; false; } || true
 	grep -B100 "audio.started" $(BUILD)/emu-audio.txt | grep -q "board.ready" && { echo "audio after the display"; false; } || true
@@ -938,6 +938,7 @@ p4emu-run-44:
 	    --expect-event beep.start --expect-event beep.done --expect-event mic.level --expect-event mic.done \
 	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-beep.txt 2>&1 || { tail -20 $(BUILD)/emu-beep.txt; false; }
 	grep -q "beep.done frames=72000" $(BUILD)/emu-beep.txt
+	grep -q "audio.dac_again es8388=ok" $(BUILD)/emu-beep.txt
 	grep -Eq "mic.level n=2 peak=40[0-9][0-9] rms=28[0-9][0-9]" $(BUILD)/emu-beep.txt
 	grep -Eq "mic.done frames=24[0-9]{3} lost=0" $(BUILD)/emu-beep.txt
 	grep -Eq "audio.stats .* restarts=1$$" $(BUILD)/emu-beep.txt

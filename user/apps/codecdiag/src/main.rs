@@ -5,19 +5,22 @@
 //! logs IO expander #1's DIR / OUT / OUT_H_IM (read only: #1 also switches
 //! power) and the ES8388's registers 0..=52; `run codecdiag 1` first sets
 //! the ES8388 up again (kumiki's `Es8388::init`), to tell whether the
-//! kernel's set-up at boot was lost.
+//! kernel's set-up at boot was lost. After a SoC reset the speaker can stay
+//! silent until the power is cut (doc/70 §9.2): `run codecdiag 2` holds #1's
+//! bit1 (SPK_EN) low for a second, `run codecdiag 3 MS` also powers the ES8388
+//! down for MS ms (0: a second) and sets it up again.
 //!
 //! Built with `--permit i2c:int/0x10 --permit i2c:int/0x43` (strong: the
 //! system key). Exit 0, or the step that failed.
 
 use embedded_hal::i2c::I2c;
 use kumiki_t5os::I2cDevice;
-use t5_rt::event;
+use t5_rt::{event, sleep_ms};
 
 t5_rt::entry!(main);
 
-fn main(mode: usize, _: usize) -> usize {
-    match run(mode) {
+fn main(mode: usize, ms: usize) -> usize {
+    match run(mode, ms) {
         Ok(()) => 0,
         Err(step) => {
             event!(Error, "codecdiag.failed", step = step);
@@ -32,11 +35,29 @@ fn reg(dev: &mut I2cDevice, addr: u8, r: u8) -> Result<u8, u32> {
     Ok(b[0])
 }
 
-fn run(mode: usize) -> Result<(), u32> {
+fn run(mode: usize, ms: usize) -> Result<(), u32> {
     let mut exp = I2cDevice::open(0x43).map_err(|_| 1u32)?;
     let (dir, out, him) = (reg(&mut exp, 0x43, 0x03)?, reg(&mut exp, 0x43, 0x05)?, reg(&mut exp, 0x43, 0x07)?);
     event!(Info, "codecdiag.expander", dir = dir, out = out, out_h_im = him);
     let mut dac = I2cDevice::open(kumiki_es8388::ADDR).map_err(|_| 3u32)?;
+    if mode >= 2 {
+        // Bit1 only, read-modify-write (#1's other bits switch power).
+        exp.write(0x43, &[0x05, out & !0x02]).map_err(|_| 5u32)?;
+        if mode == 3 {
+            // DAC and outputs, then the chip (ES8388 registers 4 and 2).
+            dac.write(kumiki_es8388::ADDR, &[0x04, 0xC0]).map_err(|_| 6u32)?;
+            dac.write(kumiki_es8388::ADDR, &[0x02, 0xFF]).map_err(|_| 6u32)?;
+        }
+        sleep_ms(if mode == 3 && ms > 0 { ms as u64 } else { 1000 });
+        if mode == 3 {
+            let mut codec = kumiki_es8388::Es8388::new(dac, kumiki_es8388::ADDR);
+            codec.init().map_err(|_| 4u32)?;
+            dac = codec.release();
+        }
+        let now = reg(&mut exp, 0x43, 0x05)?;
+        exp.write(0x43, &[0x05, now | (out & 0x02)]).map_err(|_| 5u32)?;
+        event!(Info, "codecdiag.cycled", mode = mode as u32, ms = ms as u32, out = now | (out & 0x02));
+    }
     if mode == 1 {
         let mut codec = kumiki_es8388::Es8388::new(dac, kumiki_es8388::ADDR);
         codec.init().map_err(|_| 4u32)?;

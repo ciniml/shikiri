@@ -178,6 +178,8 @@ pub trait Platform {
     /// rings on): the scheduler loop idles with interrupts masked, taking
     /// them only while a process runs.
     fn audio_service() {}
+    /// The first `audio:out` since boot: sets the DAC up again (doc/70 §9.2).
+    fn audio_wake() {}
     /// Board devices around the display (M6a, doc/17 §5): releases the
     /// panel and touch resets and identifies the panel.
     fn board_init() -> Panel {
