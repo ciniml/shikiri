@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu beep mic
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu beep mic codecdiag
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -42,6 +42,7 @@ PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w
 PERMIT_c6ota  := --permit svc:net/tcp-connect --permit svc:wifi/ota
 PERMIT_kgfx   := --permit display
 PERMIT_imu    := --permit i2c:int/0x68 --permit i2c:int/0x69
+PERMIT_codecdiag := --permit i2c:int/0x10 --permit i2c:int/0x43
 PERMIT_beep   := --permit audio:out
 PERMIT_mic    := --permit audio:in
 PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
@@ -121,7 +122,7 @@ APP_KEY       ?= $(HOME)/.config/tab5-os/app-ed25519.key
 APP_PUB       := keys/app-ed25519.pub
 # Signed with the system key (DEV_KEY): the services and the apps that need
 # strong permissions. The rest get APP_KEY.
-SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota ota mic
+SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota ota mic codecdiag
 KEY_OF         = $(if $(filter $(1),$(SYSTEM_APPS)),$(DEV_KEY),$(APP_KEY))
 # A key the kernel does not trust, for the rejection test. Not a secret.
 UNTRUSTED_KEY := $(BUILD)/keys/untrusted.key

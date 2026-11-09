@@ -1,0 +1,11 @@
+[package]
+name = "codecdiag"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+t5-rt = { path = "../../rt" }
+kumiki-t5os = { path = "../../kumiki-t5os" }
+kumiki-es8388 = { path = "../../../../m5-rs/drivers/kumiki-es8388" }
+embedded-hal = "1.0"

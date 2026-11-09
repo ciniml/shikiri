@@ -222,6 +222,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codecdiag"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "kumiki-es8388",
+ "kumiki-t5os",
+ "t5-rt",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -717,6 +727,13 @@ dependencies = [
 
 [[package]]
 name = "kumiki-class"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
+name = "kumiki-es8388"
 version = "0.1.0"
 dependencies = [
  "embedded-hal 1.0.0",
