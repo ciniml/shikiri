@@ -37,7 +37,7 @@ use tsclient::derp::{Derp, Frame};
 use tsclient::netcheck::Netcheck;
 use tsclient::smoltcp::iface::SocketHandle;
 use tsclient::smoltcp::socket::tcp;
-use tsclient::node::Node;
+use tsclient::node::{Dest, Node};
 use tsclient::stream::Buffered;
 use tsclient::{Error, control, keys::Keys, tls};
 
@@ -270,7 +270,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     }
 
     // The first map response: the DERP map to pick home from.
-    let mut node = Node::new(keys.node.clone(), rng, now_ms());
+    let mut node = Node::new(keys.node.clone(), keys.disco.clone(), rng, now_ms());
     if let Some(svc) = svc.as_deref_mut() {
         svc.reset();
     }
@@ -291,7 +291,15 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         }
         Err(e) => return ("map stream", e),
     }
-    let nc = netcheck(&net, &node.netmap.derp, rng);
+    // STUN, then disco and WireGuard straight from peers (doc/71 §14).
+    let udp = match net.borrow().udp_bind(UDP_PORT) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            event!(Warn, "ts.failed", step = "udp bind", error = "io");
+            None
+        }
+    };
+    let nc = netcheck(&net, udp, &node.netmap.derp, rng);
     let latency: Vec<(i32, u32)> = nc.latencies().collect();
     let best = nc.best();
     let ext = nc.endpoint.map_or(0, |(ip, _)| u32::from_be_bytes(ip));
@@ -317,13 +325,19 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     };
     event!(Info, "ts.derp", region = region as u32, host = host.as_str(), ip = derp_ip);
     // Peers send to us through this region from now on.
-    if let Err(e) = control::update(&mut h, keys, hostname, region, &latency, &[]) {
+    node.home_region = region;
+    let eps = if udp.is_some() { endpoints(&net, UDP_PORT, nc.endpoint) } else { Vec::new() };
+    event!(Info, "ts.endpoints", count = eps.len(), first = eps.first().map_or("", |e| e.as_str()));
+    if let Err(e) = control::update(&mut h, keys, hostname, region, &latency, &eps) {
         return ("update", e);
     }
 
     let mut shown = node.stats;
     let mut idle_ms = 1;
     let mut web = Web::new(&mut node);
+    let mut udp_buf = vec![0u8; 1500];
+    let mut last_map = now_ms();
+    let mut direct = 0;
     let mut shown_web = 0;
     let started = now_ms();
     loop {
@@ -332,6 +346,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
             busy = true;
             match m.poll(&mut h) {
                 Ok(true) => {
+                    last_map = now_ms();
                     let json = m.take();
                     let bytes = json.len();
                     match node.apply_map(json, now_ms()) {
@@ -341,7 +356,12 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                     }
                 }
                 Ok(false) => {}
-                Err(e) => return ("map stream", e),
+                Err(e) => {
+                    // Why the control connection went (doc/71 §14).
+                    let (state, queued) = net.borrow().tcp_state(ctl_s).unwrap_or((99, 0));
+                    event!(Warn, "ts.ctl_lost", state = state, queued = queued, since_map_ms = (now_ms() - last_map) as u32, up_s = ((now_ms() - started) / 1000) as u32);
+                    return ("map stream", e);
+                }
             }
         }
         if derp.buffered() || waiting(&net, derp_s) {
@@ -359,13 +379,34 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         if let Some(svc) = svc.as_deref_mut() {
             busy |= svc.serve(&mut node);
         }
-        for (peer, m) in node.poll(rng, now_ms()) {
+        if let Some(s) = udp {
+            let r = net.borrow_mut().udp_recv(s, &mut udp_buf, 0);
+            if let Ok((n, ip, port)) = r {
+                busy = true;
+                node.from_udp(ip.to_be_bytes(), port, &udp_buf[..n], rng, now_ms());
+            }
+        }
+        for (dest, m) in node.poll(rng, now_ms()) {
             busy = true;
-            if let Err(e) = derp.send(&peer, &m) {
-                return ("derp send", e);
+            match dest {
+                Dest::Derp(peer) => {
+                    if let Err(e) = derp.send(&peer, &m) {
+                        return ("derp send", e);
+                    }
+                }
+                Dest::Udp(ip, port) => {
+                    if let Some(s) = udp {
+                        let _ = net.borrow_mut().udp_send(s, u32::from_be_bytes(ip), port, &m);
+                    }
+                }
             }
         }
         let s = node.stats;
+        let d = node.direct_peers(now_ms());
+        if d != direct {
+            event!(Info, "ts.direct", peers = d, udp_in = s.udp_in, udp_out = s.udp_out, pongs = s.pongs);
+            direct = d;
+        }
         if (s.handshakes, s.initiations, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.initiations, shown.echo_replies, shown.dropped, shown_web) {
             if node.last_drop == "unknown peer" {
                 let k = tsclient::keys::to_hex("", &node.wg.unknown);
@@ -381,6 +422,8 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 packets_out = s.packets_out,
                 web = web.served,
                 disco = s.disco,
+                pongs = s.pongs,
+                udp_in = s.udp_in,
                 dropped = s.dropped,
                 last_drop = node.last_drop
             );
@@ -407,14 +450,11 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     }
 }
 
-/// STUN to every DERP region from `UDP_PORT`: `NETCHECK_ROUNDS` rounds of
-/// `NETCHECK_ROUND_MS` each, the fastest answer per region.
-fn netcheck(net: &Rc<RefCell<Net>>, map: &tsclient::netmap::DerpMap, rng: &mut ChaCha20Rng) -> Netcheck {
+/// STUN to every DERP region from the UDP socket `s`: `NETCHECK_ROUNDS`
+/// rounds of `NETCHECK_ROUND_MS` each, the fastest answer per region.
+fn netcheck(net: &Rc<RefCell<Net>>, s: Option<u16>, map: &tsclient::netmap::DerpMap, rng: &mut ChaCha20Rng) -> Netcheck {
     let mut nc = Netcheck::new(map);
-    let Ok(s) = net.borrow().udp_bind(UDP_PORT) else {
-        event!(Warn, "ts.failed", step = "udp bind", error = "io");
-        return nc;
-    };
+    let Some(s) = s else { return nc };
     let mut buf = [0u8; 576];
     for _ in 0..NETCHECK_ROUNDS {
         for (ip, port, q) in nc.round(rng, now_ms()) {
@@ -428,8 +468,33 @@ fn netcheck(net: &Rc<RefCell<Net>>, map: &tsclient::netmap::DerpMap, rng: &mut C
             }
         }
     }
-    let _ = net.borrow().close(s);
     nc
+}
+
+/// This node's UDP endpoints for peers to try: each interface's IPv4
+/// address but loopback, and the address STUN saw, with their ports.
+fn endpoints(net: &Rc<RefCell<Net>>, port: u16, seen: Option<([u8; 4], u16)>) -> Vec<String> {
+    let mut e = Vec::new();
+    let n = net.borrow();
+    for k in 0..8 {
+        match n.if_info(k) {
+            Ok(Some(len)) if len >= 20 && n.slice[14] > 0 => {
+                let ip = u32::from_le_bytes(n.slice[16..20].try_into().unwrap()).to_be_bytes();
+                if ip[0] != 127 {
+                    e.push(alloc::format!("{}.{}.{}.{}:{port}", ip[0], ip[1], ip[2], ip[3]));
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    if let Some((ip, p)) = seen {
+        let s = alloc::format!("{}.{}.{}.{}:{p}", ip[0], ip[1], ip[2], ip[3]);
+        if !e.contains(&s) {
+            e.push(s);
+        }
+    }
+    e
 }
 
 /// The status page on the tailnet: `http://<tailnet address>/`, one

@@ -3,11 +3,13 @@
 //! them unchanged. Of its requests: TCP_CONNECT, TCP_LISTEN (on the
 //! tailnet address; the address and link are ignored), TCP_STATE, SEND,
 //! RECV, CLOSE, and RESOLVE / RESOLVE_RESULT for the netmap's names (a
-//! peer's short name or its whole name, IPv4). The rest answer
+//! peer's short name or its whole name, IPv4), IF_INFO (one interface,
+//! `ts0`: the tailnet address, packets in and out). The rest answer
 //! BAD_REQUEST.
 //!
 //! Grants (`svc:ts/GRANT`) as `svc:net`'s: `tcp-connect` or
-//! `tcp-connect:PORT`, `tcp-listen:PORT` or `tcp-listen:any`, `resolve`.
+//! `tcp-connect:PORT`, `tcp-listen:PORT` or `tcp-listen:any`, `resolve`,
+//! `info`.
 //!
 //! The sockets are smoltcp's in the node; a new session with the control
 //! server and DERP (after a failure) starts with none, and the clients'
@@ -247,6 +249,18 @@ impl Service {
                 Some(Some(Sock::Resolved(None))) => reply(status::UNREACHABLE, 0, 0),
                 _ => reply(status::BAD_REQUEST, 0, 0),
             },
+            op::IF_INFO if a > 0 => reply(status::NO_ADDRESS, 0, 0),
+            op::IF_INFO => {
+                let Some(ip) = node.tun.ip else { return reply(status::OK, 0, 0) };
+                let r = &mut mem[..proto::iface::HEADER];
+                r.fill(0);
+                r[..3].copy_from_slice(b"ts0");
+                r[14] = 32;
+                r[16..20].copy_from_slice(&u32::from_be_bytes(ip).to_le_bytes());
+                r[28..32].copy_from_slice(&node.stats.packets_in.to_le_bytes());
+                r[32..36].copy_from_slice(&node.stats.packets_out.to_le_bytes());
+                reply(status::OK, 1, proto::iface::HEADER as u32)
+            }
             _ => reply(status::BAD_REQUEST, 0, 0),
         }
     }
@@ -259,6 +273,7 @@ impl Service {
             op::TCP_LISTEN => (port_ok(b"tcp-listen"), "tcp-listen"),
             op::TCP_CONNECT => (g.has(b"tcp-connect") || port_ok(b"tcp-connect"), "tcp-connect"),
             op::RESOLVE | op::RESOLVE_RESULT => (g.has(b"resolve"), "resolve"),
+            op::IF_INFO => (g.has(b"info"), "info"),
             _ => (true, ""),
         };
         (!ok).then_some(what)

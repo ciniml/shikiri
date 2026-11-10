@@ -1181,6 +1181,16 @@ fn ifconfig(o: &mut Out) {
         o.str("ifconfig: no network service\n");
         return;
     };
+    interfaces(o, &net);
+    // The tailnet's, when `ts` runs (doc/71 §14).
+    if let Ok(ts) = Net::connect_to("ts") {
+        interfaces(o, &ts);
+    }
+    event!(Info, "shell.listed", what = "ifconfig", count = 0u32);
+}
+
+/// The interfaces a network service reports.
+fn interfaces(o: &mut Out, net: &Net) {
     for k in 0.. {
         let len = match net.if_info(k) {
             Ok(Some(len)) => len,
@@ -1229,7 +1239,6 @@ fn ifconfig(o: &mut Out) {
         o.num(u32::from_le_bytes(r[32..36].try_into().unwrap()) as u64);
         o.str("\n");
     }
-    event!(Info, "shell.listed", what = "ifconfig", count = 0u32);
 }
 
 /// A TCP connection: what arrives is shown; a line typed is sent with

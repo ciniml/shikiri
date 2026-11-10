@@ -141,7 +141,7 @@ fn main() {
         std::thread::sleep(Duration::from_secs(10));
     }
 
-    let mut node = Node::new(keys.node.clone(), &mut OsRng, now_ms());
+    let mut node = Node::new(keys.node.clone(), keys.disco.clone(), &mut OsRng, now_ms());
     let mut m = control::map(&mut h, &keys, hostname, 0, &[]).expect("map");
     let json = m.next(&mut h).expect("first map response");
     let len = json.len();
@@ -184,9 +184,12 @@ fn main() {
                 node.from_derp(&src, &data, &mut OsRng, now_ms());
             }
         }
-        for (peer, m) in node.poll(&mut OsRng, now_ms()) {
+        for (dest, m) in node.poll(&mut OsRng, now_ms()) {
             busy = true;
-            derp.send(&peer, &m).expect("derp send");
+            // Through DERP only here.
+            if let tsclient::node::Dest::Derp(peer) = dest {
+                derp.send(&peer, &m).expect("derp send");
+            }
         }
         let s = node.stats;
         if (s.handshakes, s.echo_replies, s.dropped, s.disco) != (shown.handshakes, shown.echo_replies, shown.dropped, shown.disco) {

@@ -402,3 +402,37 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - はじめはポート 8000 で試し、つながった直後にデータなしで FIN が返った。`ts.tcp` のトレースで TCP の流れは正しく、ホストの 0.0.0.0:8000 で別のもの（docker らしい）が待っていて、tailnet からの 8000 番がそちらへ行っていた（ホストの curl も python のログに出ていなかった）。Tab5 の側の問題ではなかった。
 - 試験の途中で、制御の接続が 1 回切れた（`ts.failed step=map stream error=io`）。30 秒後につなぎ直した。原因はまだ見ていない（それまでの版は 1 時間以上切れなかった）。
 - まだ: `ota` を `svc:ts` で使う（100.64.0.0/10 か `.ts.net` の名前なら `ts` につなぐ）、UDP、shell の `ts` コマンド、相手の home が別の DERP 領域のとき（こちらは自分の home の DERP にしか送らない。相手がそこにいなければ届かない）。
+
+## 14. 段 T5（最小）: 直の経路と、ifconfig の ts0（2026-11-11）
+
+### 14.1 作ったもの
+- `tsclient::disco`: disco のメッセージ（`TS💬`、送り手の disco key、nonce、NaCl box）。Ping（トランザクション ID と node key）、Pong（トランザクション ID と、Ping の来たアドレス）、CallMeMaybe（endpoint の列）を作って開く。
+- `Node`:
+  - 送り先を `Dest::Derp(node key)` か `Dest::Udp(IPv4, port)` で返す。
+  - disco の Ping には、来た道で Pong を返す。UDP なら UDP で、そのアドレスを入れる。DERP なら DERP で、`127.3.3.40:領域` を入れる。
+  - CallMeMaybe には、相手の各 endpoint へ UDP で Ping を送る（NAT に穴を開ける）。
+  - WireGuard を UDP でも受ける（`wg::Device::receive` の送り手は `Option`。始めの中の鍵で相手を決める）。認証の通ったメッセージが UDP で来た相手には、15 秒の間そのアドレスへ UDP で送り、来なくなれば DERP に戻る。
+  - 統計に `udp_in`、`udp_out`、`pongs`。
+- アプリ `ts`:
+  - UDP 41641 を netcheck の後も開けたままにし、毎回の巡回で 1 つ読む。
+  - endpoint（各インタフェースの IPv4 と STUN で見えたアドレス、ポート 41641）を lite の map で伝える（`ts.endpoints`）。
+  - 直の相手の数が変われば `ts.direct`。許可に `svc:net/info`。
+- `svc:ts` の IF_INFO: インタフェースは 1 つで、`ts0`。tailnet のアドレス（/32）と、出入りしたパケットの数を返す。grant は `info`。
+- shell の `ifconfig` は `svc:net` の後に `svc:ts` にも聞き、`ts0` を出す。ts が動いていなければ、つなぎがすぐ失敗するので出ない（カーネルは聞き手のない名前を `Off` で返す）。shell の許可に `svc:ts/info`。
+- ts は今も形 A（IP スタックを ts の中に持つ）。`ts0` は `net` のリンクではないので、ほかのアプリの `svc:net` からは tailnet に出られない。
+
+### 14.2 確かめたこと
+- `cargo test -p tsclient`: 16。disco の往復を足し、Node の試験で UDP の Ping に UDP で Pong が返ることを見た。
+- Tab5（Wi-Fi の 192.168.8.x。ホストとは同じ外のアドレスで、その内側にもう 1 段 NAT がある）:
+  - ホストの `tailscale ping` は、はじめ DERP（tok）経由で Pong が返った。その後 `direct 192.168.2.129:41641` になった（Tab5 の手前のルータの外側のアドレス）。
+  - ICMP の ping は 10 回中 10 回返り、往復は最短 5.4 ms・平均 20 ms（DERP 経由では最短 17 ms）。
+  - 状態のページは 1 回 10〜30 ms。
+  - 相手が止まると、15 秒で DERP に戻る（`ts.direct peers=0`）。
+- 制御の接続が切れる件（§13.2）:
+  - 前の版では 155 秒で切れた。直の経路の版は 850 秒切れなかった（観察を続ける）。
+  - 切れたときの TCP の状態と、最後の map からの時間を `ts.ctl_lost` に出すようにした。
+- まだ:
+  - こちらから相手の endpoint へ Ping して経路を選ぶこと（相手から来るのを待つだけ）。
+  - IPv6 の endpoint。
+  - NAT の対応表を保つための Ping。
+  - UDP の読み取りに `udp_arm` と `wait` を使うこと（今は毎回聞きに行く）。

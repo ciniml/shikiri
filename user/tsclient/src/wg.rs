@@ -168,6 +168,11 @@ impl Device {
         Device { key, mac1_key, h0, c0, peers: Vec::new(), next_index: rng.next_u32(), unknown: [0; LEN] }
     }
 
+    /// This node's key (its node key).
+    pub fn public(&self) -> [u8; LEN] {
+        self.key.public
+    }
+
     /// Sets the peers (keys and addresses), keeping the sessions of those
     /// that stay.
     pub fn set_peers(&mut self, peers: impl Iterator<Item = ([u8; LEN], [u8; 4])>) {
@@ -184,8 +189,9 @@ impl Device {
         }
     }
 
-    /// A message that came from node key `from`.
-    pub fn receive(&mut self, from: &[u8; LEN], msg: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) -> Received {
+    /// A message that came from node key `from` (through DERP), or over
+    /// UDP (None: an initiation names its sender inside).
+    pub fn receive(&mut self, from: Option<&[u8; LEN]>, msg: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) -> Received {
         match (msg.first(), msg.len()) {
             (Some(&INITIATION), INITIATION_LEN) => self.initiation(from, msg, rng, now_ms),
             (Some(&TRANSPORT), n) if n >= HEADER + TAG_LEN => self.transport(msg, now_ms),
@@ -194,7 +200,7 @@ impl Device {
         }
     }
 
-    fn initiation(&mut self, from: &[u8; LEN], m: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) -> Received {
+    fn initiation(&mut self, from: Option<&[u8; LEN]>, m: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) -> Received {
         if mac(&self.mac1_key, &m[..116]) != m[116..132] {
             return Received::Nothing("mac1");
         }
@@ -210,7 +216,7 @@ impl Device {
         }
         h = hash(&[&h, &m[40..88]]);
         // The node key DERP named must be the WireGuard key inside.
-        if s != *from {
+        if from.is_some_and(|f| *f != s) {
             return Received::Nothing("key mismatch");
         }
         let Some(pi) = self.peers.iter().position(|p| p.key == s) else {
@@ -492,7 +498,7 @@ mod tests {
         let e = KeyPair::from_private([3; 32]);
         let (m, mut c, mut h) = initiate(&peer, &me.public, &e, [0, 0, 0, 0, 0x40, 0, 0, 1, 0, 0, 0, 0]);
 
-        let Received::Reply(r) = d.receive(&peer.public, &m, &mut rng, 0) else { panic!() };
+        let Received::Reply(r) = d.receive(Some(&peer.public), &m, &mut rng, 0) else { panic!() };
         assert_eq!(r.len(), RESPONSE_LEN);
         assert_eq!(&r[8..12], &7u32.to_le_bytes());
         // The initiator finishes: the empty payload opens, mac1 checks.
@@ -509,7 +515,7 @@ mod tests {
         let (send, recv) = hkdf2(&c3, &[]);
 
         // A replayed initiation is refused.
-        assert_eq!(d.receive(&peer.public, &m, &mut rng, 0), Received::Nothing("replayed initiation"));
+        assert_eq!(d.receive(Some(&peer.public), &m, &mut rng, 0), Received::Nothing("replayed initiation"));
 
         // The initiator's first transport message: an ICMP echo request.
         let local = u32::from_le_bytes(r[4..8].try_into().unwrap());
@@ -523,8 +529,8 @@ mod tests {
         let tag = ChaCha20Poly1305::new(&send.into()).encrypt_in_place_detached(&nonce(0), &[], &mut pt).unwrap();
         msg.extend_from_slice(&pt);
         msg.extend_from_slice(&tag);
-        assert_eq!(d.receive(&peer.public, &msg, &mut rng, 1), Received::Packet { peer: 0, packet: ip.clone() });
-        assert_eq!(d.receive(&peer.public, &msg, &mut rng, 1), Received::Nothing("replayed transport"));
+        assert_eq!(d.receive(Some(&peer.public), &msg, &mut rng, 1), Received::Packet { peer: 0, packet: ip.clone() });
+        assert_eq!(d.receive(Some(&peer.public), &msg, &mut rng, 1), Received::Nothing("replayed transport"));
 
         // Our answer opens with the initiator's receive key.
         let out = d.encrypt(0, &ip, 2).unwrap();
@@ -548,15 +554,15 @@ mod tests {
         let m = a.initiate(0, [0, 0, 0, 0, 0x40, 0, 0, 1, 0, 0, 0, 0], &mut rng, 0).unwrap();
         assert!(!a.wants_handshake(0, 1000));
         assert!(a.wants_handshake(0, 6000));
-        let Received::Reply(r) = b.receive(&ka.public, &m, &mut rng, 0) else { panic!() };
-        assert_eq!(a.receive(&kb.public, &r, &mut rng, 1), Received::Established { peer: 0 });
-        assert_eq!(a.receive(&kb.public, &r, &mut rng, 1), Received::Nothing("response unasked"));
+        let Received::Reply(r) = b.receive(Some(&ka.public), &m, &mut rng, 0) else { panic!() };
+        assert_eq!(a.receive(Some(&kb.public), &r, &mut rng, 1), Received::Established { peer: 0 });
+        assert_eq!(a.receive(Some(&kb.public), &r, &mut rng, 1), Received::Nothing("response unasked"));
         assert!(a.can_send(0, 2) && !a.wants_handshake(0, 2));
         let ip = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 2];
         let t = a.encrypt(0, &ip, 2).unwrap();
-        assert_eq!(b.receive(&ka.public, &t, &mut rng, 2), Received::Packet { peer: 0, packet: ip.clone() });
+        assert_eq!(b.receive(Some(&ka.public), &t, &mut rng, 2), Received::Packet { peer: 0, packet: ip.clone() });
         let back = b.encrypt(0, &[&ip[..12], &ip[16..20], &ip[12..16]].concat(), 3).unwrap();
-        assert!(matches!(a.receive(&kb.public, &back, &mut rng, 3), Received::Packet { .. }));
+        assert!(matches!(a.receive(Some(&kb.public), &back, &mut rng, 3), Received::Packet { .. }));
         // Ours is replaced after REKEY_AFTER_TIME.
         assert!(a.wants_handshake(0, 121_000));
         assert!(!b.wants_handshake(0, 121_000));

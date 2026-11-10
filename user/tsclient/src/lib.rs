@@ -13,6 +13,7 @@ extern crate alloc;
 
 pub mod control;
 pub mod derp;
+pub mod disco;
 pub mod h2;
 pub mod keys;
 pub mod netcheck;
