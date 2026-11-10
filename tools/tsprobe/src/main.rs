@@ -43,6 +43,28 @@ fn waiting(t: &TcpStream) -> bool {
     !matches!(r, Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock)
 }
 
+/// Three rounds of STUN to every region, 700 ms each.
+fn netcheck(map: &tsclient::netmap::DerpMap) -> tsclient::netcheck::Netcheck {
+    let mut nc = tsclient::netcheck::Netcheck::new(map);
+    let u = std::net::UdpSocket::bind("0.0.0.0:0").expect("udp");
+    u.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+    let start = Instant::now();
+    let now = || start.elapsed().as_millis() as u64;
+    let mut buf = [0u8; 1500];
+    for _ in 0..3 {
+        for (ip, port, q) in nc.round(&mut OsRng, now()) {
+            let _ = u.send_to(&q, (std::net::Ipv4Addr::from(ip), port));
+        }
+        let end = now() + 700;
+        while now() < end {
+            if let Ok((n, _)) = u.recv_from(&mut buf) {
+                nc.answer(&buf[..n], now());
+            }
+        }
+    }
+    nc
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // `tsprobe --tls HOST`: only the TLS handshake, its error shown.
@@ -54,6 +76,23 @@ fn main() {
         let mut t = TlsConnection::new(FromStd::new(tcp), &mut rbuf, &mut wbuf);
         let config = TlsConfig::new().with_server_name(host);
         println!("{host}: {:?}", t.open(TlsContext::new(&config, tls::Provider::new(OsRng))));
+        return;
+    }
+    // `tsprobe --netcheck DERPMAP.json`: the regions' STUN round trips (a
+    // DERP map as https://login.tailscale.com/derpmap/default gives it).
+    if args.get(1).map(|s| s.as_str()) == Some("--netcheck") {
+        let mut nm = tsclient::netmap::NetMap::default();
+        let json = std::fs::read(&args[2]).expect("derp map");
+        let wrapped = [&b"{\"DERPMap\":"[..], &json, b"}"].concat();
+        nm.apply_json(&wrapped).expect("derp map json");
+        let nc = netcheck(&nm.derp);
+        let mut l: Vec<_> = nc.latencies().collect();
+        l.sort_by_key(|&(_, ms)| ms);
+        for (r, ms) in l {
+            let code = nm.derp_region(r).map_or("", |(r, _)| r.region_code.as_str());
+            println!("{r:3} {code:6} {ms} ms");
+        }
+        println!("best {:?}, endpoint {}", nc.best(), nc.endpoint.is_some());
         return;
     }
     let keyfile = args.get(1).expect("usage: tsprobe KEYFILE [HOSTNAME [SERVER]]");
@@ -107,8 +146,10 @@ fn main() {
     let json = m.next(&mut h).expect("first map response");
     let len = json.len();
     node.apply_map(json).expect("map json");
+    let nc = netcheck(&node.netmap.derp);
+    let latency: Vec<_> = nc.latencies().collect();
     let (region, host, port) = {
-        let (r, n) = node.netmap.home_derp().expect("no derp");
+        let (r, n) = nc.best().and_then(|(r, _)| node.netmap.derp_region(r)).or_else(|| node.netmap.home_derp()).expect("no derp");
         (r.region_id, n.host_name.clone(), if n.derp_port == 0 { 443 } else { n.derp_port })
     };
     println!("map: {len} bytes, self {:?}, peers {}, home derp {region} {host}", node.netmap.self_ipv4(), node.netmap.peers.len());
@@ -118,7 +159,7 @@ fn main() {
     OsRng.fill_bytes(&mut nonce);
     let mut derp = Derp::connect(t, &host, &keys.node, nonce).expect("derp");
     println!("derp: connected to {host}");
-    control::update(&mut h, &keys, hostname, region, &[]).expect("update");
+    control::update(&mut h, &keys, hostname, region, &latency, &[]).expect("update");
 
     let mut shown = node.stats;
     while now_ms() < seconds * 1000 {

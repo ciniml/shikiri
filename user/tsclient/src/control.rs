@@ -164,10 +164,12 @@ pub fn connect<S: embedded_io::Read + embedded_io::Write>(
 }
 
 /// The Hostinfo this client sends.
-fn hostinfo(hostname: &str, derp: i32) -> serde_json::Value {
+fn hostinfo(hostname: &str, derp: i32, latency: &[(i32, u32)]) -> serde_json::Value {
     let mut h = json!({ "OS": "linux", "Hostname": hostname, "GoArch": "riscv", "GoVersion": "tab5-os" });
     if derp > 0 {
-        h["NetInfo"] = json!({ "PreferredDERP": derp, "LinkType": "wifi" });
+        // Seconds by "REGION-v4", as netcheck reports them.
+        let l: serde_json::Map<String, serde_json::Value> = latency.iter().map(|&(r, ms)| (alloc::format!("{r}-v4"), json!(ms as f64 / 1000.0))).collect();
+        h["NetInfo"] = json!({ "PreferredDERP": derp, "LinkType": "wifi", "DERPLatency": l });
     }
     h
 }
@@ -190,7 +192,7 @@ pub fn register<S: embedded_io::Read + embedded_io::Write>(h: &mut H2<S>, keys: 
         "NodeKey": node,
         // As the reference: the same key (no rotation).
         "OldNodeKey": node,
-        "Hostinfo": hostinfo(hostname, 0),
+        "Hostinfo": hostinfo(hostname, 0, &[]),
         "Endpoints": [],
     });
     if !auth_key.is_empty() {
@@ -266,7 +268,7 @@ pub fn map<S: embedded_io::Read + embedded_io::Write>(
         "KeepAlive": true,
         "IncludeIPv6": false,
         "OmitPeers": false,
-        "Hostinfo": hostinfo(hostname, derp),
+        "Hostinfo": hostinfo(hostname, derp, &[]),
         "Endpoints": endpoints,
     });
     let body = serde_json::to_vec(&req).map_err(|_| Error::Json)?;
@@ -283,6 +285,7 @@ pub fn update<S: embedded_io::Read + embedded_io::Write>(
     keys: &Keys,
     hostname: &str,
     derp: i32,
+    latency: &[(i32, u32)],
     endpoints: &[String],
 ) -> Result<u32> {
     let req = json!({
@@ -292,7 +295,7 @@ pub fn update<S: embedded_io::Read + embedded_io::Write>(
         "Stream": false,
         "OmitPeers": true,
         "Compress": "",
-        "Hostinfo": hostinfo(hostname, derp),
+        "Hostinfo": hostinfo(hostname, derp, latency),
         "Endpoints": endpoints,
     });
     let body = serde_json::to_vec(&req).map_err(|_| Error::Json)?;

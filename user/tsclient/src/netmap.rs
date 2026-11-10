@@ -156,13 +156,19 @@ impl NetMap {
     }
 
     /// The region to call home: the lowest id with a node that relays (the
-    /// reference's choice; not the nearest).
+    /// reference's choice; `netcheck` finds the nearest).
     pub fn home_derp(&self) -> Option<(&DerpRegion, &DerpNode)> {
         self.derp
             .regions
             .values()
             .filter_map(|r| Some((r, r.nodes.iter().find(|n| !n.stun_only)?)))
             .min_by_key(|(r, _)| r.region_id)
+    }
+
+    /// Region `id` and its first node that relays.
+    pub fn derp_region(&self, id: i32) -> Option<(&DerpRegion, &DerpNode)> {
+        let r = self.derp.regions.values().find(|r| r.region_id == id)?;
+        Some((r, r.nodes.iter().find(|n| !n.stun_only)?))
     }
 
     pub fn self_ipv4(&self) -> Option<[u8; 4]> {

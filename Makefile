@@ -48,7 +48,7 @@ PERMIT_mic    := --permit audio:in
 PERMIT_spkcheck := --permit audio:out --permit audio:in
 # Tailscale (doc/71): the control server over TLS; its keys and the auth
 # key are secret settings (strong: the system key).
-PERMIT_ts := --permit svc:net/tcp-connect --permit svc:net/resolve --permit random \
+PERMIT_ts := --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:net/udp:41641 --permit random \
              --permit svc:cfg/r:ts. --permit svc:cfg/w:ts. --permit svc:cfg/secret:ts. --stack 262144
 PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \

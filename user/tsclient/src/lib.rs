@@ -16,10 +16,12 @@ pub mod derp;
 pub mod h2;
 pub mod ip;
 pub mod keys;
+pub mod netcheck;
 pub mod netmap;
 pub mod node;
 pub mod noise;
 pub mod stream;
+pub mod stun;
 pub mod tls;
 pub mod wg;
 

@@ -355,3 +355,19 @@ tailscale-rs の crate（a2a56c4 で確認）:
   - 切れたら全体を 30 秒後にやり直す（制御と DERP を別々につなぎ直さない）。
   - Tailnet Lock の署名の確かめ。
 
+
+## 11. 近い DERP を選ぶ（2026-11-11）
+参考の実装は、番号のいちばん小さい領域（nyc）を home にしていた。日本からは往復が 300 ms を超える。Tailscale の netcheck と同じく、STUN の往復時間で選ぶ形にした。
+
+### 11.1 作ったもの
+- `tsclient::stun`: STUN の binding request と、その応答。Tailscale の DERP は、SOFTWARE が `tailnode` で FINGERPRINT（CRC-32 と 0x5354554E の XOR）の付いた要求にしか答えない（tailscale.com/net/stun の `ParseBindingRequest`）。応答の XOR-MAPPED-ADDRESS（なければ MAPPED-ADDRESS）から、インターネットから見たこの端末のアドレスがわかる。
+- `tsclient::netcheck`: 中継をする node がある領域ごとに、IPv4 と STUN のある node を 1 つ選ぶ（STUNPort が -1 なら STUN はない、0 なら 3478）。要求を出すたびに新しいトランザクション ID を付け、領域ごとにいちばん速い往復を残す。I/O は持たない。
+- `NetMap::derp_region(id)`。`control::update` は `Hostinfo.NetInfo.DERPLatency`（`"7-v4": 秒`）も送る。
+- アプリ `ts`: 最初の map の後、UDP 41641（Tailscale のいつものポート。後で直の WireGuard にも使う）から全領域へ 700 ms を 3 回送り、いちばん速い領域につなぐ。答えがなければ前と同じく番号のいちばん小さい領域。イベントは `ts.netcheck`（領域、答えた数、選んだ領域と ms、外から見たアドレス）。許可に `svc:net/udp:41641` を足した。
+- `tsprobe --netcheck DERPMAP.json`: ホストで領域ごとの往復を並べる（DERP の地図は https://login.tailscale.com/derpmap/default から取れる）。
+
+### 11.2 確かめたこと
+- ホスト: 28 領域中 27 が答えた（STUN のない 1 つを除く）。tok 7 ms、hkg 69 ms、sin 74 ms、…、nyc 158 ms、sao 356 ms。
+- Tab5: `ts.netcheck regions=28 answered=27 best=7 ms=17`。DERP は derp7g（tok）につながった。ホストから Tab5 への ping は 10 回中 10 回返った（往復 18〜98 ms、平均 32 ms。nyc 経由では平均 361 ms）。
+- この試験の前に、別のセッションが Tab5 の ota_0 を ESP32-S3 のアプリで上書きしていた（04:41 JST ごろ）。`make flash-p4` で焼き直してから試した。ストアは無事（60 個）。
+- `cargo test -p tsclient` は 14（stun と netcheck を足した）。

@@ -3,7 +3,7 @@
 
 //! A Tailscale client (doc/71), stages T1 to T3: registers this node with
 //! the control server and follows its map, keeps a connection to the home
-//! DERP server, and answers pings to its tailnet address from the peers
+//! DERP server (the nearest region by STUN), and answers pings to its tailnet address from the peers
 //! (WireGuard over DERP). The protocols are in `tsclient`; here are the
 //! TCP (`svc:net`), TLS (embedded-tls), the settings, the keys and the
 //! loop that serves both connections (each read only when bytes wait).
@@ -32,6 +32,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
 use t5_rt::{Config, Net, event, random_fill, sleep_ms, time_ns};
 use tsclient::derp::{Derp, Frame};
+use tsclient::netcheck::Netcheck;
 use tsclient::node::Node;
 use tsclient::stream::Buffered;
 use tsclient::{Error, control, keys::Keys, tls};
@@ -59,6 +60,10 @@ const CONNECT_MS: u64 = 10_000;
 /// while idle up to `IDLE_MAX_MS` (each look costs `net` two calls; at
 /// 2 ms `ts` took 5 % of a core and `net` 8 % more), back to 1 on traffic.
 const IDLE_MAX_MS: u64 = 20;
+/// The UDP port (Tailscale's usual): STUN now, WireGuard directly later.
+const UDP_PORT: u16 = 41641;
+const NETCHECK_ROUNDS: usize = 3;
+const NETCHECK_ROUND_MS: u64 = 700;
 
 fn main(_: usize, _: usize) -> usize {
     unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
@@ -269,7 +274,13 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         }
         Err(e) => return ("map stream", e),
     }
-    let Some((region, host, port)) = node.netmap.home_derp().map(|(r, n)| (r.region_id, n.host_name.clone(), if n.derp_port == 0 { 443 } else { n.derp_port })) else {
+    let nc = netcheck(&net, &node.netmap.derp, rng);
+    let latency: Vec<(i32, u32)> = nc.latencies().collect();
+    let best = nc.best();
+    let ext = nc.endpoint.map_or(0, |(ip, _)| u32::from_be_bytes(ip));
+    event!(Info, "ts.netcheck", regions = nc.len(), answered = latency.len(), best = best.map_or(0, |b| b.0 as u32), ms = best.map_or(0, |b| b.1), ext_ip = ext);
+    let home = best.and_then(|(r, _)| node.netmap.derp_region(r)).or_else(|| node.netmap.home_derp());
+    let Some((region, host, port)) = home.map(|(r, n)| (r.region_id, n.host_name.clone(), if n.derp_port == 0 { 443 } else { n.derp_port })) else {
         return ("derp map", Error::Proto("no derp"));
     };
     let derp_ip = match net.borrow_mut().resolve(&host, RESOLVE_MS) {
@@ -289,7 +300,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     };
     event!(Info, "ts.derp", region = region as u32, host = host.as_str(), ip = derp_ip);
     // Peers send to us through this region from now on.
-    if let Err(e) = control::update(&mut h, keys, hostname, region, &[]) {
+    if let Err(e) = control::update(&mut h, keys, hostname, region, &latency, &[]) {
         return ("update", e);
     }
 
@@ -353,6 +364,31 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
             idle_ms = (idle_ms * 2).min(IDLE_MAX_MS);
         }
     }
+}
+
+/// STUN to every DERP region from `UDP_PORT`: `NETCHECK_ROUNDS` rounds of
+/// `NETCHECK_ROUND_MS` each, the fastest answer per region.
+fn netcheck(net: &Rc<RefCell<Net>>, map: &tsclient::netmap::DerpMap, rng: &mut ChaCha20Rng) -> Netcheck {
+    let mut nc = Netcheck::new(map);
+    let Ok(s) = net.borrow().udp_bind(UDP_PORT) else {
+        event!(Warn, "ts.failed", step = "udp bind", error = "io");
+        return nc;
+    };
+    let mut buf = [0u8; 576];
+    for _ in 0..NETCHECK_ROUNDS {
+        for (ip, port, q) in nc.round(rng, now_ms()) {
+            let _ = net.borrow_mut().udp_send(s, u32::from_be_bytes(ip), port, &q);
+        }
+        let end = now_ms() + NETCHECK_ROUND_MS;
+        while now_ms() < end {
+            match net.borrow_mut().udp_recv(s, &mut buf, 0) {
+                Ok((n, ..)) => nc.answer(&buf[..n], now_ms()),
+                Err(_) => sleep_ms(1),
+            }
+        }
+    }
+    let _ = net.borrow().close(s);
+    nc
 }
 
 fn log_map(node: &Node, bytes: usize) {
