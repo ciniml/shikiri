@@ -20,9 +20,13 @@ pub type Suite = Aes128GcmSha256;
 pub const READ_BUF: usize = 16640;
 pub const WRITE_BUF: usize = 4096;
 
+/// The server's whole chain is kept for the signature check: DERP's five
+/// certificates (with its ed25519 one) are more than 4 KiB.
+const CHAIN_MAX: usize = 8192;
+
 pub struct Provider<R> {
     rng: R,
-    verifier: CertVerifier<'static, Suite, NoClock, 4096>,
+    verifier: CertVerifier<'static, Suite, NoClock, CHAIN_MAX>,
 }
 
 impl<R: CryptoRngCore> Provider<R> {

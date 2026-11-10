@@ -1,11 +1,12 @@
 #![no_std]
 #![no_main]
 
-//! A Tailscale client (doc/71), stage T1: registers this node with the
-//! control server and follows its map (this node's tailnet address, the
-//! peers, the DERP regions), logging what changes. The protocols are in
-//! `tsclient`; here are the TCP (`svc:net`), TLS (embedded-tls), the
-//! settings and the keys.
+//! A Tailscale client (doc/71), stages T1 to T3: registers this node with
+//! the control server and follows its map, keeps a connection to the home
+//! DERP server, and answers pings to its tailnet address from the peers
+//! (WireGuard over DERP). The protocols are in `tsclient`; here are the
+//! TCP (`svc:net`), TLS (embedded-tls), the settings, the keys and the
+//! loop that serves both connections (each read only when bytes wait).
 //!
 //! Settings (`svc:cfg`): `ts.authkey` (secret: a pre-auth key; without
 //! one the control server gives a login URL, logged as `ts.login`),
@@ -19,15 +20,21 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
+use core::cell::RefCell;
 use embedded_tls::blocking::TlsConnection;
 use embedded_tls::{TlsConfig, TlsContext};
 use linked_list_allocator::LockedHeap;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
-use t5_rt::{Config, Net, event, random_fill, sleep_ms};
-use tsclient::{Error, control, keys::Keys, netmap::NetMap, tls};
+use t5_rt::{Config, Net, event, random_fill, sleep_ms, time_ns};
+use tsclient::derp::{Derp, Frame};
+use tsclient::node::Node;
+use tsclient::stream::Buffered;
+use tsclient::{Error, control, keys::Keys, tls};
 
 t5_rt::entry!(main);
 
@@ -48,6 +55,10 @@ const RETRY_MS: u64 = 30_000;
 const LOGIN_POLL_MS: u64 = 20_000;
 const RESOLVE_MS: u64 = 5000;
 const CONNECT_MS: u64 = 10_000;
+/// The loop's nap when neither connection has bytes waiting: doubles
+/// while idle up to `IDLE_MAX_MS` (each look costs `net` two calls; at
+/// 2 ms `ts` took 5 % of a core and `net` 8 % more), back to 1 on traffic.
+const IDLE_MAX_MS: u64 = 20;
 
 fn main(_: usize, _: usize) -> usize {
     unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
@@ -106,10 +117,20 @@ fn describe(e: Error) -> &'static str {
     }
 }
 
-/// A TCP connection through `svc:net`, as embedded-io for embedded-tls.
-struct Sock<'a> {
-    net: &'a mut Net,
+/// A TCP connection through `svc:net` (shared by the connections), as
+/// embedded-io for embedded-tls.
+struct Sock {
+    net: Rc<RefCell<Net>>,
     s: u16,
+}
+
+/// Bytes wait on socket `s`, or it is no longer up (a read then fails
+/// rather than waits).
+fn waiting(net: &Rc<RefCell<Net>>, s: u16) -> bool {
+    match net.borrow().tcp_state(s) {
+        Ok((state, n)) => n > 0 || state != t5_rt::net::state::ESTABLISHED,
+        Err(_) => true,
+    }
 }
 
 #[derive(Debug)]
@@ -129,19 +150,19 @@ impl embedded_io::Error for SockError {
     }
 }
 
-impl embedded_io::ErrorType for Sock<'_> {
+impl embedded_io::ErrorType for Sock {
     type Error = SockError;
 }
 
-impl embedded_io::Read for Sock<'_> {
+impl embedded_io::Read for Sock {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, SockError> {
-        self.net.recv(self.s, buf).map_err(|_| SockError)
+        self.net.borrow_mut().recv(self.s, buf).map_err(|_| SockError)
     }
 }
 
-impl embedded_io::Write for Sock<'_> {
+impl embedded_io::Write for Sock {
     fn write(&mut self, buf: &[u8]) -> Result<usize, SockError> {
-        self.net.send(self.s, buf).map_err(|_| SockError)
+        self.net.borrow_mut().send(self.s, buf).map_err(|_| SockError)
     }
 
     fn flush(&mut self) -> Result<(), SockError> {
@@ -149,46 +170,54 @@ impl embedded_io::Write for Sock<'_> {
     }
 }
 
-impl Drop for Sock<'_> {
+impl Drop for Sock {
     fn drop(&mut self) {
-        let _ = self.net.close(self.s);
+        let _ = self.net.borrow().close(self.s);
     }
 }
 
-type Tls<'a> = TlsConnection<'a, Sock<'a>, tls::Suite>;
+type Tls<'a> = Buffered<TlsConnection<'a, Sock, tls::Suite>>;
 
 /// A TLS connection's record buffers (read, write).
-struct Bufs(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>);
+struct Bufs(Vec<u8>, Vec<u8>);
 
-/// TLS to `host` (at `ip`, port 443), its certificate checked, with the
-/// record buffers `bufs`.
-fn tls_open<'a>(net: &'a mut Net, bufs: &'a mut Bufs, ip: u32, host: &str, rng: &mut ChaCha20Rng) -> Result<Tls<'a>, (&'static str, Error)> {
-    let s = net.tcp_connect(ip, 443).map_err(|_| ("tcp", Error::Io))?;
-    net.wait_established(s, CONNECT_MS).map_err(|_| {
-        let _ = net.close(s);
-        ("tcp", Error::Io)
-    })?;
-    let mut t = TlsConnection::new(Sock { net, s }, &mut bufs.0, &mut bufs.1);
-    let config = TlsConfig::new().with_server_name(host);
-    let child = ChaCha20Rng::from_seed({
-        let mut s = [0u8; 32];
-        rng.fill_bytes(&mut s);
-        s
-    });
-    t.open(TlsContext::new(&config, tls::Provider::new(child))).map_err(|_| ("tls", Error::Io))?;
-    Ok(t)
+impl Bufs {
+    fn new() -> Bufs {
+        Bufs(vec![0; tls::READ_BUF], vec![0; tls::WRITE_BUF])
+    }
 }
 
-/// One session with the control server, until it fails.
+fn now_ms() -> u64 {
+    time_ns() / 1_000_000
+}
+
+/// TLS to `host` (at `ip`, `port`), its certificate checked, with the
+/// record buffers `bufs`; and the socket's number (for `waiting`).
+fn tls_open<'a>(net: &Rc<RefCell<Net>>, bufs: &'a mut Bufs, ip: u32, port: u16, host: &str, rng: &mut ChaCha20Rng) -> Result<(Tls<'a>, u16), (&'static str, Error)> {
+    let s = net.borrow().tcp_connect(ip, port).map_err(|_| ("tcp", Error::Io))?;
+    let sock = Sock { net: net.clone(), s };
+    if net.borrow().wait_established(s, CONNECT_MS).is_err() {
+        return Err(("tcp", Error::Io));
+    }
+    let mut t = TlsConnection::new(sock, &mut bufs.0, &mut bufs.1);
+    let config = TlsConfig::new().with_server_name(host);
+    let mut seed = [0u8; 32];
+    rng.fill_bytes(&mut seed);
+    t.open(TlsContext::new(&config, tls::Provider::new(ChaCha20Rng::from_seed(seed)))).map_err(|_| ("tls", Error::Io))?;
+    Ok((Buffered::new(t), s))
+}
+
+/// One session with the control server and DERP, until it fails.
 fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, keys: &Keys) -> (&'static str, Error) {
-    let Ok(mut net) = Net::connect() else { return ("net", Error::Io) };
-    let mut bufs = Bufs(vec![0; tls::READ_BUF], vec![0; tls::WRITE_BUF]);
-    let ip = match net.resolve(server, RESOLVE_MS) {
+    let Ok(net) = Net::connect() else { return ("net", Error::Io) };
+    let net = Rc::new(RefCell::new(net));
+    let ip = match net.borrow_mut().resolve(server, RESOLVE_MS) {
         Ok(ip) => ip,
         Err(_) => return ("resolve", Error::Io),
     };
+    let mut ctl_bufs = Bufs::new();
     let srv = {
-        let mut t = match tls_open(&mut net, &mut bufs, ip, server, rng) {
+        let (mut t, _) = match tls_open(&net, &mut ctl_bufs, ip, 443, server, rng) {
             Ok(t) => t,
             Err(e) => return e,
         };
@@ -198,7 +227,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         }
     };
     event!(Info, "ts.server_key", ip = ip);
-    let t = match tls_open(&mut net, &mut bufs, ip, server, rng) {
+    let (t, ctl_s) = match tls_open(&net, &mut ctl_bufs, ip, 443, server, rng) {
         Ok(t) => t,
         Err(e) => return e,
     };
@@ -223,27 +252,112 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         }
         sleep_ms(LOGIN_POLL_MS);
     }
+
+    // The first map response: the DERP map to pick home from.
+    let mut node = Node::new(keys.node.clone(), rng);
     let mut m = match control::map(&mut h, keys, hostname, 0, &[]) {
         Ok(m) => m,
         Err(e) => return ("map", e),
     };
-    let mut nm = NetMap::default();
-    loop {
-        let json = match m.next(&mut h) {
-            Ok(j) => j,
-            Err(e) => return ("map stream", e),
-        };
-        let bytes = json.len();
-        let r = match nm.apply_json(json) {
-            Ok(r) => r,
-            Err(e) => return ("map json", e),
-        };
-        if r.keep_alive && r.node.is_none() {
-            continue;
+    match m.next(&mut h) {
+        Ok(json) => {
+            let bytes = json.len();
+            if let Err(e) = node.apply_map(json) {
+                return ("map json", e);
+            }
+            log_map(&node, bytes);
         }
-        // As `svc:net` writes addresses (the first octet in the high byte).
-        let ip = nm.self_ipv4().map_or(0, u32::from_be_bytes);
-        let (region, derp) = nm.home_derp().map_or((0, ""), |(r, n)| (r.region_id, n.host_name.as_str()));
-        event!(Info, "ts.map", bytes = bytes, ip = ip, peers = nm.peers.len(), regions = nm.derp.regions.len(), home = region as u32, derp = derp);
+        Err(e) => return ("map stream", e),
     }
+    let Some((region, host, port)) = node.netmap.home_derp().map(|(r, n)| (r.region_id, n.host_name.clone(), if n.derp_port == 0 { 443 } else { n.derp_port })) else {
+        return ("derp map", Error::Proto("no derp"));
+    };
+    let derp_ip = match net.borrow_mut().resolve(&host, RESOLVE_MS) {
+        Ok(ip) => ip,
+        Err(_) => return ("derp resolve", Error::Io),
+    };
+    let mut derp_bufs = Bufs::new();
+    let (t, derp_s) = match tls_open(&net, &mut derp_bufs, derp_ip, port, &host, rng) {
+        Ok(t) => t,
+        Err((step, e)) => return (if step == "tls" { "derp tls" } else { "derp tcp" }, e),
+    };
+    let mut nonce = [0u8; 24];
+    rng.fill_bytes(&mut nonce);
+    let mut derp = match Derp::connect(t, &host, &keys.node, nonce) {
+        Ok(d) => d,
+        Err(e) => return ("derp", e),
+    };
+    event!(Info, "ts.derp", region = region as u32, host = host.as_str(), ip = derp_ip);
+    // Peers send to us through this region from now on.
+    if let Err(e) = control::update(&mut h, keys, hostname, region, &[]) {
+        return ("update", e);
+    }
+
+    let mut shown = node.stats;
+    let mut idle_ms = 1;
+    loop {
+        let mut busy = false;
+        if m.ready() || h.buffered() || waiting(&net, ctl_s) {
+            busy = true;
+            match m.poll(&mut h) {
+                Ok(true) => {
+                    let json = m.take();
+                    let bytes = json.len();
+                    match node.apply_map(json) {
+                        Ok(r) if !r.keep_alive || r.node.is_some() => log_map(&node, bytes),
+                        Ok(_) => {}
+                        Err(e) => return ("map json", e),
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => return ("map stream", e),
+            }
+        }
+        if derp.buffered() || waiting(&net, derp_s) {
+            busy = true;
+            let packet = match derp.read() {
+                Ok(Frame::Packet { src, data }) => Some((src, data.to_vec())),
+                Ok(_) => None,
+                Err(e) => return ("derp read", e),
+            };
+            if let Some((src, data)) = packet {
+                if let Some(back) = node.from_derp(&src, &data, rng, now_ms()) {
+                    if let Err(e) = derp.send(&src, &back) {
+                        return ("derp send", e);
+                    }
+                }
+            }
+        }
+        let s = node.stats;
+        if (s.handshakes, s.echo_replies, s.dropped) != (shown.handshakes, shown.echo_replies, shown.dropped) {
+            if node.last_drop == "unknown peer" {
+                let k = tsclient::keys::to_hex("", &node.wg.unknown);
+                event!(Warn, "ts.unknown_peer", key = &k[..16], wg_peers = node.wg.peers.len(), map_peers = node.netmap.peers.len());
+            }
+            event!(
+                Info,
+                "ts.stats",
+                handshakes = s.handshakes,
+                packets = s.packets_in,
+                echo_replies = s.echo_replies,
+                disco = s.disco,
+                dropped = s.dropped,
+                last_drop = node.last_drop
+            );
+            shown = s;
+        }
+        if busy {
+            idle_ms = 1;
+        } else {
+            sleep_ms(idle_ms);
+            idle_ms = (idle_ms * 2).min(IDLE_MAX_MS);
+        }
+    }
+}
+
+fn log_map(node: &Node, bytes: usize) {
+    // As `svc:net` writes addresses (the first octet in the high byte).
+    let ip = node.netmap.self_ipv4().map_or(0, u32::from_be_bytes);
+    let (region, derp) = node.netmap.home_derp().map_or((0, ""), |(r, n)| (r.region_id, n.host_name.as_str()));
+    event!(Info, "ts.map", bytes = bytes, ip = ip, peers = node.netmap.peers.len(), regions = node.netmap.derp.regions.len(), home = region as u32, derp = derp);
 }

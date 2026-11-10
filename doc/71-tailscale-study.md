@@ -318,3 +318,40 @@ tailscale-rs の crate（a2a56c4 で確認）:
   - エミュレータの試験（偽の制御サーバ）は T2 と合わせて作る。
   - `Net::recv` は 1 ms ごとに見に行く形で、map を待つ間も CPU を少し使う。
 
+## 10. 段 T2・T3: DERP と、DERP 越しの WireGuard（2026-11-11）
+利用者の指示（2026-11-11）: 「すすめて」（T2 と T3）。
+
+### 10.1 作ったもの
+- 1 つのプロセスで、制御の接続と DERP の接続の両方に付き合う:
+  - `tsclient::stream::Buffered`: TLS の下に置く読みのバッファ。いつもレコード 1 つ分（16 KiB）の場所で読むので、TLS は復号した残りを持たない。embedded-tls はレコードの頭と本体をちょうどの長さで読み、先読みしない（`src/record_reader.rs` で確認）。
+  - そのため、待っている読みは「こちらのバッファ（Buffered、Noise、map の流れ）」か「TCP の受けの列」のどちらかにある。
+  - `ts` の輪: どちらかの接続に読むものがあるとき（`svc:net` の `TCP_STATE` の待ちバイト数、または接続が切れた）だけ、その接続のフレームを 1 つ読む。HTTP/2 は `H2::step`（1 フレーム）、map の流れは `MapStream::poll`（1 フレーム）、DERP は `Derp::read`（1 フレーム）。何もなければ眠る。眠りは 1 ms から倍にして 20 ms まで。
+  - 残る危うさ: TLS の NewSessionTicket だけのレコードが来ると、embedded-tls はアプリのデータが来るまで待つ。今のところ起きていない。
+- DERP（`tsclient::derp`、参考の `tailscale_derp.c` と同じ手順）:
+  - `GET /derp` を Upgrade し、ServerKey を受ける。
+  - ClientInfo（node key と、NaCl box に入れた `{"version":2}`。box は crypto_box）を送り、ServerInfo を受け、NotePreferred を送る。
+  - サーバの Ping には Pong を返す。
+- home の DERP: 最初の map の DERP の地図から選ぶ（参考と同じく、番号の一番小さい領域。近さでは選ばない）。そのあと `Stream: false`、`OmitPeers: true` の map（「lite」の更新）で `Hostinfo.NetInfo.PreferredDERP` を制御サーバに伝える。応答は読まない（map の流れは、ほかの stream のフレームを飛ばす）。
+- WireGuard（`tsclient::wg`、白書の §5）:
+  - 応答側だけ。始める側は TAI64N の時刻が要る（§4.7）ので後で。
+  - 初めのメッセージの mac1、IKpsk2（事前の共有鍵は 0）、TAI64N の巻き戻しの拒否、応答。
+  - transport: 受けは 64 の窓で重複を拒み、送りは 16 バイトに詰める。セッションは 180 秒まで。
+  - DERP の送り主の node key と、握手の中の static 鍵が同じでなければ捨てる。中の IPv4 の送り元が相手のアドレスでなければ捨てる。
+- `tsclient::ip`: 自分の 100.x への ICMP の echo に答える。`tsclient::node::Node`: netmap と WireGuard をまとめ、DERP から来たものに返すもの（握手の応答、echo の応答）を作る。disco（`TS💬`）は数えるだけ（T5）。
+- `tsclient::tls`: 証明書の連なりを持つ場所を 8 KiB にした。DERP は 5 枚（最後に自己署名の ed25519）で 4 KiB を超え、embedded-tls が OutOfMemory を返した。
+- 試験（ホスト、12）: WireGuard の握手と transport を、白書のとおりに書いた始める側と突き合わせる。重複の窓、echo の応答、map の相手が WireGuard に届くこと。
+
+### 10.2 Tab5 での確認
+- 1 回目: DERP の TLS が落ちた（上の 8 KiB）。ホストの `tsprobe --tls HOST` で同じ失敗を出して直した。
+- 2 回目: 握手の初めが 5 秒ごとに届くが、すべて「unknown peer」。`NetMap::apply_json` が応答から相手の一覧を取り出して返すので、`Node` が相手を WireGuard に渡していなかった。`NetMap::peers_version` で変わったかを見る形に直し、試験を足した。
+- 3 回目: このホスト（tailnet の一員）から Tab5 の 100.x へ `ping` が 10 回中 10 回返った（往復 322〜695 ms、平均 361 ms。home は nyc の derp1j。ホストの home は tok）。Tab5 は握手 1、受けたパケット 11、echo の応答 10。ホストの `tailscale status` に LastHandshake が出た。
+- CPU（眠りを 2 ms に固定していたとき）: `ts` 49‰、`net` 193‰（それまでの約 115‰ から増えた。`TCP_STATE` を 2 ms ごとに 2 回呼ぶため）。眠りを 20 ms まで延ばす形にして `ts` 27‰、`net` 132‰（ping を含む 68 秒）。ping は 10 回中 9 回（最初の 1 回は握手の間に落ちたと見ている）。
+- まだ:
+  - home の DERP を近さで選ぶこと。日本からは tok の方が近い。
+  - disco に答えて直の経路を作ること（T5）。
+  - こちらから始める WireGuard（時刻が要る）。
+  - TCP と UDP（T4、smoltcp）。
+  - `net` に TCP の読める知らせを足し、見に行かずに待つこと。
+  - 切れたら全体を 30 秒後にやり直す（制御と DERP を別々につなぎ直さない）。
+  - Tailnet Lock の署名の確かめ。
+

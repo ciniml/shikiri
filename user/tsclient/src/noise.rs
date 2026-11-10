@@ -30,7 +30,7 @@ const TAG_LEN: usize = 16;
 /// Plaintext a record carries at most.
 pub const PLAIN_MAX: usize = RECORD_MAX - 3 - TAG_LEN;
 
-fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     let mut m = <SimpleHmac<Blake2s256> as Mac>::new_from_slice(key).unwrap();
     for p in parts {
         m.update(p);
@@ -39,7 +39,7 @@ fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 }
 
 /// Noise's HKDF with two outputs.
-fn hkdf2(ck: &[u8; 32], ikm: &[u8]) -> ([u8; 32], [u8; 32]) {
+pub(crate) fn hkdf2(ck: &[u8; 32], ikm: &[u8]) -> ([u8; 32], [u8; 32]) {
     let prk = hmac(ck, &[ikm]);
     let a = hmac(&prk, &[&[1]]);
     let b = hmac(&prk, &[&a, &[2]]);
@@ -187,6 +187,14 @@ impl<S: embedded_io::Read + embedded_io::Write> Conn<S> {
         self.s.recv_n += 1;
         (self.rpos, self.rlen) = (0, len - TAG_LEN);
         Ok(())
+    }
+
+    /// Decrypted bytes, or bytes read from below, are waiting.
+    pub fn buffered(&self) -> bool
+    where
+        S: crate::Ready,
+    {
+        self.rpos < self.rlen || self.io.buffered()
     }
 
     /// Some bytes (at least one; waits for a record).

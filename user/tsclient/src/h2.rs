@@ -151,6 +151,16 @@ impl<S: embedded_io::Read + embedded_io::Write> H2<S> {
     /// The next frame for a stream, answering the connection's own.
     pub fn next(&mut self) -> Result<Event> {
         loop {
+            if let Some(e) = self.step()? {
+                return Ok(e);
+            }
+        }
+    }
+
+    /// Reads one frame: a stream's event, or `None` for the connection's
+    /// own frames (answered here).
+    pub fn step(&mut self) -> Result<Option<Event>> {
+        {
             let mut head = [0u8; 9];
             self.conn.read_exact(&mut head)?;
             let (len, ty, flags, sid) = parse_head(&head);
@@ -174,7 +184,7 @@ impl<S: embedded_io::Read + embedded_io::Write> H2<S> {
                     }
                 }
                 GOAWAY => return Err(Error::Proto("h2 goaway")),
-                RST_STREAM => return Ok(Event::Reset { sid }),
+                RST_STREAM => return Ok(Some(Event::Reset { sid })),
                 HEADERS | CONTINUATION => {
                     let (mut a, mut b) = (0, len);
                     if ty == HEADERS {
@@ -193,7 +203,7 @@ impl<S: embedded_io::Read + embedded_io::Write> H2<S> {
                     }
                     self.headers.extend_from_slice(&self.frame[a..b]);
                     if flags & END_HEADERS != 0 {
-                        return Ok(Event::Headers { sid, status: status(&self.headers), end: flags & END_STREAM != 0 });
+                        return Ok(Some(Event::Headers { sid, status: status(&self.headers), end: flags & END_STREAM != 0 }));
                     }
                 }
                 DATA => {
@@ -208,13 +218,14 @@ impl<S: embedded_io::Read + embedded_io::Write> H2<S> {
                         return Err(Error::Proto("h2 data"));
                     }
                     self.data = (a, b);
-                    return Ok(Event::Data { sid, end: flags & END_STREAM != 0 });
+                    return Ok(Some(Event::Data { sid, end: flags & END_STREAM != 0 }));
                 }
                 // WINDOW_UPDATE (requests are small), PRIORITY, PUSH_PROMISE
                 // (never enabled), unknown: ignored.
                 _ => {}
             }
         }
+        Ok(None)
     }
 
     /// Counts `n` bytes read on `sid`; gives them back past `TOP_UP`.
@@ -246,6 +257,14 @@ impl<S: embedded_io::Read + embedded_io::Write> H2<S> {
     /// Forgets a finished stream's flow-control count.
     pub fn done(&mut self, sid: u32) {
         self.owed.retain(|o| o.0 != sid);
+    }
+}
+
+impl<S: embedded_io::Read + embedded_io::Write + crate::Ready> H2<S> {
+    /// Bytes of the next frame have been read already (the Noise records
+    /// or the buffer under them hold some): `step` will not wait long.
+    pub fn buffered(&self) -> bool {
+        self.conn.buffered()
     }
 }
 

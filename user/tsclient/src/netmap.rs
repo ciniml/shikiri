@@ -121,12 +121,17 @@ pub struct NetMap {
     pub node: Option<Node>,
     pub peers: Vec<Node>,
     pub derp: DerpMap,
+    /// Counts the responses that changed `peers` (or `node`).
+    pub peers_version: u32,
 }
 
 impl NetMap {
     /// Parses one response and applies it.
     pub fn apply_json(&mut self, json: &[u8]) -> crate::Result<MapResponse> {
         let mut r: MapResponse = serde_json::from_slice(json).map_err(|_| crate::Error::Json)?;
+        if r.node.is_some() || r.peers.is_some() || r.peers_changed.is_some() || r.peers_removed.is_some() {
+            self.peers_version = self.peers_version.wrapping_add(1);
+        }
         if let Some(n) = r.node.take() {
             self.node = Some(n);
         }
@@ -189,7 +194,9 @@ mod tests {
         assert!(!r.keep_alive);
         assert_eq!(nm.peers.iter().map(|p| p.id).collect::<Vec<_>>(), [3, 4]);
         assert_eq!(nm.peers[0].ipv4(), Some([100, 64, 0, 8]));
+        let v = nm.peers_version;
         assert!(nm.apply_json(br#"{"KeepAlive":true}"#).unwrap().keep_alive);
+        assert_eq!(nm.peers_version, v);
         assert_eq!(nm.peers.len(), 2);
     }
 }

@@ -1,5 +1,6 @@
 //! tsclient against a control server from the host (doc/71): the server
-//! key, the Noise channel, register, the first map response.
+//! key, the Noise channel, register, the map stream, DERP and WireGuard:
+//! answers pings to its tailnet address for TS_SECONDS (default 120).
 //!
 //! tsprobe KEYFILE [HOSTNAME [SERVER]]: KEYFILE keeps the machine, node and
 //! disco keys (made if missing). The auth key, if any, from TS_AUTHKEY.
@@ -8,29 +9,60 @@
 
 use std::io::Write as _;
 use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 use embedded_io_adapters::std::FromStd;
 use embedded_tls::blocking::TlsConnection;
 use embedded_tls::{TlsConfig, TlsContext};
 use rand_core::{OsRng, RngCore};
-use tsclient::{control, keys::Keys, netmap::NetMap, tls};
+use tsclient::derp::{Derp, Frame};
+use tsclient::node::Node;
+use tsclient::stream::Buffered;
+use tsclient::{control, keys::Keys, tls};
 
-fn tls_open(host: &str) -> TlsConnection<'static, FromStd<TcpStream>, tls::Suite> {
-    let tcp = TcpStream::connect((host, 443)).expect("tcp connect");
+type Tls = Buffered<TlsConnection<'static, FromStd<TcpStream>, tls::Suite>>;
+
+/// TLS to `host:port`, and a second handle on the TCP socket to see
+/// whether bytes wait.
+fn tls_open(host: &str, port: u16) -> (Tls, TcpStream) {
+    let tcp = TcpStream::connect((host, port)).expect("tcp connect");
+    let peek = tcp.try_clone().unwrap();
     let rbuf = Box::leak(vec![0u8; tls::READ_BUF].into_boxed_slice());
     let wbuf = Box::leak(vec![0u8; tls::WRITE_BUF].into_boxed_slice());
     let mut t = TlsConnection::new(FromStd::new(tcp), rbuf, wbuf);
     let config = TlsConfig::new().with_server_name(host);
     t.open(TlsContext::new(&config, tls::Provider::new(OsRng))).expect("tls handshake");
-    t
+    (Buffered::new(t), peek)
+}
+
+/// Bytes (or the end) wait on the socket.
+fn waiting(t: &TcpStream) -> bool {
+    t.set_nonblocking(true).unwrap();
+    let r = t.peek(&mut [0u8]);
+    t.set_nonblocking(false).unwrap();
+    !matches!(r, Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock)
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // `tsprobe --tls HOST`: only the TLS handshake, its error shown.
+    if args.get(1).map(|s| s.as_str()) == Some("--tls") {
+        let host = &args[2];
+        let tcp = TcpStream::connect((host.as_str(), 443)).expect("tcp connect");
+        let mut rbuf = vec![0u8; tls::READ_BUF];
+        let mut wbuf = vec![0u8; tls::WRITE_BUF];
+        let mut t = TlsConnection::new(FromStd::new(tcp), &mut rbuf, &mut wbuf);
+        let config = TlsConfig::new().with_server_name(host);
+        println!("{host}: {:?}", t.open(TlsContext::new(&config, tls::Provider::new(OsRng))));
+        return;
+    }
     let keyfile = args.get(1).expect("usage: tsprobe KEYFILE [HOSTNAME [SERVER]]");
     let hostname = args.get(2).map_or("tab5-os-probe", |s| s.as_str());
     let server: &'static str = Box::leak(args.get(3).map_or("controlplane.tailscale.com", |s| s.as_str()).to_string().into_boxed_str());
     let auth = std::env::var("TS_AUTHKEY").unwrap_or_default();
+    let seconds: u64 = std::env::var("TS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+    let start = Instant::now();
+    let now_ms = || start.elapsed().as_millis() as u64;
 
     let keys = match std::fs::read(keyfile) {
         Ok(b) if b.len() == 96 => Keys::from_bytes(b[..].try_into().unwrap()),
@@ -44,15 +76,14 @@ fn main() {
     };
     println!("node {}", tsclient::keys::to_hex("nodekey:", &keys.node.public));
 
-    let mut t = tls_open(server);
+    let (mut t, _) = tls_open(server, 443);
     let srv = control::server_key(&mut t, server).expect("server key");
     drop(t);
-    println!("server key {}", tsclient::keys::to_hex("mkey:", &srv));
 
     let mut eph = [0u8; 32];
     OsRng.fill_bytes(&mut eph);
-    let (mut h, early) = control::connect(tls_open(server), server, &keys, &srv, eph).expect("noise");
-    println!("noise and h2 up; early payload {} bytes", early.as_ref().map_or(0, |e| e.len()));
+    let (t, ctl_tcp) = tls_open(server, 443);
+    let (mut h, _) = control::connect(t, server, &keys, &srv, eph).expect("noise");
 
     let mut tries = 0;
     loop {
@@ -68,26 +99,59 @@ fn main() {
         if tries > 180 || std::env::var("TS_NOWAIT").is_ok() {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        std::thread::sleep(Duration::from_secs(10));
     }
+
+    let mut node = Node::new(keys.node.clone(), &mut OsRng);
     let mut m = control::map(&mut h, &keys, hostname, 0, &[]).expect("map");
-    let mut nm = NetMap::default();
-    for i in 0..3 {
-        let json = m.next(&mut h).expect("map response");
-        let len = json.len();
-        let r = nm.apply_json(json).expect("map json");
-        println!(
-            "map {i}: {len} bytes, keepalive={}, self={:?}, peers={}, derp regions={}, home={:?}",
-            r.keep_alive,
-            nm.self_ipv4(),
-            nm.peers.len(),
-            nm.derp.regions.len(),
-            nm.home_derp().map(|(r, n)| (r.region_id, n.host_name.clone()))
-        );
-        if i == 0 {
-            for p in &nm.peers {
-                println!("  peer {:?} region {} endpoints {}", p.ipv4(), p.home_region(), p.endpoints.len());
+    let json = m.next(&mut h).expect("first map response");
+    let len = json.len();
+    node.apply_map(json).expect("map json");
+    let (region, host, port) = {
+        let (r, n) = node.netmap.home_derp().expect("no derp");
+        (r.region_id, n.host_name.clone(), if n.derp_port == 0 { 443 } else { n.derp_port })
+    };
+    println!("map: {len} bytes, self {:?}, peers {}, home derp {region} {host}", node.netmap.self_ipv4(), node.netmap.peers.len());
+
+    let (t, derp_tcp) = tls_open(&host, port);
+    let mut nonce = [0u8; 24];
+    OsRng.fill_bytes(&mut nonce);
+    let mut derp = Derp::connect(t, &host, &keys.node, nonce).expect("derp");
+    println!("derp: connected to {host}");
+    control::update(&mut h, &keys, hostname, region, &[]).expect("update");
+
+    let mut shown = node.stats;
+    while now_ms() < seconds * 1000 {
+        let mut busy = false;
+        if m.ready() || h.buffered() || waiting(&ctl_tcp) {
+            busy = true;
+            if m.poll(&mut h).expect("map stream") {
+                let json = m.take();
+                let r = node.apply_map(json).expect("map json");
+                if !r.keep_alive {
+                    println!("map update: peers {}", node.netmap.peers.len());
+                }
             }
+        }
+        if derp.buffered() || waiting(&derp_tcp) {
+            busy = true;
+            let packet = match derp.read().expect("derp read") {
+                Frame::Packet { src, data } => Some((src, data.to_vec())),
+                _ => None,
+            };
+            if let Some((src, data)) = packet {
+                if let Some(back) = node.from_derp(&src, &data, &mut OsRng, now_ms()) {
+                    derp.send(&src, &back).expect("derp send");
+                }
+            }
+        }
+        let s = node.stats;
+        if (s.handshakes, s.echo_replies, s.dropped, s.disco) != (shown.handshakes, shown.echo_replies, shown.dropped, shown.disco) {
+            println!("stats {s:?} last drop {:?}", node.last_drop);
+            shown = s;
+        }
+        if !busy {
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 }

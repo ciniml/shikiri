@@ -12,11 +12,27 @@
 extern crate alloc;
 
 pub mod control;
+pub mod derp;
 pub mod h2;
+pub mod ip;
 pub mod keys;
 pub mod netmap;
+pub mod node;
 pub mod noise;
+pub mod stream;
 pub mod tls;
+pub mod wg;
+
+/// A stream that can tell whether bytes it read are still waiting.
+pub trait Ready {
+    fn buffered(&self) -> bool;
+}
+
+impl<S> Ready for stream::Buffered<S> {
+    fn buffered(&self) -> bool {
+        stream::Buffered::buffered(self)
+    }
+}
 
 /// What went wrong, with the step for the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -16,3 +16,4 @@ embedded-tls = { version = "0.19", default-features = false, features = ["rustpk
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+crypto_box = { version = "0.9", default-features = false, features = ["salsa20"] }

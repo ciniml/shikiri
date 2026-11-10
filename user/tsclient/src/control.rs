@@ -72,6 +72,11 @@ fn http_head<S: embedded_io::Read>(s: &mut S) -> Result<(u16, Framing)> {
     }
 }
 
+/// An HTTP/1.1 response's status, its headers skipped (an upgrade's).
+pub(crate) fn http_status<S: embedded_io::Read>(s: &mut S) -> Result<u16> {
+    http_head(s).map(|(status, _)| status)
+}
+
 /// A whole body of at most `max` bytes.
 fn http_body<S: embedded_io::Read>(s: &mut S, framing: Framing, max: usize) -> Result<Vec<u8>> {
     let mut body = Vec::new();
@@ -239,6 +244,8 @@ pub struct MapStream {
     pub sid: u32,
     buf: Vec<u8>,
     status: u16,
+    /// The first response in `buf` was handed out.
+    taken: bool,
 }
 
 /// Starts the map stream. `endpoints` are this node's UDP endpoints
@@ -264,45 +271,91 @@ pub fn map<S: embedded_io::Read + embedded_io::Write>(
     });
     let body = serde_json::to_vec(&req).map_err(|_| Error::Json)?;
     let sid = h.post("/machine/map", &body)?;
-    Ok(MapStream { sid, buf: Vec::new(), status: 0 })
+    Ok(MapStream { sid, buf: Vec::new(), status: 0, taken: false })
+}
+
+/// Tells the control server this node's home DERP region and endpoints
+/// on a stream of its own (`Stream: false`, `OmitPeers: true`: a "lite"
+/// update, as the Go client sends when Hostinfo changes). Its response is
+/// left unread: `MapStream` skips other streams' frames.
+pub fn update<S: embedded_io::Read + embedded_io::Write>(
+    h: &mut H2<S>,
+    keys: &Keys,
+    hostname: &str,
+    derp: i32,
+    endpoints: &[String],
+) -> Result<u32> {
+    let req = json!({
+        "Version": VERSION,
+        "NodeKey": keys::to_hex("nodekey:", &keys.node.public),
+        "DiscoKey": keys::to_hex("discokey:", &keys.disco.public),
+        "Stream": false,
+        "OmitPeers": true,
+        "Compress": "",
+        "Hostinfo": hostinfo(hostname, derp),
+        "Endpoints": endpoints,
+    });
+    let body = serde_json::to_vec(&req).map_err(|_| Error::Json)?;
+    h.post("/machine/map", &body)
 }
 
 impl MapStream {
-    /// The next response's JSON (keep-alives included).
+    /// The next response's JSON (keep-alives included), waiting for it.
     pub fn next<'a, S: embedded_io::Read + embedded_io::Write>(&'a mut self, h: &mut H2<S>) -> Result<&'a [u8]> {
-        // Drop the response handed out last time.
-        if let Some(n) = self.whole() {
-            self.buf.drain(..4 + n);
-        }
         loop {
-            if let Some(n) = self.whole() {
-                return Ok(&self.buf[4..4 + n]);
-            }
-            match h.next()? {
-                Event::Headers { sid, status, end } if sid == self.sid => {
-                    if self.status == 0 {
-                        self.status = status;
-                    }
-                    if self.status != 200 {
-                        return Err(Error::Http(self.status));
-                    }
-                    if end {
-                        return Err(Error::Io);
-                    }
-                }
-                Event::Data { sid, end } if sid == self.sid => {
-                    self.buf.extend_from_slice(h.data());
-                    if self.buf.len() >= 4 && self.len() > MAP_MAX {
-                        return Err(Error::Size);
-                    }
-                    if end && self.whole().is_none() {
-                        return Err(Error::Io);
-                    }
-                }
-                Event::Reset { sid } if sid == self.sid => return Err(Error::Proto("map reset")),
-                _ => {}
+            if self.poll(h)? {
+                return Ok(self.take());
             }
         }
+    }
+
+    /// A whole response is waiting (`take` it).
+    pub fn ready(&self) -> bool {
+        self.whole().is_some() && !self.taken
+    }
+
+    /// The waiting response's JSON; the next `poll` drops it.
+    pub fn take(&mut self) -> &[u8] {
+        let n = self.whole().unwrap();
+        self.taken = true;
+        &self.buf[4..4 + n]
+    }
+
+    /// Reads at most one frame; whether a whole response is waiting.
+    pub fn poll<S: embedded_io::Read + embedded_io::Write>(&mut self, h: &mut H2<S>) -> Result<bool> {
+        if self.taken {
+            let n = self.whole().unwrap();
+            self.buf.drain(..4 + n);
+            self.taken = false;
+        }
+        if self.whole().is_some() {
+            return Ok(true);
+        }
+        match h.step()? {
+            Some(Event::Headers { sid, status, end }) if sid == self.sid => {
+                if self.status == 0 {
+                    self.status = status;
+                }
+                if self.status != 200 {
+                    return Err(Error::Http(self.status));
+                }
+                if end {
+                    return Err(Error::Io);
+                }
+            }
+            Some(Event::Data { sid, end }) if sid == self.sid => {
+                self.buf.extend_from_slice(h.data());
+                if self.buf.len() >= 4 && self.len() > MAP_MAX {
+                    return Err(Error::Size);
+                }
+                if end && self.whole().is_none() {
+                    return Err(Error::Io);
+                }
+            }
+            Some(Event::Reset { sid }) if sid == self.sid => return Err(Error::Proto("map reset")),
+            _ => {}
+        }
+        Ok(self.whole().is_some())
     }
 
     fn len(&self) -> usize {
