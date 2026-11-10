@@ -6,24 +6,25 @@
 //! rings go where `main` puts them (the L2MEM the apps left for PSRAM). The
 //! stream starts at boot and plays silence while nothing is pushed (the TX
 //! ring starts silent; kumiki clears each played descriptor when polled).
-//! The DMA's interrupt (every descriptor sent or closed, CPU line 8; `on_irq`
-//! does kumiki's bookkeeping) is routed but stays off until something uses
-//! the stream (stage A2): about 1,100 a second through the kernel's trap
-//! path for nothing slowed the 40 MHz emulator enough to make Matter's
-//! start lose its race (p4emu-run-26).
+//! The DMA's interrupt (every `DESCS_PER_EOF` TX descriptors, about 94 a
+//! second, CPU line 8; `on_irq` does kumiki's bookkeeping for both
+//! directions) is routed but stays off until something uses the stream
+//! (stage A2): with an interrupt per descriptor (1,100 a second) the 40 MHz
+//! emulator slowed enough to make Matter's start lose its race
+//! (p4emu-run-26).
 //!
-//! kumiki's bookkeeping needs a poll at least once per turn of the TX ring
-//! (85 ms): it counts the descriptors done from the DMA's EOF address, so
-//! a longer gap loses whole turns, and it then clears and fills the wrong
-//! descriptors (the last turn repeats). The kernel can be held that long:
-//! loading a large app checks its signature with the lock held (140 ms on
-//! the Tab5 for a 470 KB one). `fresh` restarts the stream instead (rings
-//! rebuilt silent) when a gap passed 3/4 of a turn: a short dropout.
+//! kumiki counts the TX descriptors done from the DMA's EOF address and the
+//! time since `start` (kumiki 64b1f43), so a late poll loses nothing: the
+//! kernel can be held for a while (loading a large app checks its signature
+//! with the lock held, 140 ms on the Tab5 for a 470 KB one). Past a turn of
+//! the TX ring (85 ms) what was pushed plays again until the next poll,
+//! which silences the ring (`laps_lost`). RX must be read within its ring
+//! (43 ms) or kumiki skips to the oldest data left (`rx_overruns`).
 //!
 //! A reset leaves the stream's DMA running (a SoC reset does not stop the
-//! AHB-GDMA): `stop` before a software reset, and at boot for a reset that
-//! did not go through it (a debug probe's), as the display does (doc/70
-//! §9.3).
+//! AHB-GDMA): `stop` (kumiki's `halt_stale`) before a software reset, and
+//! at boot for a reset that did not go through it (a debug probe's), as the
+//! display does (doc/70 §9.3).
 //!
 //! Stage A1 without the codecs: the ES8388 and ES7210 (kumiki's crate, to
 //! come) are set up here before the display, then SPK_EN.
@@ -31,8 +32,7 @@
 use kumiki_p4v1_hal::{ahb_dma, gpio::AnyPin, i2s};
 
 use super::psram::{clear_bits, set_bits};
-use super::{Esp32p4v1, rd, wr};
-use crate::platform::Platform;
+use super::{rd, wr};
 use t5_abi::event;
 
 /// CPU line 8: 1 timer, 2 display, 3 console, 4 SDIO, 5 the other core, 6
@@ -64,6 +64,9 @@ const WINDOW: core::ops::Range<usize> = 0x4000_0000..0x4FFC_0000;
 /// ES7210; kumiki's tab5.dts).
 const PINS: [u8; 5] = [30, 27, 29, 26, 28];
 const SAMPLE_RATE: u32 = 48_000;
+/// TX descriptors per interrupt (kumiki allows up to 8, the RX ring's 43
+/// ms): 4 is 21 ms.
+const DESCS_PER_EOF: usize = 4;
 /// kumiki's default channel; nothing else in the kernel uses this block.
 const DMA_CHANNEL: usize = 0;
 
@@ -72,16 +75,6 @@ pub const RING_BYTES: usize = core::mem::size_of::<i2s::DmaMem>();
 
 static mut I2S: Option<i2s::I2s> = None;
 static mut IRQS: u32 = 0;
-/// When kumiki last polled (ticks); whether sound was pushed since the
-/// stream (re)started; the restarts after gaps with sound in the ring
-/// (after an idle gap the ring is silent and a restart only resyncs).
-static mut LAST_POLL: u64 = 0;
-static mut PUSHED: bool = false;
-/// The DMA's interrupt is wanted on (`start` turns it off).
-static mut IRQ_ON: bool = false;
-static mut RESTARTS: u32 = 0;
-/// 3/4 of a turn of the TX ring at 48 kHz (64 ms), in 16 MHz ticks.
-const GAP_MAX: u64 = 64_000 * 16;
 
 /// Sets up the AHB-GDMA and I2S0 with the rings at `area` (L2MEM, 64-byte
 /// aligned, `RING_BYTES` long) and starts the stream. Once, at boot.
@@ -104,7 +97,7 @@ pub fn init(area: usize) -> Result<(), &'static str> {
     let p = kumiki_p4v1_hal::take().ok_or("i2s taken")?;
     let pin = |n: u8| unsafe { AnyPin::steal(n) }.ok_or("i2s pin");
     let pins = i2s::Pins { mclk: pin(PINS[0])?, bclk: pin(PINS[1])?, ws: pin(PINS[2])?, dout: pin(PINS[3])?, din: pin(PINS[4])? };
-    let config = i2s::Config { sample_rate: SAMPLE_RATE, dma_channel: DMA_CHANNEL, ..Default::default() };
+    let config = i2s::Config { sample_rate: SAMPLE_RATE, dma_channel: DMA_CHANNEL, descs_per_eof: DESCS_PER_EOF };
     // SAFETY: `area` is L2MEM nothing else uses (main.rs), checked above.
     let mem = unsafe { &mut *(area as *mut i2s::DmaMem) };
     let mut s = i2s::I2s::new_in(p.i2s0, pins, config, mem).map_err(|_| "i2s setup")?;
@@ -115,7 +108,6 @@ pub fn init(area: usize) -> Result<(), &'static str> {
         wr(CLIC_CTRL_BASE + 4 * IRQ, CLIC_CTRL);
     }
     s.start();
-    unsafe { LAST_POLL = Esp32p4v1::now() };
     event!(
         Info,
         "audio.started",
@@ -129,21 +121,14 @@ pub fn init(area: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Stops the stream (I2S0 and both DMA channels) and resets the AHB-GDMA:
-/// before a software reset, and at boot before L2MEM and PSRAM are used,
-/// for a reset that left it writing the RX ring and reading the TX ring.
-/// Returns whether channel 0 served a peripheral (at boot: a previous
-/// boot's stream).
+/// Stops the stream (kumiki's `halt_stale`: I2S0 and every AHB-GDMA
+/// channel): before a software reset, and at boot before L2MEM and PSRAM
+/// are used, for a reset that left it writing the RX ring and reading the
+/// TX ring. Returns whether channel 0 served a peripheral (at boot: a
+/// previous boot's stream).
 pub fn stop() -> bool {
-    if let Some(s) = stream() {
-        s.stop();
-    }
-    if unsafe { rd(SOC_CLK_CTRL1) } & AHB_PDMA_SYS_CLK_EN == 0 {
-        return false;
-    }
-    let used = unsafe { rd(OUT0_PERI_SEL) } & PERI_NONE != PERI_NONE;
-    set_bits(HP_RST_EN1, RST_EN_AHB_PDMA);
-    clear_bits(HP_RST_EN1, RST_EN_AHB_PDMA);
+    let used = unsafe { rd(SOC_CLK_CTRL1) } & AHB_PDMA_SYS_CLK_EN != 0 && unsafe { rd(OUT0_PERI_SEL) } & PERI_NONE != PERI_NONE;
+    i2s::halt_stale();
     used
 }
 
@@ -151,46 +136,20 @@ fn stream() -> Option<&'static mut i2s::I2s> {
     unsafe { (*core::ptr::addr_of_mut!(I2S)).as_mut() }
 }
 
-/// The stream, restarted if kumiki was not polled for too long (see the
-/// top); every caller polls it next.
-fn fresh() -> Option<&'static mut i2s::I2s> {
-    let s = stream()?;
-    let now = Esp32p4v1::now();
-    let gap = now.saturating_sub(unsafe { LAST_POLL });
-    unsafe { LAST_POLL = now };
-    if gap > GAP_MAX && s.is_running() {
-        s.start();
-        if unsafe { IRQ_ON } {
-            s.set_interrupts(true);
-        }
-        let pushed = unsafe { PUSHED };
-        unsafe { PUSHED = false };
-        if pushed {
-            unsafe { RESTARTS += 1 };
-            event!(Debug, "audio.restart", gap_us = (gap / 16).min(u32::MAX as u64) as u32);
-        }
-    }
-    Some(s)
-}
-
 pub fn rate() -> u32 {
     stream().map_or(0, |s| s.config().sample_rate)
 }
 
 pub fn space() -> usize {
-    fresh().map_or(0, |s| s.tx_space())
+    stream().map_or(0, |s| s.tx_space())
 }
 
 pub fn push(data: &[u8]) -> usize {
-    let n = fresh().map_or(0, |s| s.push(data));
-    if n > 0 {
-        unsafe { PUSHED = true };
-    }
-    n
+    stream().map_or(0, |s| s.push(data))
 }
 
 pub fn pop(out: &mut [u8]) -> usize {
-    fresh().map_or(0, |s| s.pop(out))
+    stream().map_or(0, |s| s.pop(out))
 }
 
 /// The DMA's interrupt on while someone uses the stream (see the top).
@@ -199,23 +158,19 @@ pub fn pop(out: &mut [u8]) -> usize {
 pub fn interrupts(on: bool) {
     if let Some(s) = stream() {
         s.set_interrupts(on);
-        unsafe { IRQ_ON = on };
-        if !on {
-            unsafe { PUSHED = false };
-        }
     }
 }
 
 /// What the interrupt does, from the scheduler loop.
 pub fn service() {
-    if let Some(s) = fresh() {
+    if let Some(s) = stream() {
         s.on_interrupt();
     }
 }
 
 /// The DMA's interrupt: kumiki clears it and moves the rings on.
 pub fn on_irq() {
-    if let Some(s) = fresh() {
+    if let Some(s) = stream() {
         s.on_interrupt();
         unsafe { IRQS = IRQS.wrapping_add(1) };
     }
@@ -224,10 +179,10 @@ pub fn on_irq() {
 /// Logs the stream's counters (after a poll: with the interrupt off,
 /// `tx_descs` misses whole turns of the ring between polls).
 pub fn log_stats() -> Result<u32, &'static str> {
-    let s = fresh().ok_or("no audio")?;
+    let s = stream().ok_or("no audio")?;
     s.poll();
     let st = s.stats();
-    let (irqs, restarts) = unsafe { (IRQS, RESTARTS) };
+    let irqs = unsafe { IRQS };
     event!(
         Info,
         "audio.stats",
@@ -235,7 +190,7 @@ pub fn log_stats() -> Result<u32, &'static str> {
         tx_descs = st.tx_descs_done as u32,
         tx_underruns = st.tx_underruns,
         rx_overruns = st.rx_overruns,
-        restarts = restarts
+        laps_lost = st.tx_laps_lost
     );
     Ok(irqs)
 }

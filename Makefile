@@ -931,9 +931,10 @@ p4emu-run-44:
 	@# it at a quarter of full scale) while `mic` reads audio:in (the
 	@# emulator's 440 Hz tone at 4096: peak about 4096, RMS about 2896).
 	@# `mic` starts once `beep` plays: loading it holds the kernel ~170 ms
-	@# (the signature at 40 MHz), longer than the rings last: the stream is
-	@# restarted once (restarts=1), a dropout of about 90 ms in the 1.5 s
-	@# tone (at most 1700 ms: a ring left unpolled would repeat forever).
+	@# (the signature at 40 MHz), longer than the TX ring lasts: what was
+	@# pushed plays again until the next poll silences the ring (laps_lost,
+	@# kumiki 64b1f43), so the 1.5 s tone stays under 1700 ms (a ring left
+	@# unpolled for good would repeat forever).
 	$(T5EMU) --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
 	    --audio-out $(BUILD)/emu-beep.wav --ctl "run beep 1000 1500" --ctl "wait-ms 300" --ctl "run mic 500" --ctl "wait-ms 3000" --ctl audio \
 	    --expect-event beep.start --expect-event beep.done --expect-event mic.level --expect-event mic.done \
@@ -942,7 +943,7 @@ p4emu-run-44:
 	grep -q "audio.dac_again es8388=ok" $(BUILD)/emu-beep.txt
 	grep -Eq "mic.level n=2 peak=40[0-9][0-9] rms=28[0-9][0-9]" $(BUILD)/emu-beep.txt
 	grep -Eq "mic.done frames=24[0-9]{3} lost=0" $(BUILD)/emu-beep.txt
-	grep -Eq "audio.stats .* restarts=1$$" $(BUILD)/emu-beep.txt
+	grep -Eq "audio.stats .* laps_lost=[1-9]$$" $(BUILD)/emu-beep.txt
 	tools/wavcheck.py $(BUILD)/emu-beep.wav 1000 8000 1700
 
 clean:
