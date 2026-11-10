@@ -1,0 +1,12 @@
+[package]
+name = "tsprobe"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Tries tsclient (doc/71) against a control server from the host"
+
+[dependencies]
+tsclient = { path = "../../user/tsclient" }
+embedded-tls = { version = "0.19", default-features = false, features = ["rustpki", "p384", "rsa"] }
+embedded-io-adapters = { version = "0.7", features = ["std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }

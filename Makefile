@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu beep mic codecdiag spkcheck
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu beep mic codecdiag spkcheck ts
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -46,6 +46,10 @@ PERMIT_codecdiag := --permit i2c:int/0x10 --permit i2c:int/0x43 --permit audio:v
 PERMIT_beep   := --permit audio:out
 PERMIT_mic    := --permit audio:in
 PERMIT_spkcheck := --permit audio:out --permit audio:in
+# Tailscale (doc/71): the control server over TLS; its keys and the auth
+# key are secret settings (strong: the system key).
+PERMIT_ts := --permit svc:net/tcp-connect --permit svc:net/resolve --permit random \
+             --permit svc:cfg/r:ts. --permit svc:cfg/w:ts. --permit svc:cfg/secret:ts. --stack 262144
 PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
@@ -70,7 +74,13 @@ XIP_APPS   := hello xipcheck spin font
 XIP_TARGET := user/target/xip/riscv32imafc-unknown-none-elf/release
 XIP_RUSTFLAGS := -C relocation-model=pie -C link-arg=-pie -C link-arg=--no-dynamic-linker \
                  -C link-arg=-z -C link-arg=text -C link-arg=-Tt5app-xip.ld
-APP_ELFS   := $(addprefix $(APP_TARGET)/,$(APPS)) $(XIP_TARGET)/xipcheck $(XIP_TARGET)/font
+# Apps with a heap (doc/71): built on their own so that the features they
+# turn on (`alloc` in zeroize and the like) do not reach the other apps,
+# which have no allocator.
+HEAP_APPS   := ts
+HEAP_TARGET := user/target/heap/riscv32imafc-unknown-none-elf/release
+ELF_OF      = $(if $(filter $(1),$(HEAP_APPS)),$(HEAP_TARGET),$(APP_TARGET))/$(1)
+APP_ELFS   := $(foreach a,$(APPS),$(call ELF_OF,$(a))) $(XIP_TARGET)/xipcheck $(XIP_TARGET)/font
 # All log schemas (doc/12): every event! call site in the kernel and the apps.
 SCHEMAS    := $(BUILD)/t5log.schemas
 
@@ -123,7 +133,7 @@ APP_KEY       ?= $(HOME)/.config/tab5-os/app-ed25519.key
 APP_PUB       := keys/app-ed25519.pub
 # Signed with the system key (DEV_KEY): the services and the apps that need
 # strong permissions. The rest get APP_KEY.
-SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota ota mic codecdiag spkcheck
+SYSTEM_APPS   := fs net wifi netctl init term shell ble matter cfg font echo keylog hcitest mtbench c6ota ota mic codecdiag spkcheck ts
 KEY_OF         = $(if $(filter $(1),$(SYSTEM_APPS)),$(DEV_KEY),$(APP_KEY))
 # A key the kernel does not trust, for the rejection test. Not a secret.
 UNTRUSTED_KEY := $(BUILD)/keys/untrusted.key
@@ -140,10 +150,11 @@ $(UNTRUSTED_KEY): | tools
 
 apps: tools $(UNTRUSTED_KEY)
 	@test -f $(DEV_KEY) -a -f $(APP_KEY) || { echo "no signing key $(DEV_KEY) or $(APP_KEY): run make keys"; exit 1; }
-	cd user && cargo build --release
+	cd user && cargo build --release --workspace $(addprefix --exclude ,$(HEAP_APPS) tsclient)
 	cd user && RUSTFLAGS="$(XIP_RUSTFLAGS)" cargo build --release --target-dir target/xip $(addprefix -p ,$(XIP_APPS))
+	cd user && cargo build --release --target-dir target/heap $(addprefix -p ,$(HEAP_APPS))
 	mkdir -p $(APPS_DIR)
-	$(foreach a,$(APPS),$(ELF2T5A) build $(APP_TARGET)/$(a) $(APPS_DIR)/$(a).t5a --key $(call KEY_OF,$(a)) $(PERMIT_$(a)) $(NEEDS_$(a)) &&) true
+	$(foreach a,$(APPS),$(ELF2T5A) build $(call ELF_OF,$(a)) $(APPS_DIR)/$(a).t5a --key $(call KEY_OF,$(a)) $(PERMIT_$(a)) $(NEEDS_$(a)) &&) true
 	@# Images the kernel must reject (self-test, doc/14 §1.4).
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/hello-untrusted.t5a --key $(UNTRUSTED_KEY) \
 	    --name hello-untrusted
@@ -162,7 +173,9 @@ apps: tools $(UNTRUSTED_KEY)
 	$(ELF2T5A) build $(APP_TARGET)/hello $(APPS_DIR)/greeter-0.2.t5a --key $(APP_KEY) --name greeter --version 0.2.0
 	$(ELF2T5A) build $(APP_TARGET)/fault $(APPS_DIR)/greeter-bad.t5a --key $(APP_KEY) --name greeter --version 0.3.0
 	$(ELF2T5A) build $(XIP_TARGET)/spin $(APPS_DIR)/spin-xip-0.2.t5a --key $(APP_KEY) --name spin-xip --version 0.2.0
-	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(APPS) hello-untrusted hello-badabi hello-strong hello-xip xipcheck font))
+	@# Not the heap apps: ts (doc/71, 0.5 MB) would leave too few free
+	@# extents for p4emu-run-35's spread store.
+	$(T5STORE) build -o $(STORE_DIR) $(addprefix $(APPS_DIR)/,$(addsuffix .t5a,$(filter-out $(HEAP_APPS),$(APPS)) hello-untrusted hello-badabi hello-strong hello-xip xipcheck font))
 
 # The services started at boot on the Tab5 (doc/30 §5): the same apps with
 # the autostart flag, installed over RTT by `make install-auto`. The store

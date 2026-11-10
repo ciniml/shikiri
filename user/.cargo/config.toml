@@ -2,7 +2,7 @@
 target = "riscv32imafc-unknown-none-elf"
 
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]
 
 [target.riscv32imafc-unknown-none-elf]
 rustflags = [

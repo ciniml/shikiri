@@ -1,4 +1,4 @@
-# 71. Tailscale のクライアント（検討）
+# 71. Tailscale のクライアント（検討と実装）
 
 利用者の依頼（2026-11-10）: tab5-os に Tailscale のクライアントを入れられるかを調べ、設計と段取りを考える。この文書は調査と設計だけ。コード、実機、ホストの網の設定には触れていない。
 
@@ -267,3 +267,54 @@ tailscale-rs の crate（a2a56c4 で確認）:
 7. **依存の取り方**: tailscale-rs の一部（`ts_keys`、`ts_disco_protocol`、`ts_noise`、`ts_tunnel`）を third_party に置いて直すか、読んで自分で書くか。ライセンスはどれも BSD-3-Clause で、プロジェクト（MIT OR Apache-2.0）と組み合わせられる。
 8. **秘密の置き場**: node key を SD の平文に置いてよいか（Wi-Fi の passphrase と同じ扱い）。
 9. **試験の相手**: ホストに headscale と Tailscale のクライアントを入れて相互接続を試してよいか（今回は入れていない）。実機の試験は今までどおり確認の後に行う。
+
+## 9. 実装: 段 T1（2026-11-11）
+利用者の指示（2026-11-11）: 「tab5_ssh_client に ESP32 向けの実装があるので、これを参考に実装してください」。その名のリポジトリはこの PC になく、Tab5 向けの Tailscale のクライアント（C、約 6,000 行）を持つ `~/repos/tab5_claude_client`（remote は portable_terminal）の `components/tailscale` を参考にした。§8 の問いは参考の実装の選び方に合わせた。
+- 制御サーバは既定で tailscale.com（`ts.server` で headscale にも変えられる）。
+- 登録は auth key（`ts.authkey`）。なければ login の URL を出す。
+- 制御サーバにも DERP にも TLS を使い、証明書は確かめる（参考は ESP-IDF の証明書の束）。
+- 直の経路（disco）は後の段で。参考も持つ。
+
+### 9.1 作ったもの
+- `user/tsclient`（no_std と alloc、I/O を持たない）:
+  - `keys`: machine、node、disco の鍵。`nodekey:` と 16 進。
+  - `noise`: ts2021 の IK とレコード（参考の `tailscale_noise.c` と同じ手順）。
+  - `h2`: HTTP/2 の最小のクライアント。
+  - `control`: `/key`、`/ts2021` の Upgrade、`/machine/register`、`/machine/map` の流れ。
+  - `netmap`: serde で必要な欄だけ。`Peers`、`PeersChanged`、`PeersRemoved`、`DERPMap`。
+  - `tls`: embedded-tls に ISRG Root X2 を渡す。
+- 参考と変えたところ:
+  - Noise を「レコードの列」ではなくバイトの流れとして扱う。1 つのレコードの平文は最大 4077 バイト（Go の controlbase と同じ）。参考は HTTP/2 のフレーム 1 つを 1 レコードに入れ、4096 バイトの上限を超えうる。
+  - HTTP/2 の受けの窓を 16 MiB に広げ、読んだ分を WINDOW_UPDATE で返す。参考は窓を 64 KiB のまま返さないので、流れる map が 64 KiB を超えると止まる（推測。参考の利用者の tailnet が小さかったので出なかったのだろう）。
+  - 受けるフレームは 16 KiB まで（HTTP/2 の既定）。参考は 4 KiB を超えると切る。
+- `third_party/embedded-tls-0.19.0`（`src/pki.rs`）:
+  - 証明書の連なりを、信頼する根が署名した最後の証明書から確かめる。Let's Encrypt の ECDSA の連なりは X2 の後ろに「X1 が署名した X2」（RSA）を付け、Tailscale の DERP はさらに自己署名の ed25519 の証明書を付ける。元のままでは末尾から確かめて落ちる（2026-11-11 に `openssl s_client` で確認）。
+  - 信頼する根を複数持てるようにした（`with_more_roots`）。同じ日のうちに、Tailscale のサーバ（制御も DERP も）が ECDSA の連なり（ISRG Root X2 へ）から RSA の連なり（ISRG Root X1 へ）に変わった。RSA の連なりのとき、ECDSA だけを申し出るとサーバは握手を断る（HandshakeFailure）。それで embedded-tls の `rsa` 機能を入れ、X1 と X2 の両方を信頼する。
+  - 時計がないので、有効期限は見ない。
+- `user/apps/ts`（system の鍵、`svc:net/tcp-connect`、`svc:net/resolve`、`random`、`svc:cfg/r|w|secret:ts.`）:
+  - 1 MiB のヒープ（linked_list_allocator）とスタック 256 KiB。プロセスは全部で 2 MiB まで（4 MiB のヒープはローダに断られた）。スタックが 64 KiB のときは、TLS の握手（RSA の確かめを含む）がスタックを越えてヒープを壊し、アロケータの中で load access fault になった。
+  - 乱数は kernel の `random` で種を付けた ChaCha20。
+  - 鍵は初回に作り、秘密の設定 `ts.keys` に置く。
+  - 失敗したら 30 秒後にやり直す。
+  - イベント: `ts.start`、`ts.server_key`、`ts.noise`、`ts.registered`、`ts.login`（URL）、`ts.map`（自分のアドレス、相手の数、DERP の領域の数、home）、`ts.failed`。
+  - .text は 470 KB ほど（RSA を入れて約 60 KB 増えた）。像は 515 KB。
+  - アプリが alloc を使うので、`user/.cargo/config.toml` の build-std に `alloc` を足した。
+  - `ts` は別の cargo の呼び出しで作る（`HEAP_APPS`、`target/heap`）。同じ呼び出しで作ると、`rsa` が入れる `zeroize/alloc` などの機能がほかのアプリにも及び、アロケータのない `cfg` がリンクできなかった。
+  - エミュレータのストアの像には入れない。0.5 MB を入れると、p4emu-run-35 の散らしたストアに空きが足りなくなった。
+- `tools/tsprobe`: 同じ `tsclient` を、ホストの TCP と embedded-tls で制御サーバに向ける試験の道具。
+- 試験: `cargo test -p tsclient`（ホスト、8 つ）。
+  - Noise の IK を、試験の中に書いた応答側と突き合わせる。サーバ鍵が違えば落ちる。
+  - RFC 7748 のベクタ、base64、HPACK の整数と `:status`、netmap の差分の当て方、HTTP/1.1 の本文（長さ、chunked、閉じるまで）。
+
+### 9.2 本物の制御サーバで（2026-11-11）
+- 利用者の tailnet は Tailnet Lock が有効。新しい node は、登録の URL でログインした後、署名できる端末で `tailscale lock sign nodekey:…` が要る。`ts.start` は node key を出す。
+- ホスト（`tsprobe`）: TLS、`/key`、Noise、HTTP/2、register（login の URL）。承認と署名の後は `authorized=true`。最初の map は 32,643 バイトで、自分の 100.x のアドレス、相手 11、DERP の領域 28（home は 1、derp1j）。その後は KeepAlive（18 バイト）。
+- Tab5（`run ts`）:
+  - TLS の握手（RSA の連なり）と `/key` は約 1.4 秒、Noise と HTTP/2 はさらに約 1.6 秒。
+  - 承認と署名の後、最初の map は 33,900 バイトで、相手 12、領域 28。差分（1,302 バイト）も当たった。
+  - 待つ間の CPU は 4‰（`Net::recv` が 1 ms ごとに見に行く）。
+- まだ:
+  - 相手の node key の Tailnet Lock の署名を確かめていない。今は制御サーバが渡す相手をそのまま信じる。
+  - エミュレータの試験（偽の制御サーバ）は T2 と合わせて作る。
+  - `Net::recv` は 1 ms ごとに見に行く形で、map を待つ間も CPU を少し使う。
+

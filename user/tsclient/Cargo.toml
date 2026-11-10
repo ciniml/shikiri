@@ -1,0 +1,18 @@
+[package]
+name = "tsclient"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A Tailscale client's protocols without I/O (doc/71): Noise IK, HTTP/2, the control requests, the netmap"
+
+[dependencies]
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = { version = "0.10", default-features = false }
+blake2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+embedded-io = "0.7"
+embedded-tls = { version = "0.19", default-features = false, features = ["rustpki", "p384", "rsa"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
