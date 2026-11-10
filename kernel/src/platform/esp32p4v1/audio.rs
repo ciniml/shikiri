@@ -104,7 +104,7 @@ pub fn init(area: usize) -> Result<(), &'static str> {
     let p = kumiki_p4v1_hal::take().ok_or("i2s taken")?;
     let pin = |n: u8| unsafe { AnyPin::steal(n) }.ok_or("i2s pin");
     let pins = i2s::Pins { mclk: pin(PINS[0])?, bclk: pin(PINS[1])?, ws: pin(PINS[2])?, dout: pin(PINS[3])?, din: pin(PINS[4])? };
-    let config = i2s::Config { sample_rate: SAMPLE_RATE, dma_channel: DMA_CHANNEL };
+    let config = i2s::Config { sample_rate: SAMPLE_RATE, dma_channel: DMA_CHANNEL, ..Default::default() };
     // SAFETY: `area` is L2MEM nothing else uses (main.rs), checked above.
     let mem = unsafe { &mut *(area as *mut i2s::DmaMem) };
     let mut s = i2s::I2s::new_in(p.i2s0, pins, config, mem).map_err(|_| "i2s setup")?;
