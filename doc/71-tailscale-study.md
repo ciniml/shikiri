@@ -371,3 +371,17 @@ tailscale-rs の crate（a2a56c4 で確認）:
 - Tab5: `ts.netcheck regions=28 answered=27 best=7 ms=17`。DERP は derp7g（tok）につながった。ホストから Tab5 への ping は 10 回中 10 回返った（往復 18〜98 ms、平均 32 ms。nyc 経由では平均 361 ms）。
 - この試験の前に、別のセッションが Tab5 の ota_0 を ESP32-S3 のアプリで上書きしていた（04:41 JST ごろ）。`make flash-p4` で焼き直してから試した。ストアは無事（60 個）。
 - `cargo test -p tsclient` は 14（stun と netcheck を足した）。
+
+## 12. 段 T4a: ts の中の IP（smoltcp）と状態のページ（2026-11-11）
+T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3 の形 A）、tailnet の相手と TCP で話せるようにする。T4b は、ほかのアプリが使う `svc:ts` と、こちらから始める WireGuard。
+
+### 12.1 作ったもの
+- `tsclient::tun`: smoltcp 0.14（`medium-ip`、`proto-ipv4`、`socket-tcp`、`socket-udp`、`auto-icmp-echo-reply`）を、受けと送りの 2 つの列の device に載せる。アドレスは自分の 100.x を /10（100.64.0.0/10）で持つので、tailnet の相手はみなリンクの上にあり、経路は要らない。MTU は Tailscale と同じ 1280。
+- `Node`: WireGuard が開いたパケットは smoltcp の受けの列へ入れる。`Node::poll` は smoltcp を回し、smoltcp が出したパケットを宛先のアドレスで相手を選んで暗号化し、（相手の node key、メッセージ）の列を返す。呼ぶ側が DERP で送る。WireGuard の session がない相手へのパケットは捨てる（`no session to destination`。こちらから握手を始めるのは T4b）。ping は smoltcp が自分で答える（`ip::echo_reply` はやめた）。統計に `packets_out`。
+- アプリ `ts`: TCP 80 番で状態のページ（text/plain: ホスト名、tailnet のアドレス、DERP、動いた時間、統計、相手の名前と home の DERP と online）。一度に 1 本、要求の頭（空行まで、2 KiB まで）を受けたら返して閉じ、閉じ終われば聞き直す。`ts.stats` に `packets_out` と `web`。
+- `tsclient` は `smoltcp` を `pub use` する（アプリと版をそろえる）。
+
+### 12.2 確かめたこと
+- `cargo test -p tsclient`: smoltcp の試験（ping への答えと、80 番への SYN に SYN-ACK）を足した。`ip` の試験は消えたので数は 14 のまま。
+- Tab5（ts のメモリは 1.6 MB、2 MiB の内）: ホストから ping 5 回中 5 回（平均 48 ms）。`curl http://<Tab5 の 100.x>/` が続けて 6 回とも 200（418 B、1 回 55〜100 ms）。`ts.stats` は dropped=0。
+- まだ: ほかのアプリから使う口（`svc:ts`）、こちらから始める WireGuard（時刻は map の `ControlTime` から取る）、UDP、tailnet の名前の解決。

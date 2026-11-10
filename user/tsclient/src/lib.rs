@@ -14,7 +14,6 @@ extern crate alloc;
 pub mod control;
 pub mod derp;
 pub mod h2;
-pub mod ip;
 pub mod keys;
 pub mod netcheck;
 pub mod netmap;
@@ -23,7 +22,10 @@ pub mod noise;
 pub mod stream;
 pub mod stun;
 pub mod tls;
+pub mod tun;
 pub mod wg;
+
+pub use smoltcp;
 
 /// A stream that can tell whether bytes it read are still waiting.
 pub trait Ready {

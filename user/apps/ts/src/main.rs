@@ -1,10 +1,11 @@
 #![no_std]
 #![no_main]
 
-//! A Tailscale client (doc/71), stages T1 to T3: registers this node with
+//! A Tailscale client (doc/71), stages T1 to T4a: registers this node with
 //! the control server and follows its map, keeps a connection to the home
-//! DERP server (the nearest region by STUN), and answers pings to its tailnet address from the peers
-//! (WireGuard over DERP). The protocols are in `tsclient`; here are the
+//! DERP server (the nearest region by STUN), and talks IP with the peers
+//! over WireGuard through DERP (smoltcp: pings, and a status page on TCP
+//! port 80). The protocols are in `tsclient`; here are the
 //! TCP (`svc:net`), TLS (embedded-tls), the settings, the keys and the
 //! loop that serves both connections (each read only when bytes wait).
 //!
@@ -33,6 +34,8 @@ use rand_core::{RngCore, SeedableRng};
 use t5_rt::{Config, Net, event, random_fill, sleep_ms, time_ns};
 use tsclient::derp::{Derp, Frame};
 use tsclient::netcheck::Netcheck;
+use tsclient::smoltcp::iface::SocketHandle;
+use tsclient::smoltcp::socket::tcp;
 use tsclient::node::Node;
 use tsclient::stream::Buffered;
 use tsclient::{Error, control, keys::Keys, tls};
@@ -259,7 +262,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     }
 
     // The first map response: the DERP map to pick home from.
-    let mut node = Node::new(keys.node.clone(), rng);
+    let mut node = Node::new(keys.node.clone(), rng, now_ms());
     let mut m = match control::map(&mut h, keys, hostname, 0, &[]) {
         Ok(m) => m,
         Err(e) => return ("map", e),
@@ -306,6 +309,9 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
 
     let mut shown = node.stats;
     let mut idle_ms = 1;
+    let mut web = Web::new(&mut node);
+    let mut shown_web = 0;
+    let started = now_ms();
     loop {
         let mut busy = false;
         if m.ready() || h.buffered() || waiting(&net, ctl_s) {
@@ -339,8 +345,15 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 }
             }
         }
+        web.step(&mut node, |n| status(n, hostname, region, &host, started));
+        for (peer, m) in node.poll(now_ms()) {
+            busy = true;
+            if let Err(e) = derp.send(&peer, &m) {
+                return ("derp send", e);
+            }
+        }
         let s = node.stats;
-        if (s.handshakes, s.echo_replies, s.dropped) != (shown.handshakes, shown.echo_replies, shown.dropped) {
+        if (s.handshakes, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.echo_replies, shown.dropped, shown_web) {
             if node.last_drop == "unknown peer" {
                 let k = tsclient::keys::to_hex("", &node.wg.unknown);
                 event!(Warn, "ts.unknown_peer", key = &k[..16], wg_peers = node.wg.peers.len(), map_peers = node.netmap.peers.len());
@@ -351,11 +364,14 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 handshakes = s.handshakes,
                 packets = s.packets_in,
                 echo_replies = s.echo_replies,
+                packets_out = s.packets_out,
+                web = web.served,
                 disco = s.disco,
                 dropped = s.dropped,
                 last_drop = node.last_drop
             );
             shown = s;
+            shown_web = web.served;
         }
         if busy {
             idle_ms = 1;
@@ -389,6 +405,85 @@ fn netcheck(net: &Rc<RefCell<Net>>, map: &tsclient::netmap::DerpMap, rng: &mut C
     }
     let _ = net.borrow().close(s);
     nc
+}
+
+/// The status page on the tailnet: `http://<tailnet address>/`, one
+/// connection at a time (doc/71 §12).
+struct Web {
+    socket: SocketHandle,
+    request: Vec<u8>,
+    served: u32,
+}
+
+const WEB_PORT: u16 = 80;
+/// More of a request than this is not read.
+const REQUEST_MAX: usize = 2048;
+
+impl Web {
+    fn new(node: &mut Node) -> Web {
+        let s = tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 1024]), tcp::SocketBuffer::new(vec![0; 4096]));
+        let socket = node.tun.sockets.add(s);
+        Web { socket, request: Vec::new(), served: 0 }
+    }
+
+    /// Listens again once the last connection is gone; answers a whole
+    /// request head with `body` and closes.
+    fn step(&mut self, node: &mut Node, body: impl FnOnce(&Node) -> String) {
+        let s = node.tun.sockets.get_mut::<tcp::Socket>(self.socket);
+        if !s.is_open() {
+            self.request.clear();
+            let _ = s.listen(WEB_PORT);
+            return;
+        }
+        if s.can_recv() {
+            let room = REQUEST_MAX - self.request.len();
+            let _ = s.recv(|b| {
+                let n = b.len().min(room);
+                self.request.extend_from_slice(&b[..n]);
+                (b.len(), ())
+            });
+        }
+        let whole = self.request.windows(4).any(|w| w == b"\r\n\r\n") || self.request.len() == REQUEST_MAX;
+        if !whole || !s.can_send() {
+            return;
+        }
+        let body = body(node);
+        let s = node.tun.sockets.get_mut::<tcp::Socket>(self.socket);
+        let head = alloc::format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        let _ = s.send_slice(head.as_bytes());
+        let _ = s.send_slice(body.as_bytes());
+        s.close();
+        self.request.clear();
+        self.served += 1;
+    }
+}
+
+/// What the status page says.
+fn status(node: &Node, hostname: &str, region: i32, derp: &str, started: u64) -> String {
+    let ip = node.netmap.self_ipv4().unwrap_or_default();
+    let s = node.stats;
+    let mut t = alloc::format!(
+        "tab5-os ts\nhostname {hostname}\naddress {}.{}.{}.{}\nderp {region} {derp}\nup {} s\npeers {}\nhandshakes {}\npackets in {} out {}\necho replies {}\ndropped {} ({})\n\n",
+        ip[0], ip[1], ip[2], ip[3],
+        (now_ms() - started) / 1000,
+        node.netmap.peers.len(),
+        s.handshakes,
+        s.packets_in,
+        s.packets_out,
+        s.echo_replies,
+        s.dropped,
+        node.last_drop
+    );
+    for p in &node.netmap.peers {
+        let name = p.name.split('.').next().unwrap_or("");
+        let online = match p.online {
+            Some(true) => "online",
+            Some(false) => "offline",
+            None => "",
+        };
+        t += &alloc::format!("{name} derp {} {online}\n", p.home_region());
+    }
+    t
 }
 
 fn log_map(node: &Node, bytes: usize) {
