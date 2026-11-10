@@ -7,7 +7,8 @@
 //!
 //! - `app PATH`: installs the app image at PATH: a file on the SD card, or
 //!   `http://HOST[:PORT]/PATH` (fetched with HTTP/1.0 `GET`; the answer
-//!   must be 200 with a `Content-Length`).
+//!   must be 200 with a `Content-Length`). A tailnet host (100.64.0.0/10
+//!   or `.ts.net`) is reached through `svc:ts`, which `ts` serves.
 //! - `kernel PATH`: writes the kernel package at PATH (as for `app`) into
 //!   the other slot; it takes effect after `reboot` and confirms itself
 //!   after its self-test.
@@ -22,7 +23,8 @@
 //! server until it can, then tells the kernel (`update` `CONFIRM`).
 //!
 //! Built with `--permit listen:ota --permit update --permit svc:fs/r:
-//! --permit svc:net/tcp-connect --permit svc:net/resolve`.
+//! --permit svc:net/tcp-connect --permit svc:net/resolve --permit
+//! svc:ts/tcp-connect --permit svc:ts/resolve`.
 
 use core::fmt::Write as _;
 
@@ -86,7 +88,7 @@ fn confirm_network() {
     let mut tries = 0u32;
     loop {
         tries += 1;
-        if let Ok(net) = Net::connect()
+        if let Ok(net) = Net::connect_to(service(ip, ""))
             && let Ok(s) = net.tcp_connect(ip, port)
         {
             let ok = net.wait_established(s, 5000).is_ok();
@@ -141,7 +143,7 @@ fn from_http(url: &str, kernel: bool) -> Result<u32, &'static str> {
         Some((h, p)) => (h, p.parse::<u16>().map_err(|_| "bad port")?),
         None => (hostport, 80),
     };
-    let mut net = Net::connect().map_err(|_| "no network service")?;
+    let mut net = Net::connect_to(service(parse_ip(host).unwrap_or(0), host)).map_err(|_| "no network service")?;
     let ip = match parse_ip(host) {
         Some(ip) => ip,
         None => net.resolve(host, 3000).map_err(|_| "cannot resolve the host")?,
@@ -209,6 +211,12 @@ fn recv(net: &mut Net, s: u16, buf: &mut [u8]) -> Result<usize, &'static str> {
         }
         sleep_ms(1);
     }
+}
+
+/// The network service for a host: `ts` (the tailnet, doc/71 §14) for an
+/// address in 100.64.0.0/10 or a name in `.ts.net`, else `net`.
+fn service(ip: u32, host: &str) -> &'static str {
+    if ip >> 22 == (100 << 2 | 1) || host.trim_end_matches('.').ends_with(".ts.net") { "ts" } else { "net" }
 }
 
 fn parse_ip(s: &str) -> Option<u32> {

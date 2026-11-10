@@ -431,8 +431,13 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - 制御の接続が切れる件（§13.2）:
   - 前の版では 155 秒で切れた。直の経路の版は 850 秒切れなかった（観察を続ける）。
   - 切れたときの TCP の状態と、最後の map からの時間を `ts.ctl_lost` に出すようにした。
-- まだ:
-  - こちらから相手の endpoint へ Ping して経路を選ぶこと（相手から来るのを待つだけ）。
-  - IPv6 の endpoint。
-  - NAT の対応表を保つための Ping。
-  - UDP の読み取りに `udp_arm` と `wait` を使うこと（今は毎回聞きに行く）。
+- まだ: IPv6 の endpoint、NAT の対応表を保つための Ping。
+
+### 14.3 その後（実機ではまだ試していない）
+- こちらからも直の経路を探す。DERP で送る相手には、5 秒に 1 回まで（`PROBE_MS`）次の 2 つを送る。
+  - 相手の IPv4 の endpoint へ、UDP で disco の Ping（こちらの node key 付き）。
+  - DERP で、こちらの endpoint を並べた CallMeMaybe。
+- こちらの Ping への Pong が UDP で来れば、その送り元を相手の経路にする（disco の box で相手の鍵が確かめられている）。これで、相手の home が別の DERP 領域でも、直に届けば話せる。Node の試験で確かめた。
+- UDP の読み取り: 毎回の巡回では聞かない。何かあった直後か、眠りが `net` の知らせ（UDP_WAIT、`udp_arm` の後の `wait`）で終わったときだけ読む。
+- `ota`: URL のホストが 100.64.0.0/10 のアドレスか `.ts.net` の名前なら、`svc:ts` でつなぐ。カーネルの確かめ（doc/67 §5）も同じ。tailnet から入れたカーネルは、起動のときに `ts` が動いていなければ確かめが済まない（`START.CFG` に `ts` を入れる）。許可に `svc:ts/tcp-connect`、`svc:ts/resolve`。
+- 実機の試験は、プローブが開けなくなって止まった（"The debug probe could not be created"、のちに attach の失敗）。同じハブの別の機器が、つながり損ね続けていた（error -71）。

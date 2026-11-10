@@ -326,7 +326,8 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     event!(Info, "ts.derp", region = region as u32, host = host.as_str(), ip = derp_ip);
     // Peers send to us through this region from now on.
     node.home_region = region;
-    let eps = if udp.is_some() { endpoints(&net, UDP_PORT, nc.endpoint) } else { Vec::new() };
+    node.endpoints = if udp.is_some() { endpoints(&net, UDP_PORT, nc.endpoint) } else { Vec::new() };
+    let eps: Vec<String> = node.endpoints.iter().map(|(ip, p)| alloc::format!("{}.{}.{}.{}:{p}", ip[0], ip[1], ip[2], ip[3])).collect();
     event!(Info, "ts.endpoints", count = eps.len(), first = eps.first().map_or("", |e| e.as_str()));
     if let Err(e) = control::update(&mut h, keys, hostname, region, &latency, &eps) {
         return ("update", e);
@@ -337,6 +338,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     let mut web = Web::new(&mut node);
     let mut udp_buf = vec![0u8; 1500];
     let mut last_map = now_ms();
+    let mut udp_check = true;
     let mut direct = 0;
     let mut shown_web = 0;
     let started = now_ms();
@@ -379,10 +381,16 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         if let Some(svc) = svc.as_deref_mut() {
             busy |= svc.serve(&mut node);
         }
-        if let Some(s) = udp {
+        // Read only after traffic or when `net` woke the nap for a
+        // datagram (UDP_WAIT): not one call per round while idle.
+        if let Some(s) = udp
+            && (udp_check || busy)
+        {
             let r = net.borrow_mut().udp_recv(s, &mut udp_buf, 0);
+            udp_check = false;
             if let Ok((n, ip, port)) = r {
                 busy = true;
+                udp_check = true;
                 node.from_udp(ip.to_be_bytes(), port, &udp_buf[..n], rng, now_ms());
             }
         }
@@ -433,17 +441,30 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         if busy {
             idle_ms = 1;
         } else {
-            // A client's request ends the nap.
-            match svc.as_deref_mut() {
-                Some(svc) => {
-                    let ev = wait(&svc.handles(), idle_ms * 1_000_000);
-                    if let Ok(ev) = ev
-                        && ev.kind == t5_rt::chan::PEER_CLOSED
-                    {
+            // A client's request or a datagram ends the nap.
+            let armed = udp.is_some() && net.borrow().udp_arm().is_ok();
+            let n = net.borrow();
+            let mut hs = svc.as_deref().map_or(Vec::new(), |svc| svc.handles());
+            let net_at = hs.len();
+            if armed {
+                hs.push(n.handle());
+            }
+            let ev = if hs.is_empty() {
+                sleep_ms(idle_ms);
+                None
+            } else {
+                wait(&hs, idle_ms * 1_000_000).ok()
+            };
+            drop(hs);
+            drop(n);
+            match ev {
+                Some(ev) if armed && ev.index == net_at => udp_check = true,
+                Some(ev) if ev.kind == t5_rt::chan::PEER_CLOSED => {
+                    if let Some(svc) = svc.as_deref_mut() {
                         svc.closed(ev.index, &mut node);
                     }
                 }
-                None => sleep_ms(idle_ms),
+                _ => {}
             }
             idle_ms = (idle_ms * 2).min(IDLE_MAX_MS);
         }
@@ -473,7 +494,7 @@ fn netcheck(net: &Rc<RefCell<Net>>, s: Option<u16>, map: &tsclient::netmap::Derp
 
 /// This node's UDP endpoints for peers to try: each interface's IPv4
 /// address but loopback, and the address STUN saw, with their ports.
-fn endpoints(net: &Rc<RefCell<Net>>, port: u16, seen: Option<([u8; 4], u16)>) -> Vec<String> {
+fn endpoints(net: &Rc<RefCell<Net>>, port: u16, seen: Option<([u8; 4], u16)>) -> Vec<([u8; 4], u16)> {
     let mut e = Vec::new();
     let n = net.borrow();
     for k in 0..8 {
@@ -481,18 +502,17 @@ fn endpoints(net: &Rc<RefCell<Net>>, port: u16, seen: Option<([u8; 4], u16)>) ->
             Ok(Some(len)) if len >= 20 && n.slice[14] > 0 => {
                 let ip = u32::from_le_bytes(n.slice[16..20].try_into().unwrap()).to_be_bytes();
                 if ip[0] != 127 {
-                    e.push(alloc::format!("{}.{}.{}.{}:{port}", ip[0], ip[1], ip[2], ip[3]));
+                    e.push((ip, port));
                 }
             }
             Ok(_) => {}
             Err(_) => break,
         }
     }
-    if let Some((ip, p)) = seen {
-        let s = alloc::format!("{}.{}.{}.{}:{p}", ip[0], ip[1], ip[2], ip[3]);
-        if !e.contains(&s) {
-            e.push(s);
-        }
+    if let Some(s) = seen
+        && !e.contains(&s)
+    {
+        e.push(s);
     }
     e
 }

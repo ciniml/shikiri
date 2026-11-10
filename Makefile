@@ -51,7 +51,7 @@ PERMIT_spkcheck := --permit audio:out --permit audio:in
 PERMIT_tsget := --permit svc:ts/tcp-connect --permit svc:ts/resolve
 PERMIT_ts := --permit shm --permit listen:ts --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:net/udp:41641 --permit svc:net/info --permit random \
              --permit svc:cfg/r:ts. --permit svc:cfg/w:ts. --permit svc:cfg/secret:ts. --stack 262144
-PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
+PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:ts/tcp-connect --permit svc:ts/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
                  --permit svc:ble/scan --permit svc:ble/central --permit svc:ble/peripheral \
