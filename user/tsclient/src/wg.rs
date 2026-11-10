@@ -1,11 +1,11 @@
-//! WireGuard (the whitepaper, §5): the responder's side of the handshake
+//! WireGuard (the whitepaper, §5): both sides of the handshake
 //! (Noise_IKpsk2 with the zero pre-shared key, as Tailscale) and the
 //! transport messages, for the peers of the netmap. Packets arrive
 //! through DERP from a node key; the node key is the peer's WireGuard key.
 //!
-//! This node only answers: a peer starts each session (initiating needs a
-//! wall clock for the TAI64N timestamp, doc/71 §4.7). Cookies (mac2) are
-//! neither checked nor sent: no load to shed.
+//! Initiating takes a TAI64N timestamp from the caller (a wall clock: the
+//! control server's time, doc/71 §4.7). Cookies (mac2) are neither checked
+//! nor sent: no load to shed.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -33,6 +33,10 @@ const TAG_LEN: usize = 16;
 const HEADER: usize = 16;
 /// Sessions end after this (REJECT_AFTER_TIME).
 const REJECT_AFTER_MS: u64 = 180_000;
+/// The initiator starts a new session after this (REKEY_AFTER_TIME).
+const REKEY_AFTER_MS: u64 = 120_000;
+/// An initiation unanswered this long is sent again (REKEY_TIMEOUT).
+const REKEY_TIMEOUT_MS: u64 = 5_000;
 const WINDOW: u64 = 64;
 
 fn hash(parts: &[&[u8]]) -> [u8; 32] {
@@ -85,6 +89,17 @@ struct Session {
     seen: u64,
     any: bool,
     at_ms: u64,
+    /// This node started it (and so starts the next).
+    initiated: bool,
+}
+
+/// An initiation sent, waiting for the response.
+struct Pending {
+    local: u32,
+    e: KeyPair,
+    c: [u8; 32],
+    h: [u8; 32],
+    at_ms: u64,
 }
 
 impl Session {
@@ -117,6 +132,7 @@ pub struct Peer {
     next: Option<Session>,
     current: Option<Session>,
     previous: Option<Session>,
+    pending: Option<Pending>,
 }
 
 /// What `Device::receive` made of a message.
@@ -128,6 +144,8 @@ pub enum Received {
     Reply(Vec<u8>),
     /// An IP packet from peer `peer` (index into `peers`).
     Packet { peer: usize, packet: Vec<u8> },
+    /// Our initiation was answered: peer `peer` has a session to send on.
+    Established { peer: usize },
 }
 
 pub struct Device {
@@ -161,7 +179,7 @@ impl Device {
                     p.ip = ip;
                     self.peers.push(p);
                 }
-                None => self.peers.push(Peer { key, ip, last_timestamp: [0; 12], next: None, current: None, previous: None }),
+                None => self.peers.push(Peer { key, ip, last_timestamp: [0; 12], next: None, current: None, previous: None, pending: None }),
             }
         }
     }
@@ -171,7 +189,7 @@ impl Device {
         match (msg.first(), msg.len()) {
             (Some(&INITIATION), INITIATION_LEN) => self.initiation(from, msg, rng, now_ms),
             (Some(&TRANSPORT), n) if n >= HEADER + TAG_LEN => self.transport(msg, now_ms),
-            (Some(&RESPONSE), _) => Received::Nothing("response unasked"),
+            (Some(&RESPONSE), RESPONSE_LEN) => self.response(msg, now_ms),
             _ => Received::Nothing("not wireguard"),
         }
     }
@@ -246,8 +264,102 @@ impl Device {
             seen: 0,
             any: false,
             at_ms: now_ms,
+            initiated: false,
         });
         Received::Reply(r)
+    }
+
+    /// An initiation to peer `peer` with timestamp `tai64n` (later than
+    /// any before: the peer refuses the rest).
+    pub fn initiate(&mut self, peer: usize, tai64n: [u8; 12], rng: &mut impl CryptoRngCore, now_ms: u64) -> Option<Vec<u8>> {
+        let r_pub = self.peers.get(peer)?.key;
+        let mut e = [0u8; 32];
+        rng.fill_bytes(&mut e);
+        let e = KeyPair::from_private(e);
+        let local = self.next_index;
+        self.next_index = self.next_index.wrapping_add(1);
+        let mut h = hash(&[&hash(&[&self.c0, IDENTIFIER]), &r_pub]);
+        let mut m = vec![0u8; INITIATION_LEN];
+        m[0] = INITIATION;
+        m[4..8].copy_from_slice(&local.to_le_bytes());
+        m[8..40].copy_from_slice(&e.public);
+        let mut c = kdf1(&self.c0, &e.public);
+        h = hash(&[&h, &e.public]);
+        let (c1, k) = hkdf2(&c, &e.dh(&r_pub));
+        c = c1;
+        m[40..72].copy_from_slice(&self.key.public);
+        let t = ChaCha20Poly1305::new(Key::from_slice(&k)).encrypt_in_place_detached(&nonce(0), &h, &mut m[40..72]).ok()?;
+        m[72..88].copy_from_slice(&t);
+        h = hash(&[&h, &m[40..88]]);
+        let (c2, k) = hkdf2(&c, &self.key.dh(&r_pub));
+        c = c2;
+        m[88..100].copy_from_slice(&tai64n);
+        let t = ChaCha20Poly1305::new(Key::from_slice(&k)).encrypt_in_place_detached(&nonce(0), &h, &mut m[88..100]).ok()?;
+        m[100..116].copy_from_slice(&t);
+        h = hash(&[&h, &m[88..116]]);
+        let mac1 = mac(&hash(&[LABEL_MAC1, &r_pub]), &m[..116]);
+        m[116..132].copy_from_slice(&mac1);
+        self.peers[peer].pending = Some(Pending { local, e, c, h, at_ms: now_ms });
+        Some(m)
+    }
+
+    fn response(&mut self, m: &[u8], now_ms: u64) -> Received {
+        if mac(&self.mac1_key, &m[..60]) != m[60..76] {
+            return Received::Nothing("mac1");
+        }
+        let sender = u32::from_le_bytes(m[4..8].try_into().unwrap());
+        let receiver = u32::from_le_bytes(m[8..12].try_into().unwrap());
+        let Some(pi) = self.peers.iter().position(|p| p.pending.as_ref().is_some_and(|q| q.local == receiver)) else {
+            return Received::Nothing("response unasked");
+        };
+        let q = self.peers[pi].pending.as_ref().unwrap();
+        let er: [u8; 32] = m[12..44].try_into().unwrap();
+        let mut c = kdf1(&q.c, &er);
+        let mut h = hash(&[&q.h, &er]);
+        c = kdf1(&c, &q.e.dh(&er));
+        c = kdf1(&c, &self.key.dh(&er));
+        let (c3, t, k) = kdf3(&c, &[0u8; 32]);
+        h = hash(&[&h, &t]);
+        if !open(&k, &h, &m[44..60], &mut []) {
+            return Received::Nothing("response");
+        }
+        // The initiator sends with the first key.
+        let (send, recv) = hkdf2(&c3, &[]);
+        let p = &mut self.peers[pi];
+        let local = p.pending.take().unwrap().local;
+        p.previous = p.current.take();
+        p.current = Some(Session {
+            local,
+            remote: sender,
+            send: ChaCha20Poly1305::new(&send.into()),
+            recv: ChaCha20Poly1305::new(&recv.into()),
+            send_n: 0,
+            recv_max: 0,
+            seen: 0,
+            any: false,
+            at_ms: now_ms,
+            initiated: true,
+        });
+        Received::Established { peer: pi }
+    }
+
+    /// Peer `peer` has a session to send on now.
+    pub fn can_send(&self, peer: usize, now_ms: u64) -> bool {
+        self.peers.get(peer).and_then(|p| p.current.as_ref()).is_some_and(|s| now_ms.saturating_sub(s.at_ms) <= REJECT_AFTER_MS)
+    }
+
+    /// Sending to peer `peer` should start a handshake: no session to
+    /// send on, or ours is old enough to replace; and no initiation is
+    /// out (or it went unanswered).
+    pub fn wants_handshake(&self, peer: usize, now_ms: u64) -> bool {
+        let Some(p) = self.peers.get(peer) else { return false };
+        if p.pending.as_ref().is_some_and(|q| now_ms.saturating_sub(q.at_ms) < REKEY_TIMEOUT_MS) {
+            return false;
+        }
+        match &p.current {
+            Some(s) => now_ms.saturating_sub(s.at_ms) > if s.initiated { REKEY_AFTER_MS } else { REJECT_AFTER_MS },
+            None => true,
+        }
     }
 
     fn transport(&mut self, m: &[u8], now_ms: u64) -> Received {
@@ -425,6 +537,32 @@ mod tests {
     }
 
     #[test]
+    fn initiate_to_device() {
+        let mut rng = Counter(9);
+        let (ka, kb) = (KeyPair::from_private([4; 32]), KeyPair::from_private([5; 32]));
+        let mut a = Device::new(ka.clone(), &mut rng);
+        let mut b = Device::new(kb.clone(), &mut rng);
+        a.set_peers([(kb.public, [100, 64, 0, 2])].into_iter());
+        b.set_peers([(ka.public, [100, 64, 0, 1])].into_iter());
+        assert!(a.wants_handshake(0, 0) && !a.can_send(0, 0));
+        let m = a.initiate(0, [0, 0, 0, 0, 0x40, 0, 0, 1, 0, 0, 0, 0], &mut rng, 0).unwrap();
+        assert!(!a.wants_handshake(0, 1000));
+        assert!(a.wants_handshake(0, 6000));
+        let Received::Reply(r) = b.receive(&ka.public, &m, &mut rng, 0) else { panic!() };
+        assert_eq!(a.receive(&kb.public, &r, &mut rng, 1), Received::Established { peer: 0 });
+        assert_eq!(a.receive(&kb.public, &r, &mut rng, 1), Received::Nothing("response unasked"));
+        assert!(a.can_send(0, 2) && !a.wants_handshake(0, 2));
+        let ip = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 2];
+        let t = a.encrypt(0, &ip, 2).unwrap();
+        assert_eq!(b.receive(&ka.public, &t, &mut rng, 2), Received::Packet { peer: 0, packet: ip.clone() });
+        let back = b.encrypt(0, &[&ip[..12], &ip[16..20], &ip[12..16]].concat(), 3).unwrap();
+        assert!(matches!(a.receive(&kb.public, &back, &mut rng, 3), Received::Packet { .. }));
+        // Ours is replaced after REKEY_AFTER_TIME.
+        assert!(a.wants_handshake(0, 121_000));
+        assert!(!b.wants_handshake(0, 121_000));
+    }
+
+    #[test]
     fn replay_window() {
         let mut s = Session {
             local: 0,
@@ -436,6 +574,7 @@ mod tests {
             seen: 0,
             any: false,
             at_ms: 0,
+            initiated: false,
         };
         assert!(s.accept(5));
         assert!(s.accept(3));

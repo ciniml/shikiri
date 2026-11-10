@@ -385,3 +385,20 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - `cargo test -p tsclient`: smoltcp の試験（ping への答えと、80 番への SYN に SYN-ACK）を足した。`ip` の試験は消えたので数は 14 のまま。
 - Tab5（ts のメモリは 1.6 MB、2 MiB の内）: ホストから ping 5 回中 5 回（平均 48 ms）。`curl http://<Tab5 の 100.x>/` が続けて 6 回とも 200（418 B、1 回 55〜100 ms）。`ts.stats` は dropped=0。
 - まだ: ほかのアプリから使う口（`svc:ts`）、こちらから始める WireGuard（時刻は map の `ControlTime` から取る）、UDP、tailnet の名前の解決。
+
+## 13. 段 T4b: `svc:ts` と、こちらから始める WireGuard（2026-11-11）
+
+### 13.1 作ったもの
+- `wg::Device::initiate`（握手の始め、148 バイト）と応答の受け取り（`Received::Established`）。こちらが始めた session は 120 秒（REKEY_AFTER_TIME）で次の握手を始め、答えのない始めは 5 秒（REKEY_TIMEOUT）で出し直す。相手が始めた session は 180 秒まで使う（次は相手が始める）。`can_send`、`wants_handshake`。試験は Device どうしの握手と往復（応答側は §10 で白書と照合済み）。
+- 時刻: map の `ControlTime`（RFC 3339）を `netmap::unix_ms` で読み、`Node::tai64n` が WireGuard の TAI64N（2^62 + 10 + 秒、ナノ秒）にする。tailscale.com は最初の応答に `ControlTime` を付けていた（`ts.map clock=true`）。
+- `Node`: 送るものは `poll` がまとめて返す（握手の応答、始め、transport）。session のない相手へのパケットは握手を始めて待たせ（全体で 16 まで）、`Established` で送る。`from_derp` は何も返さない形にした。デバッグ用に、出入りするパケットを見る `tap`（`ts` の `TRACE_TCP` で `ts.tcp` を出す）。
+- `svc:ts`（`user/apps/ts/src/svc.rs`）: `svc:net` と同じ要求の形（`t5_abi::net`）。TCP_CONNECT、TCP_LISTEN（tailnet のアドレスで。アドレスとリンクは見ない）、TCP_STATE、SEND、RECV、CLOSE、RESOLVE と RESOLVE_RESULT（netmap の名前: 短い名前か全体の名前、IPv4）。ほかは BAD_REQUEST。grant は `svc:net` と同じ形（`svc:ts/tcp-connect`、`tcp-connect:PORT`、`tcp-listen:PORT`、`tcp-listen:any`、`resolve`）で、拒んだら `ts.denied`。客は 2 つ（64 KiB の slice ずつ）、ソケットは全体で 8（送受 4 KiB ずつ）。客が閉じたことは `wait` の PEER_CLOSED で知る（read は Busy のまま）。新しい session（失敗の後）では、前のソケット番号は NOT_CONNECTED。ts の眠りは `wait`（客の要求で起きる）。許可に `shm` と `listen:ts`。
+- rt: `Net::connect_to(SERVICE)`（`Net::connect` は `net`）。
+- 試験アプリ `tsget`: `run tsget IP PORT` で `svc:ts` から HTTP/1.0 の `GET /` を 1 回、`tsget.done`（状態、バイト、ms）。
+
+### 13.2 確かめたこと
+- `cargo test -p tsclient`: 15（Device どうしの握手、ControlTime から TAI64N）。
+- Tab5: ホストの tailnet のアドレスに立てた `python3 -m http.server` へ `run tsget <ホストの 100.x> 28080`。こちらからの握手に 40 ms で応答が来て、200、4,388 バイト（168 ms）。103,390 バイトは 1,144 ms（約 90 KB/s、dropped=0）。閉じたポートでは RST で `establish` の失敗になる。
+- はじめはポート 8000 で試し、つながった直後にデータなしで FIN が返った。`ts.tcp` のトレースで TCP の流れは正しく、ホストの 0.0.0.0:8000 で別のもの（docker らしい）が待っていて、tailnet からの 8000 番がそちらへ行っていた（ホストの curl も python のログに出ていなかった）。Tab5 の側の問題ではなかった。
+- 試験の途中で、制御の接続が 1 回切れた（`ts.failed step=map stream error=io`）。30 秒後につなぎ直した。原因はまだ見ていない（それまでの版は 1 時間以上切れなかった）。
+- まだ: `ota` を `svc:ts` で使う（100.64.0.0/10 か `.ts.net` の名前なら `ts` につなぐ）、UDP、shell の `ts` コマンド、相手の home が別の DERP 領域のとき（こちらは自分の home の DERP にしか送らない。相手がそこにいなければ届かない）。

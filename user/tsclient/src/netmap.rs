@@ -81,6 +81,32 @@ pub fn parse_v4(s: &str) -> Option<[u8; 4]> {
     parts.next().is_none().then_some(ip)
 }
 
+/// RFC 3339 in UTC (`2026-11-11T05:31:49.123Z`, as the control server
+/// writes `ControlTime`) as ms since 1970.
+pub fn unix_ms(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' || !s.ends_with('Z') {
+        return None;
+    }
+    let n = |r: core::ops::Range<usize>| s.get(r)?.parse::<u64>().ok();
+    let (y, mo, d, h, mi, sec) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    let mut ms = 0;
+    if b[19] == b'.' {
+        let frac = &s[20..s.len() - 1];
+        for (k, c) in frac.bytes().take(3).enumerate() {
+            ms += (c.checked_sub(b'0')? as u64) * [100, 10, 1][k];
+        }
+    }
+    // Days from 1970-01-01 (Howard Hinnant's days_from_civil).
+    let (y, mo) = if mo <= 2 { (y - 1, mo + 9) } else { (y, mo - 3) };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * mo + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 24 + h) * 60 + mi) * 60_000 + sec * 1000 + ms)
+}
+
 #[derive(Deserialize, Default, Debug, Clone)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct DerpMap {

@@ -909,7 +909,13 @@ pub struct Received {
 
 impl Net {
     pub fn connect() -> Result<Net, NetError> {
-        let chan = Channel::connect(net::SERVICE).map_err(NetError::Ipc)?;
+        Net::connect_to(net::SERVICE)
+    }
+
+    /// Connects to another service of `svc:net`'s protocol (`ts`: the
+    /// tailnet, doc/71 §13).
+    pub fn connect_to(service: &str) -> Result<Net, NetError> {
+        let chan = Channel::connect(service).map_err(NetError::Ipc)?;
         // The service grants the slice at once, unless all its client
         // slots are taken: then this would wait forever.
         let ev = wait(&[&chan.0], 5_000_000_000).map_err(NetError::Ipc)?;

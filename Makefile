@@ -8,7 +8,7 @@ T5LOG      := tools/target/release/t5log
 T5STORE    := tools/target/release/t5store
 # App store images (doc/14 §2): appmeta.bin @0x410000, apps.bin @0x420000.
 STORE_DIR  := $(BUILD)/store
-APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu beep mic codecdiag spkcheck ts
+APPS       := hello fault ticker spin timers echo paint fs fstest net nettest wifi netctl init keylog term shell hcitest ble blescan blegatt bleecho mtbench matter mtreq mtep mtpanel mtdash cfg cfgctl c6ota ota kgfx imu beep mic codecdiag spkcheck ts tsget
 # Permissions TLV per app (doc/14 §4): the objects it may open, and with
 # `svc:NAME/GRANT` what it may do in a service (doc/52 §3.3: fs paths, net
 # ports, cfg keys, wifi, ble roles, matter requests). The least each needs.
@@ -48,7 +48,8 @@ PERMIT_mic    := --permit audio:in
 PERMIT_spkcheck := --permit audio:out --permit audio:in
 # Tailscale (doc/71): the control server over TLS; its keys and the auth
 # key are secret settings (strong: the system key).
-PERMIT_ts := --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:net/udp:41641 --permit random \
+PERMIT_tsget := --permit svc:ts/tcp-connect --permit svc:ts/resolve
+PERMIT_ts := --permit shm --permit listen:ts --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:net/udp:41641 --permit random \
              --permit svc:cfg/r:ts. --permit svc:cfg/w:ts. --permit svc:cfg/secret:ts. --stack 262144
 PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \

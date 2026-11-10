@@ -145,7 +145,7 @@ fn main() {
     let mut m = control::map(&mut h, &keys, hostname, 0, &[]).expect("map");
     let json = m.next(&mut h).expect("first map response");
     let len = json.len();
-    node.apply_map(json).expect("map json");
+    node.apply_map(json, now_ms()).expect("map json");
     let nc = netcheck(&node.netmap.derp);
     let latency: Vec<_> = nc.latencies().collect();
     let (region, host, port) = {
@@ -168,7 +168,7 @@ fn main() {
             busy = true;
             if m.poll(&mut h).expect("map stream") {
                 let json = m.take();
-                let r = node.apply_map(json).expect("map json");
+                let r = node.apply_map(json, now_ms()).expect("map json");
                 if !r.keep_alive {
                     println!("map update: peers {}", node.netmap.peers.len());
                 }
@@ -181,12 +181,10 @@ fn main() {
                 _ => None,
             };
             if let Some((src, data)) = packet {
-                if let Some(back) = node.from_derp(&src, &data, &mut OsRng, now_ms()) {
-                    derp.send(&src, &back).expect("derp send");
-                }
+                node.from_derp(&src, &data, &mut OsRng, now_ms());
             }
         }
-        for (peer, m) in node.poll(now_ms()) {
+        for (peer, m) in node.poll(&mut OsRng, now_ms()) {
             busy = true;
             derp.send(&peer, &m).expect("derp send");
         }

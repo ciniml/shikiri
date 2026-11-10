@@ -5,7 +5,8 @@
 //! the control server and follows its map, keeps a connection to the home
 //! DERP server (the nearest region by STUN), and talks IP with the peers
 //! over WireGuard through DERP (smoltcp: pings, and a status page on TCP
-//! port 80). The protocols are in `tsclient`; here are the
+//! port 80; other apps' TCP through `svc:ts`, `svc.rs`). The protocols
+//! are in `tsclient`; here are the
 //! TCP (`svc:net`), TLS (embedded-tls), the settings, the keys and the
 //! loop that serves both connections (each read only when bytes wait).
 //!
@@ -31,7 +32,7 @@ use embedded_tls::{TlsConfig, TlsContext};
 use linked_list_allocator::LockedHeap;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
-use t5_rt::{Config, Net, event, random_fill, sleep_ms, time_ns};
+use t5_rt::{Config, Net, event, random_fill, sleep_ms, time_ns, wait};
 use tsclient::derp::{Derp, Frame};
 use tsclient::netcheck::Netcheck;
 use tsclient::smoltcp::iface::SocketHandle;
@@ -39,6 +40,8 @@ use tsclient::smoltcp::socket::tcp;
 use tsclient::node::Node;
 use tsclient::stream::Buffered;
 use tsclient::{Error, control, keys::Keys, tls};
+
+mod svc;
 
 t5_rt::entry!(main);
 
@@ -106,8 +109,13 @@ fn main(_: usize, _: usize) -> usize {
     // The node key (public) is what `tailscale lock sign` takes.
     let node = tsclient::keys::to_hex("nodekey:", &keys.node.public);
     event!(Info, "ts.start", server = server, hostname = hostname.as_str(), auth_key = !auth.is_empty(), node = node.as_str());
+    // Other apps' TCP on the tailnet (doc/71 §13).
+    let mut svc = svc::Service::open();
+    if svc.is_none() {
+        event!(Warn, "ts.failed", step = "svc", error = "io");
+    }
     loop {
-        let e = run(&mut rng, server, &hostname, &auth, &keys);
+        let e = run(&mut rng, server, &hostname, &auth, &keys, svc.as_mut());
         let (step, error) = e;
         event!(Warn, "ts.failed", step = step, error = describe(error));
         sleep_ms(RETRY_MS);
@@ -216,7 +224,7 @@ fn tls_open<'a>(net: &Rc<RefCell<Net>>, bufs: &'a mut Bufs, ip: u32, port: u16, 
 }
 
 /// One session with the control server and DERP, until it fails.
-fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, keys: &Keys) -> (&'static str, Error) {
+fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, keys: &Keys, mut svc: Option<&mut svc::Service>) -> (&'static str, Error) {
     let Ok(net) = Net::connect() else { return ("net", Error::Io) };
     let net = Rc::new(RefCell::new(net));
     let ip = match net.borrow_mut().resolve(server, RESOLVE_MS) {
@@ -263,6 +271,12 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
 
     // The first map response: the DERP map to pick home from.
     let mut node = Node::new(keys.node.clone(), rng, now_ms());
+    if let Some(svc) = svc.as_deref_mut() {
+        svc.reset();
+    }
+    if TRACE_TCP {
+        node.tap = Some(trace);
+    }
     let mut m = match control::map(&mut h, keys, hostname, 0, &[]) {
         Ok(m) => m,
         Err(e) => return ("map", e),
@@ -270,7 +284,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     match m.next(&mut h) {
         Ok(json) => {
             let bytes = json.len();
-            if let Err(e) = node.apply_map(json) {
+            if let Err(e) = node.apply_map(json, now_ms()) {
                 return ("map json", e);
             }
             log_map(&node, bytes);
@@ -320,7 +334,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 Ok(true) => {
                     let json = m.take();
                     let bytes = json.len();
-                    match node.apply_map(json) {
+                    match node.apply_map(json, now_ms()) {
                         Ok(r) if !r.keep_alive || r.node.is_some() => log_map(&node, bytes),
                         Ok(_) => {}
                         Err(e) => return ("map json", e),
@@ -338,22 +352,21 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 Err(e) => return ("derp read", e),
             };
             if let Some((src, data)) = packet {
-                if let Some(back) = node.from_derp(&src, &data, rng, now_ms()) {
-                    if let Err(e) = derp.send(&src, &back) {
-                        return ("derp send", e);
-                    }
-                }
+                node.from_derp(&src, &data, rng, now_ms());
             }
         }
         web.step(&mut node, |n| status(n, hostname, region, &host, started));
-        for (peer, m) in node.poll(now_ms()) {
+        if let Some(svc) = svc.as_deref_mut() {
+            busy |= svc.serve(&mut node);
+        }
+        for (peer, m) in node.poll(rng, now_ms()) {
             busy = true;
             if let Err(e) = derp.send(&peer, &m) {
                 return ("derp send", e);
             }
         }
         let s = node.stats;
-        if (s.handshakes, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.echo_replies, shown.dropped, shown_web) {
+        if (s.handshakes, s.initiations, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.initiations, shown.echo_replies, shown.dropped, shown_web) {
             if node.last_drop == "unknown peer" {
                 let k = tsclient::keys::to_hex("", &node.wg.unknown);
                 event!(Warn, "ts.unknown_peer", key = &k[..16], wg_peers = node.wg.peers.len(), map_peers = node.netmap.peers.len());
@@ -362,6 +375,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 Info,
                 "ts.stats",
                 handshakes = s.handshakes,
+                initiations = s.initiations,
                 packets = s.packets_in,
                 echo_replies = s.echo_replies,
                 packets_out = s.packets_out,
@@ -376,7 +390,18 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         if busy {
             idle_ms = 1;
         } else {
-            sleep_ms(idle_ms);
+            // A client's request ends the nap.
+            match svc.as_deref_mut() {
+                Some(svc) => {
+                    let ev = wait(&svc.handles(), idle_ms * 1_000_000);
+                    if let Ok(ev) = ev
+                        && ev.kind == t5_rt::chan::PEER_CLOSED
+                    {
+                        svc.closed(ev.index, &mut node);
+                    }
+                }
+                None => sleep_ms(idle_ms),
+            }
             idle_ms = (idle_ms * 2).min(IDLE_MAX_MS);
         }
     }
@@ -486,9 +511,34 @@ fn status(node: &Node, hostname: &str, region: i32, derp: &str, started: u64) ->
     t
 }
 
+/// Logs every TCP segment's header (`ts.tcp`): for debugging.
+const TRACE_TCP: bool = false;
+
+/// TCP segments' headers (`TRACE_TCP`).
+fn trace(out: bool, p: &[u8]) {
+    let ihl = (p[0] & 0x0F) as usize * 4;
+    if p.len() < ihl + 20 || p[9] != 6 {
+        return;
+    }
+    let t = &p[ihl..];
+    let doff = (t[12] >> 4) as usize * 4;
+    event!(
+        Debug,
+        "ts.tcp",
+        out = out,
+        sport = u16::from_be_bytes([t[0], t[1]]) as u32,
+        dport = u16::from_be_bytes([t[2], t[3]]) as u32,
+        tcp_seq = u32::from_be_bytes([t[4], t[5], t[6], t[7]]),
+        ack = u32::from_be_bytes([t[8], t[9], t[10], t[11]]),
+        flags = t[13] as u32,
+        win = u16::from_be_bytes([t[14], t[15]]) as u32,
+        len = (p.len() - ihl - doff) as u32
+    );
+}
+
 fn log_map(node: &Node, bytes: usize) {
     // As `svc:net` writes addresses (the first octet in the high byte).
     let ip = node.netmap.self_ipv4().map_or(0, u32::from_be_bytes);
     let (region, derp) = node.netmap.home_derp().map_or((0, ""), |(r, n)| (r.region_id, n.host_name.as_str()));
-    event!(Info, "ts.map", bytes = bytes, ip = ip, peers = node.netmap.peers.len(), regions = node.netmap.derp.regions.len(), home = region as u32, derp = derp);
+    event!(Info, "ts.map", bytes = bytes, ip = ip, peers = node.netmap.peers.len(), regions = node.netmap.derp.regions.len(), home = region as u32, derp = derp, clock = node.clock.is_some());
 }
