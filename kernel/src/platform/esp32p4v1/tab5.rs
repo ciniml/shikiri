@@ -105,19 +105,20 @@ fn codec_result<E>(r: &Result<(), kumiki_es8388::Error<E>>) -> &'static str {
     }
 }
 
-/// Powers the ES8388 down and sets it up (kumiki's `Es8388::init`), the
-/// amp off. After a SoC reset with the DAC playing it stays silent,
-/// registers and all, until powered down: the soft reset in `init` is not
-/// enough; `power_down` (DAC and chip power) for 1 ms was, but only once
-/// the stream had run a while, not at boot (doc/70 §9.2).
+/// Sets the ES8388 up (kumiki's `Es8388::init`), the amp off, then powers
+/// its DAC down and up again. `init` powers the DAC up before it sets the
+/// I2S format and the clock ratio; on the Tab5 the DAC then often stayed
+/// silent, registers and all, until powered down and up with the rest
+/// already set (codecdiag 5 and 6, doc/70 §9.5).
 fn dac() -> Result<(), kumiki_es8388::Error<BusError>> {
     if let Ok(out) = exp_read(EXP1, EXP_OUT) {
         let _ = exp_write(EXP1, EXP_OUT, out & !SPK_EN);
     }
     let mut codec = kumiki_es8388::Es8388::new(Bus, kumiki_es8388::ADDR);
-    let _ = codec.power_down();
+    codec.init()?;
+    codec.power_down()?;
     ms(2);
-    codec.init()
+    codec.power_up()
 }
 
 /// Sets up the ES8388 (DAC) and the ES7210 (microphones) while I2S already
@@ -135,20 +136,6 @@ fn codecs() -> u8 {
     };
     event!(Info, "board.codecs", es8388 = codec_result(&dac), es7210 = adc);
     if dac.is_ok() { SPK_EN } else { 0 }
-}
-
-/// Sets the ES8388 up again (the first `audio:out` since boot, doc/70
-/// §9.2), if it was at boot (SPK_EN on), and turns the amp back on.
-pub fn dac_again() {
-    let Ok(out) = exp_read(EXP1, EXP_OUT) else { return };
-    if out & SPK_EN == 0 {
-        return;
-    }
-    let r = dac();
-    if r.is_ok() {
-        let _ = exp_write(EXP1, EXP_OUT, out);
-    }
-    event!(Info, "audio.dac_again", es8388 = codec_result(&r));
 }
 
 fn tp_int_output(high: bool) {

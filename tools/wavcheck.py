@@ -2,7 +2,8 @@
 """Checks a tone in a 16-bit stereo WAV (t5emu --audio-out, doc/70).
 
 wavcheck.py FILE HZ MIN_PEAK [MAX_MS]: finds the non-silent part of the left
-channel and requires its frequency (from zero crossings) within 2 % of HZ,
+channel and requires its frequency (from zero crossings in its 10 ms blocks
+that are not silent: a dropout inside does not count) within 2 % of HZ,
 its peak at least MIN_PEAK and, if given, its length at most MAX_MS (a TX
 ring left unpolled repeats its last turn forever). Prints what it measured.
 """
@@ -21,9 +22,17 @@ def main():
         print("wavcheck: silent")
         return 1
     part = left[loud[0]:loud[-1] + 1]
-    crossings = sum(1 for a, b in zip(part, part[1:]) if (a < 0) != (b < 0))
     secs = len(part) / rate
-    freq = crossings / 2 / secs
+    block = rate // 100
+    crossings = sounding = 0
+    for i in range(0, len(part) - block + 1, block):
+        b = part[i:i + block]
+        if max(abs(s) for s in b) > 64:
+            # From the sample before the block: no crossing falls between.
+            w = part[max(i - 1, 0):i + block]
+            crossings += sum(1 for x, y in zip(w, w[1:]) if (x < 0) != (y < 0))
+            sounding += len(b)
+    freq = crossings / 2 / (sounding / rate) if sounding else 0.0
     peak = max(abs(s) for s in part)
     print(f"wavcheck: {secs * 1000:.0f} ms of tone, {freq:.1f} Hz, peak {peak}")
     ok = abs(freq - hz) <= hz * 0.02 and peak >= min_peak
