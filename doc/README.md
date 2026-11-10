@@ -66,7 +66,8 @@ M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モ
 | [67](67-ota.md) | アプリとカーネルの OTA 更新: カーネルの `update`（強い許可、要求をサービスの巡回で）、更新のサービス `ota`、`shell` の `ota`。SD から、網（HTTP）から、網で入れたカーネルは網に戻れてから確定（300 秒で戻る） |
 | [68](68-kumiki-gfx.md) | kumiki-gfx を tab5-os のアプリで: 方針（embedded-hal を境目に、tab5-os 向けの実装は tab5-os 側に）、`kumiki-t5os::FbPanel`（display を FramebufferPanel に）、デモ `kgfx` |
 | [69](69-i2c-imu.md) | アプリから I²C のデバイス: `i2c:int/0xNN`（ABI 26、IMU 以外は強い許可）、FIFO より長い書き込み（`END`）、`kumiki_t5os::I2cDevice`/`Delay`、`imu` が kumiki-bmi270 をそのまま使う |
-| [70](70-audio-design.md) | オーディオ（段 A1 の前半と A2: I2S を無音で回す、`audio:out` / `audio:in`、混ぜる、beep・mic）: kumiki-p4v1-hal の I2S をカーネルで、コーデック（ES8388、ES7210）は起動時に画面より前に、SPK_EN（#1 の bit1）、`audio` オブジェクトと共有メモリの輪、`audio:in` は強い許可 |
+| [70](70-audio-design.md) | オーディオ（段 A1〜A4）: kumiki-p4v1-hal の I2S をカーネルで、コーデック（ES8388、ES7210）は起動時に画面より前に、SPK_EN（#1 の bit1）、`audio:out` / `audio:in`（強い許可）、混ぜる、beep・mic、マイクで鳴ったかを測る spkcheck、ES8388 が鳴らなくなるのは `init` の順番（§9.5）、2 つの音を混ぜる（§10）、全体の音量 `audio:volume`（ABI 28、§11） |
+| [71](71-tailscale-study.md) | Tailscale のクライアントの検討（まだ実装しない）: 最小の形（認証鍵、DERP だけ、アプリの中の IP スタック）、ts2021 は TLS なしの Noise と HTTP/2、DERP は TLS 1.3、使える no_std の実装はなく自前で、段取り T0〜T6、利用者に聞くこと |
 | [21](21-n2a-hostlink.md) | N2a: ホストリンク（コンソールの線の上の IP、`netdev:host`、`t5log hostlink` と TUN）。実機で ping（0.4ms）と TCP 1MiB の echo（約 2.3Mbps）を確認 |
 | [20](20-n1-net-service.md) | N1: ネットワークサービス `net`（smoltcp、ループバック、TCP/UDP の socket API）。t5emu で確認 |
 | [research/net-stack](research/net-stack.md) | ネットワーク・スタックの検討（smoltcp を U モードの `net` サービスで使い、ルーティング・転送・フィルタは自作。最初のリンクは USB Serial/JTAG 越しのホスト、本命は ESP32-C6 の Wi-Fi。段階 N0〜N5） |
