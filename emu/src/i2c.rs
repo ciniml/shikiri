@@ -241,6 +241,10 @@ pub struct I2c {
     target: Option<u8>,
     /// Bytes written to a codec since the start.
     codec_byte: u8,
+    /// The register a codec write goes to.
+    codec_reg: u8,
+    /// The ES8388's registers as written (the speaker's level, doc/70 §11).
+    pub es8388: [u8; 64],
     /// Transfers that ran, for tests.
     pub transfers: u64,
     /// Register writes to expander #2 (must stay 0).
@@ -267,6 +271,8 @@ impl Default for I2c {
             imu: Bmi270::new(),
             target: None,
             codec_byte: 0,
+            codec_reg: 0,
+            es8388: [0; 64],
             transfers: 0,
             exp2_writes: 0,
             codec_writes: [0; 2],
@@ -413,6 +419,11 @@ impl I2c {
             // Register, then value.
             Some(a @ (ES8388_ADDR | ES7210_ADDR)) => {
                 self.codec_byte += 1;
+                if self.codec_byte == 1 {
+                    self.codec_reg = b;
+                } else if self.codec_byte == 2 && a == ES8388_ADDR && (self.codec_reg as usize) < self.es8388.len() {
+                    self.es8388[self.codec_reg as usize] = b;
+                }
                 if self.codec_byte == 2 {
                     self.out_at_codec.get_or_insert(self.exp[0].regs[0x05]);
                     self.codec_writes[(a == ES7210_ADDR) as usize] += 1;

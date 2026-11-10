@@ -8,6 +8,10 @@
 //! left channel, as the amplitude of a sine, full scale 32767) in the quiet
 //! and during the tone (the first 200 ms of it skipped: the latency).
 //! `heard` when the tone's level is 8 times the quiet's and at least 64.
+//! MS 1 listens without playing, for 1500 ms (the first 200 ms skipped too)
+//! and with no quiet before (other apps already play): whether HZ sounds,
+//! e.g. two `beep`s mixed (doc/70 §10). `heard` when its level is at least
+//! 64 (the Tab5's quiet is 2 to 7).
 //!
 //! Built with `--permit audio:out --permit audio:in` (strong: the system
 //! key). Exit 0 heard, 1 not heard, or 10 + the step that failed.
@@ -22,8 +26,9 @@ const SKIP_MS: u32 = 200;
 const BLOCK: usize = 256;
 
 fn main(hz: usize, ms: usize) -> usize {
-    let (hz, ms) = (if hz == 0 { 1000 } else { hz as u32 }, if ms == 0 { 1500 } else { ms as u32 });
-    match check(hz, ms) {
+    let (hz, listen) = (if hz == 0 { 1000 } else { hz as u32 }, ms == 1);
+    let ms = if ms <= 1 { 1500 } else { ms as u32 };
+    match check(hz, ms, listen) {
         Ok(heard) => (!heard) as usize,
         Err((step, e)) => {
             event!(Error, "spkcheck.failed", step = step, error = e as u32);
@@ -94,7 +99,7 @@ impl Goertzel {
     }
 }
 
-fn check(hz: u32, ms: u32) -> Result<bool, (u32, Error)> {
+fn check(hz: u32, ms: u32, listen: bool) -> Result<bool, (u32, Error)> {
     let mic = Handle::open(audio::IN, rights::READ | rights::CTL | rights::WAIT).map_err(|e| (1, e))?;
     let rate = mic.ctl(audio::RATE, 0).map_err(|e| (2, e))? as u32;
     let w = 2.0 * core::f32::consts::PI * hz as f32 / rate as f32;
@@ -105,7 +110,7 @@ fn check(hz: u32, ms: u32) -> Result<bool, (u32, Error)> {
     // The quiet.
     let mut quiet = Goertzel::new(c, len);
     let mut got = 0u32;
-    while got < rate * QUIET_MS / 1000 {
+    while !listen && got < rate * QUIET_MS / 1000 {
         wait(&[&mic], t5_rt::FOREVER).map_err(|e| (3, e))?;
         let k = mic.read(&mut buf).map_err(|e| (4, e))?;
         for f in buf[..k].chunks_exact(audio::FRAME) {
@@ -115,12 +120,13 @@ fn check(hz: u32, ms: u32) -> Result<bool, (u32, Error)> {
     }
 
     // The tone, recorded as it plays.
-    let out = Handle::open(audio::OUT, rights::WRITE | rights::CTL | rights::WAIT).map_err(|e| (5, e))?;
-    let (mut y1, mut y2) = (0.0f32, -AMPLITUDE * (w - w * w * w / 6.0));
+    let out = if listen { None } else { Some(Handle::open(audio::OUT, rights::WRITE | rights::CTL | rights::WAIT).map_err(|e| (5, e))?) };
     let total = rate * ms / 1000;
+    let mut done = if listen { total } else { 0 };
+    let (mut y1, mut y2) = (0.0f32, -AMPLITUDE * (w - w * w * w / 6.0));
     let skip = rate * SKIP_MS / 1000;
     let mut tone = Goertzel::new(c, len);
-    let (mut done, mut heard_n) = (0u32, 0u32);
+    let mut heard_n = 0u32;
     let mut block = [0u8; BLOCK * audio::FRAME];
     let mut pending = 0..0;
     while heard_n < total {
@@ -138,7 +144,7 @@ fn check(hz: u32, ms: u32) -> Result<bool, (u32, Error)> {
             pending = 0..n * audio::FRAME;
         }
         let mut moved = 0;
-        if !pending.is_empty() {
+        if let (Some(out), false) = (&out, pending.is_empty()) {
             let k = out.write(&block[pending.clone()]).map_err(|e| (6, e))?;
             pending.start += k;
             moved += k;
@@ -168,7 +174,8 @@ fn check(hz: u32, ms: u32) -> Result<bool, (u32, Error)> {
         tone_max = tone.max as u32,
         blocks = tone.blocks,
         lost = lost,
-        heard = heard
+        heard = heard,
+        listen = listen
     );
     Ok(heard)
 }

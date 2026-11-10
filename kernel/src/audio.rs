@@ -15,6 +15,9 @@
 //! `QUIET_MS` after the last push: kumiki clears each played descriptor to
 //! silence when it polls, and without polls the TX ring would go on
 //! repeating its last turn (`tools/wavcheck.py` heard it in p4emu-run-44).
+//! `audio:volume` sets the speaker's level in the codec (the platform's
+//! `audio_volume`), for every stream; the per-stream `VOLUME` scales here.
+//!
 //! Handles go through `write`/`read` rather than mapped rings: a system call
 //! per few ms costs little at 192 KB/s, needs no PMP region, and keeps the
 //! mixing here.
@@ -63,10 +66,12 @@ struct State {
     irq: bool,
     /// When the TX ring is silent again after the last push (ticks).
     quiet_at: u64,
+    /// The speaker's level (`audio:volume`).
+    master: u8,
 }
 
 static mut S: State =
-    State { base: 0, size: 0, outs: [Queue::FREE; OUTS], gain: [256; OUTS], ins: [Queue::FREE; INS], lost: [0; INS], users: 0, irq: false, quiet_at: 0 };
+    State { base: 0, size: 0, outs: [Queue::FREE; OUTS], gain: [256; OUTS], ins: [Queue::FREE; INS], lost: [0; INS], users: 0, irq: false, quiet_at: 0, master: 100 };
 
 /// Single core (core 0's scheduler loop and interrupt, with the lock held).
 fn st() -> &'static mut State {
@@ -112,6 +117,26 @@ fn opened() -> Result<(), Error> {
         return Err(Error::NoDevice);
     }
     Ok(())
+}
+
+/// `audio:volume` opens on boards with a stream.
+pub fn master_check() -> Result<(), Error> {
+    opened()
+}
+
+pub fn master_ctl(op: usize, arg: u64) -> Result<usize, Error> {
+    match op {
+        audio::LEVEL => Ok(st().master as usize),
+        audio::VOLUME if arg <= 100 => {
+            let r = Current::audio_volume(arg as u8);
+            t5_abi::event!(Info, "audio.volume", volume = arg as u32, ok = r.is_ok());
+            r.map_err(|_| Error::Fail)?;
+            st().master = arg as u8;
+            Ok(0)
+        }
+        audio::VOLUME => Err(Error::Invalid),
+        _ => Err(Error::NoSupport),
+    }
 }
 
 fn add_user() {

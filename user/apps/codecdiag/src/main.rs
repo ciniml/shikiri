@@ -14,14 +14,15 @@
 //! turns (doc/70 §9.5); to find which writes do: `run codecdiag 5 MS`
 //! powers down for MS ms and writes the power registers back (4 = 0x3C,
 //! 2 = 0x0A) without `init` (it sounded after), `run codecdiag 6` runs
-//! `init` alone (silent after).
+//! `init` alone (silent after). `run codecdiag 7 LEVEL` sets the speaker's
+//! level through `audio:volume` (doc/70 §11), then logs as mode 0.
 //!
-//! Built with `--permit i2c:int/0x10 --permit i2c:int/0x43` (strong: the
-//! system key). Exit 0, or the step that failed.
+//! Built with `--permit i2c:int/0x10 --permit i2c:int/0x43 --permit
+//! audio:volume` (strong: the system key). Exit 0, or the step that failed.
 
 use embedded_hal::i2c::I2c;
 use kumiki_t5os::I2cDevice;
-use t5_rt::{event, sleep_ms, time_ns};
+use t5_rt::{Handle, audio, event, rights, sleep_ms, time_ns};
 
 t5_rt::entry!(main);
 
@@ -42,6 +43,14 @@ fn reg(dev: &mut I2cDevice, addr: u8, r: u8) -> Result<u8, u32> {
 }
 
 fn run(mode: usize, ms: usize) -> Result<(), u32> {
+    let mode = if mode == 7 {
+        let h = Handle::open(audio::MASTER, rights::CTL).map_err(|_| 7u32)?;
+        h.ctl(audio::VOLUME, ms as u64).map_err(|_| 8u32)?;
+        event!(Info, "codecdiag.volume", volume = h.ctl(audio::LEVEL, 0).map_err(|_| 8u32)? as u32);
+        0
+    } else {
+        mode
+    };
     let mut exp = I2cDevice::open(0x43).map_err(|_| 1u32)?;
     let (dir, out, him) = (reg(&mut exp, 0x43, 0x03)?, reg(&mut exp, 0x43, 0x05)?, reg(&mut exp, 0x43, 0x07)?);
     event!(Info, "codecdiag.expander", dir = dir, out = out, out_h_im = him);

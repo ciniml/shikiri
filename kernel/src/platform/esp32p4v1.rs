@@ -1153,6 +1153,11 @@ impl Platform for Esp32p4v1 {
         audio::service()
     }
 
+    #[cfg(not(any(feature = "board-p4evb", feature = "chip-v3")))]
+    fn audio_volume(level: u8) -> Result<(), &'static str> {
+        board::volume(level)
+    }
+
     fn board_init() -> super::Panel {
         t5_abi::event!(Info, "board.name", name = board::NAME);
         board::init()

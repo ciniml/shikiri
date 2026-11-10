@@ -8,9 +8,9 @@ use t5_rt::{Files, proc};
 use crate::{name_of, snapshot};
 
 /// The commands `help` lists.
-pub const COMMANDS: [&str; 23] = [
+pub const COMMANDS: [&str; 24] = [
     "help", "echo", "clear", "uptime", "ls", "cat", "write", "rm", "mkdir", "run", "apps", "ps", "kill", "fg", "ping", "ifconfig", "top",
-    "nc", "mt", "cfg", "exit", "more", "ota",
+    "nc", "mt", "cfg", "exit", "more", "ota", "volume",
 ];
 
 const CFG: [&str; 5] = ["list", "get", "set", "secret", "rm"];

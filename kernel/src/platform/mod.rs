@@ -174,6 +174,11 @@ pub trait Platform {
     }
     /// The stream's interrupt on (someone uses it) or off.
     fn audio_interrupts(_on: bool) {}
+    /// The speaker's level in the codec: 0 silent, 1..=100 from -49.5 dB
+    /// to 0 dB (`audio:volume`).
+    fn audio_volume(_level: u8) -> Result<(), &'static str> {
+        Err("no audio")
+    }
     /// Services the stream as its interrupt would (clears it, moves the
     /// rings on): the scheduler loop idles with interrupts masked, taking
     /// them only while a process runs.

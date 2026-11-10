@@ -138,6 +138,14 @@ fn codecs() -> u8 {
     if dac.is_ok() { SPK_EN } else { 0 }
 }
 
+/// The speaker's level (`audio:volume`): the ES8388's DAC attenuation,
+/// 0.5 dB a step down from 100 (kumiki's `set_volume`), muted at 0.
+pub fn volume(level: u8) -> Result<(), &'static str> {
+    let mut codec = kumiki_es8388::Es8388::new(Bus, kumiki_es8388::ADDR);
+    let r = if level == 0 { codec.set_mute(true) } else { codec.set_volume(level).and_then(|()| codec.set_mute(false)) };
+    r.map_err(|e| codec_result(&Err(e)))
+}
+
 fn tp_int_output(high: bool) {
     unsafe {
         wr(io_mux_reg(TP_INT), 1 << 12 | 1 << 9);

@@ -43,6 +43,7 @@ pub enum Object {
     /// The speaker and the microphones (doc/70).
     AudioOut(crate::audio::OutHandle),
     AudioIn(crate::audio::InHandle),
+    AudioVolume,
     Random,
     CfgFlash(crate::flash::CfgFlash),
     /// Held for its `Drop`: the mark goes down with the handle.
@@ -190,6 +191,10 @@ impl Object {
                 Ok((Object::AudioOut(crate::audio::OutHandle::open()?), rights::WRITE | rights::CTL | rights::WAIT))
             }
             n if n == t5_abi::audio::IN.as_bytes() => Ok((Object::AudioIn(crate::audio::InHandle::open()?), rights::READ | rights::CTL | rights::WAIT)),
+            n if n == t5_abi::audio::MASTER.as_bytes() => {
+                crate::audio::master_check()?;
+                Ok((Object::AudioVolume, rights::CTL))
+            }
             n if n == t5_abi::update::NAME.as_bytes() => Ok((Object::Update(crate::update::UpdateHandle::open(pid)?), rights::READ | rights::WRITE | rights::WAIT)),
             n if n == t5_abi::random::NAME.as_bytes() => Ok((Object::Random, rights::READ)),
             n if n == t5_abi::cfgflash::NAME.as_bytes() => {
@@ -349,6 +354,7 @@ impl Table {
             Object::Spawn(s) => s.ctl(op, arg),
             Object::AudioOut(a) => a.ctl(op, arg),
             Object::AudioIn(a) => a.ctl(op, arg),
+            Object::AudioVolume => crate::audio::master_ctl(op, arg),
             Object::Channel(_) | Object::Touch(_) | Object::NetDev(_) | Object::Kbd(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::Update(_) | Object::I2c(_) | Object::Random | Object::BtHci(_) | Object::Ready(_) => {
                 Err(Error::NoSupport)
             }
@@ -560,7 +566,7 @@ impl Table {
             Object::Update(u) => u.poll().map(|(ev, v)| (i, ev, v)),
             Object::AudioOut(a) => a.poll().map(|(ev, v)| (i, ev, v)),
             Object::AudioIn(a) => a.poll().map(|(ev, v)| (i, ev, v)),
-            Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::I2c(_) | Object::Random => None,
+            Object::Shm(_) | Object::Sd(_) | Object::CfgFlash(_) | Object::Ready(_) | Object::Spawn(_) | Object::List(_) | Object::Kill(_) | Object::Focus(_) | Object::Mem | Object::I2c(_) | Object::Random | Object::AudioVolume => None,
         })
     }
 

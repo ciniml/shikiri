@@ -37,8 +37,9 @@ pub const ABI_MAJOR: u16 = 0;
 /// the time too. Minor 22 (doc/60 F2): `display::HIDDEN`/`SHOWN`. Minor
 /// 23 (doc/60 F3): `display:focus`. Minor 24 (doc/61): `proc:mem`, the
 /// text size in `proc:list`. Minor 25 (doc/67): `update`. Minor 26
-/// (doc/69): `i2c:int/ADDR`.
-pub const ABI_MINOR: u16 = 27;
+/// (doc/69): `i2c:int/ADDR`. Minor 27 (doc/70): `audio:out`, `audio:in`.
+/// Minor 28 (doc/70 §11): `audio:volume`.
+pub const ABI_MINOR: u16 = 28;
 
 /// Syscall numbers (passed in a7). Numbers are only ever added, never reused.
 pub mod sys {
@@ -810,10 +811,16 @@ pub mod i2c {
 ///   gives `READABLE` (value: bytes waiting). Frames that do not fit are
 ///   dropped.
 ///
+/// - `audio:volume` (a strong permission): the speaker's level for every
+///   stream, set in the codec (on the Tab5 the ES8388's DAC): `ctl`
+///   `VOLUME` sets it, `LEVEL` reads it. Not kept across a reset (100
+///   after boot).
+///
 /// `NoDevice` on boards without audio, `Busy` when every slot is taken.
 pub mod audio {
     pub const OUT: &str = "audio:out";
     pub const IN: &str = "audio:in";
+    pub const MASTER: &str = "audio:volume";
     /// Bytes per frame (16-bit stereo).
     pub const FRAME: usize = 4;
     /// `ctl`: the sample rate in Hz.
@@ -822,10 +829,13 @@ pub mod audio {
     /// (`audio:in`).
     pub const QUEUED: usize = 2;
     /// `ctl` on `audio:out`, `arg` 0..=100: this stream's level (100: as
-    /// written; the default).
+    /// written; the default). On `audio:volume`: the speaker's level, 0
+    /// silent, 1..=100 from -49.5 dB to 0 dB in 0.5 dB steps.
     pub const VOLUME: usize = 3;
     /// `ctl` on `audio:in`: frames dropped for a full queue.
     pub const LOST: usize = 4;
+    /// `ctl` on `audio:volume`: the speaker's level.
+    pub const LEVEL: usize = 5;
     /// `wait` events.
     pub const WRITABLE: usize = 1;
     pub const READABLE: usize = 2;

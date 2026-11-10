@@ -9,7 +9,7 @@
 //! proc:spawn --permit proc:list --permit proc:apps --permit proc:kill`.
 //! Exits 0 on `exit`, or 1 if there is no terminal.
 
-use t5_rt::{CfgError, Channel, Config, Error, Files, Handle, Net, chan, display, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
+use t5_rt::{CfgError, Channel, Config, Error, Files, Handle, Net, audio, chan, display, event, fs, net, proc, rights, sleep_ms, spawn, time_ns, wait_raw};
 
 t5_rt::entry!(main);
 
@@ -413,6 +413,7 @@ impl Shell {
                  more FILE             a file a screen at a time\n\
                  ota app|kernel FILE   install an app or a kernel from the SD card\n\
                  ota reboot            restart (a new kernel starts)\n\
+                 volume [0-100]        the speaker's level (0: silent)\n\
                  exit                  end the shell (term starts a new one)\n\
                  Tab completes commands, apps (run), processes (fg) and files.\n\
                  A space in a name: \\  or \"...\" (cat My\\ File.txt).\n",
@@ -468,6 +469,11 @@ impl Shell {
                 None => o.str("usage: run APP [A0 [A1]]\n"),
             },
             "ps" => ps(o),
+            "volume" => match args.first().map(|a| a.parse::<u8>()) {
+                None => volume(o, None),
+                Some(Ok(v)) if v <= 100 => volume(o, Some(v)),
+                Some(_) => o.str("usage: volume [0-100]\n"),
+            },
             "top" => top(o),
             "ifconfig" => ifconfig(o),
             "nc" => match (args.first(), args.get(1).and_then(|p| p.parse::<u16>().ok())) {
@@ -942,6 +948,27 @@ fn kill(o: &mut Out, pid: u32) {
         // `proc:kill/own` (doc/52): only what this shell started.
         Err(Error::Denied) => o.str("kill: not started from this shell\n"),
         Err(_) => o.str("kill: failed\n"),
+    }
+}
+
+/// `volume [LEVEL]` (doc/70 §11): the speaker's level for every app
+/// (`audio:volume`), set or shown.
+fn volume(o: &mut Out, set: Option<u8>) {
+    let r = Handle::open(audio::MASTER, rights::CTL).and_then(|h| {
+        if let Some(v) = set {
+            h.ctl(audio::VOLUME, v as u64)?;
+        }
+        h.ctl(audio::LEVEL, 0)
+    });
+    match r {
+        Ok(v) => {
+            event!(Info, "shell.volume", volume = v as u32);
+            o.str("volume ");
+            o.num(v as u64);
+            o.str("\n");
+        }
+        Err(Error::NoDevice) => o.str("volume: no audio\n"),
+        Err(_) => o.str("volume: failed\n"),
     }
 }
 

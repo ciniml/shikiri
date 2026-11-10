@@ -42,7 +42,7 @@ PERMIT_cfgctl := --permit svc:cfg/r: --permit svc:cfg/w:test. --permit svc:cfg/w
 PERMIT_c6ota  := --permit svc:net/tcp-connect --permit svc:wifi/ota
 PERMIT_kgfx   := --permit display
 PERMIT_imu    := --permit i2c:int/0x68 --permit i2c:int/0x69
-PERMIT_codecdiag := --permit i2c:int/0x10 --permit i2c:int/0x43
+PERMIT_codecdiag := --permit i2c:int/0x10 --permit i2c:int/0x43 --permit audio:volume
 PERMIT_beep   := --permit audio:out
 PERMIT_mic    := --permit audio:in
 PERMIT_spkcheck := --permit audio:out --permit audio:in
@@ -57,7 +57,7 @@ PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc
 PERMIT_shell  := --permit svc:tty --permit svc:fs/rw: --permit svc:net/tcp-connect --permit svc:net/ping \
                  --permit svc:net/resolve --permit svc:net/info --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:mem \
                  --permit proc:kill/own --permit display:focus --permit svc:ota --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
-                 --permit svc:cfg/r: --permit svc:cfg/w: --stack 32768
+                 --permit svc:cfg/r: --permit svc:cfg/w: --permit audio:volume --stack 32768
 # What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a
 # service listens) or `ready:NAME` (a process raised the mark). The kernel
 # holds the start up to 10 s.
@@ -375,7 +375,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
@@ -944,6 +944,35 @@ p4emu-run-44:
 	grep -Eq "mic.done frames=24[0-9]{3} lost=0" $(BUILD)/emu-beep.txt
 	grep -Eq "audio.stats .* laps_lost=[1-9]$$" $(BUILD)/emu-beep.txt
 	tools/wavcheck.py $(BUILD)/emu-beep.wav 1000 8000 1700
+
+p4emu-run-45:
+	@# Audio stage A4 (doc/70 §10): two `beep`s at once, 1 kHz for 2 s and,
+	@# once it plays, 1.5 kHz for 1 s. The kernel adds the queues: the WAV
+	@# holds both tones (8192 each) for most of a second, summed to a peak
+	@# about 16384. Loading the second holds the kernel (laps_lost: the
+	@# first tone's last turn plays again), which wavmix does not mind.
+	$(T5EMU) --max-ms 60000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --audio-out $(BUILD)/emu-mix.wav --ctl "run beep 1000 2000" --ctl "wait-ms 300" --ctl "run beep 1500 1000" --ctl "wait-ms 3000" --ctl audio \
+	    --expect-event beep.start --expect-event beep.done --expect-event audio.stats \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-mix.txt 2>&1 || { tail -20 $(BUILD)/emu-mix.txt; false; }
+	test $$(grep -c "beep.done frames=" $(BUILD)/emu-mix.txt) -eq 2
+	grep -q "beep.done frames=96000" $(BUILD)/emu-mix.txt
+	grep -q "beep.done frames=48000" $(BUILD)/emu-mix.txt
+	tools/wavmix.py $(BUILD)/emu-mix.wav 1000 1500 6000 700
+
+p4emu-run-46:
+	@# The speaker's level (doc/70 §11): the shell's `volume 30` sets the
+	@# ES8388's DAC to 35 dB down (attenuation 70 half-dB steps, 0x46, both
+	@# channels), then `volume 0` mutes it (DACCONTROL3 0x24) and leaves the
+	@# attenuation.
+	$(T5EMU) --max-ms 40000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run term" --ctl "wait-ms 3000" --ctl "keys volume 30\n" --ctl "wait-ms 800" --ctl "keys volume 0\n" --ctl "wait-ms 800" \
+	    --expect-event term.ready --expect-event shell.volume \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-volume.txt 2>&1 || { tail -20 $(BUILD)/emu-volume.txt; false; }
+	grep -q "audio.volume volume=30 ok=true" $(BUILD)/emu-volume.txt
+	grep -q "shell.volume volume=30" $(BUILD)/emu-volume.txt
+	grep -q "shell.volume volume=0" $(BUILD)/emu-volume.txt
+	grep -q "t5emu: ES8388 DAC: control3=0x24 volume=0x46,0x46" $(BUILD)/emu-volume.txt
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

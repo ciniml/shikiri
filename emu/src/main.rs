@@ -585,6 +585,8 @@ fn main() -> ExitCode {
             i2c.codec_writes[1],
             i2c.out_at_codec.unwrap_or(0)
         );
+        // DACCONTROL3 (mute), LDACVOL, RDACVOL.
+        eprintln!("t5emu: ES8388 DAC: control3={:#04x} volume={:#04x},{:#04x}", i2c.es8388[0x19], i2c.es8388[0x1A], i2c.es8388[0x1B]);
     }
     let sd = &m.bus.sd;
     if sd.stats.0 > 0 {
