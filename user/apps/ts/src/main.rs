@@ -74,6 +74,10 @@ const IDLE_MAX_MS: u64 = 20;
 const UDP_PORT: u16 = 41641;
 const NETCHECK_ROUNDS: usize = 3;
 const NETCHECK_ROUND_MS: u64 = 700;
+/// Both servers send keep-alives about every minute (DERP's frame, the
+/// map's `KeepAlive`): nothing for this long and the connection is taken
+/// as dead (its TCP can die without a word: a NAT that forgot it).
+const SILENT_MS: u64 = 180_000;
 
 fn main(mode: usize, _: usize) -> usize {
     unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
@@ -351,6 +355,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     let mut web = Web::new(&mut node);
     let mut udp_buf = vec![0u8; 1500];
     let mut last_map = now_ms();
+    let mut last_derp = now_ms();
     let mut udp_check = true;
     let mut direct = 0;
     let mut shown_web = 0;
@@ -386,9 +391,15 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 Ok(_) => None,
                 Err(e) => return ("derp read", e),
             };
+            last_derp = now_ms();
             if let Some((src, data)) = packet {
                 node.from_derp(&src, &data, rng, now_ms());
             }
+        }
+        let now = now_ms();
+        if now - last_map > SILENT_MS || now - last_derp > SILENT_MS {
+            event!(Warn, "ts.silent", since_map_ms = (now - last_map) as u32, since_derp_ms = (now - last_derp) as u32, up_s = ((now - started) / 1000) as u32);
+            return ("silent", Error::Io);
         }
         web.step(&mut node, |n| status(n, hostname, region, &host, started));
         if let Some(svc) = svc.as_deref_mut() {
