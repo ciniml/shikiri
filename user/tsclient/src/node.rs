@@ -12,7 +12,10 @@
 //! open the way through NATs). Sending to a peer through DERP also tries
 //! for a direct path, at most every `PROBE_MS`: pings to the peer's
 //! endpoints, and a CallMeMaybe through DERP with ours; a pong over UDP
-//! makes its source the peer's path.
+//! makes its source the peer's path. While packets go to or come from a
+//! peer on a direct path (`ACTIVE_MS`), a ping goes there every
+//! `HEARTBEAT_MS` (Tailscale's heartbeat): its pong keeps the path, and the
+//! NATs on the way keep the mapping, through gaps in the traffic.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -30,6 +33,12 @@ use crate::wg::{Device, Received};
 const DIRECT_MS: u64 = 15_000;
 /// Trying for a direct path to a peer, at most this often.
 const PROBE_MS: u64 = 5_000;
+/// A peer with packets this recently is active: its direct path is kept
+/// with heartbeats (Tailscale's sessionActiveTimeout).
+const ACTIVE_MS: u64 = 45_000;
+/// A ping on an active peer's direct path this often (Tailscale's
+/// heartbeatInterval).
+const HEARTBEAT_MS: u64 = 3_000;
 /// Pings that may be waiting for pongs, in all.
 const PINGS_MAX: usize = 16;
 
@@ -58,6 +67,7 @@ pub struct Stats {
     pub udp_in: u32,
     pub udp_out: u32,
     pub pongs: u32,
+    pub heartbeats: u32,
 }
 
 /// Packets that may wait for handshakes, in all.
@@ -84,6 +94,10 @@ pub struct Node {
     pub endpoints: Vec<([u8; 4], u16)>,
     /// When a direct path to a peer was last tried: (node key, ms).
     probed: Vec<([u8; LEN], u64)>,
+    /// Packets last went to or came from a peer: (node key, ms).
+    active: Vec<([u8; LEN], u64)>,
+    /// Our last ping over UDP to a peer: (node key, ms).
+    pinged: Vec<([u8; LEN], u64)>,
     /// Our pings out: (transaction id, peer node key).
     pings: VecDeque<([u8; disco::TXID], [u8; LEN])>,
     /// Packets for peers whose handshake is out: (destination, packet).
@@ -109,6 +123,8 @@ impl Node {
             direct: Vec::new(),
             endpoints: Vec::new(),
             probed: Vec::new(),
+            active: Vec::new(),
+            pinged: Vec::new(),
             pings: VecDeque::new(),
             waiting: VecDeque::new(),
             tap: None,
@@ -177,8 +193,9 @@ impl Node {
                 self.stats.handshakes += 1;
                 self.out.push((from, r));
             }
-            Received::Packet { packet, .. } => {
+            Received::Packet { packet, peer } => {
                 self.stats.packets_in += 1;
+                mark(&mut self.active, self.wg.peers[peer].key, now_ms);
                 if let Some(t) = self.tap {
                     t(false, &packet);
                 }
@@ -263,6 +280,7 @@ impl Node {
             }
             self.send(peer, &p, rng, now_ms);
         }
+        self.heartbeat(rng, now_ms);
         let out = core::mem::take(&mut self.out);
         self.stats.udp_out += out.iter().filter(|(d, _)| matches!(d, Dest::Udp(..))).count() as u32;
         out
@@ -285,6 +303,7 @@ impl Node {
     /// Sends `packet` to peer `peer`, starting a handshake if one is due;
     /// without a session it waits for the handshake.
     fn send(&mut self, peer: usize, packet: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) {
+        mark(&mut self.active, self.wg.peers[peer].key, now_ms);
         if self.wg.wants_handshake(peer, now_ms) {
             match self.tai64n(now_ms).and_then(|t| self.wg.initiate(peer, t, rng, now_ms)) {
                 Some(m) => {
@@ -331,18 +350,10 @@ impl Node {
                 Some((crate::netmap::parse_v4(ip)?, port.parse().ok()?))
             })
             .collect();
-        let mut nonce = [0u8; 24];
         for (ip, port) in eps {
-            let mut tx = [0u8; disco::TXID];
-            rng.fill_bytes(&mut tx);
-            rng.fill_bytes(&mut nonce);
-            if self.pings.len() == PINGS_MAX {
-                self.pings.pop_front();
-            }
-            self.pings.push_back((tx, key));
-            let ping = Message::Ping { tx, node_key: Some(self.wg.public()) };
-            self.out.push((Dest::Udp(ip, port), disco::seal(&self.disco, &their_disco, nonce, &ping)));
+            self.ping(key, &their_disco, ip, port, rng, now_ms);
         }
+        let mut nonce = [0u8; 24];
         if !self.endpoints.is_empty() {
             rng.fill_bytes(&mut nonce);
             let cmm = Message::CallMeMaybe { endpoints: self.endpoints.iter().map(|&(ip, port)| disco::v4(ip, port)).collect() };
@@ -350,9 +361,50 @@ impl Node {
         }
     }
 
+    /// A disco ping over UDP to peer `key` at `ip`:`port`; its pong makes
+    /// (or keeps) the path.
+    fn ping(&mut self, key: [u8; LEN], their_disco: &[u8; LEN], ip: [u8; 4], port: u16, rng: &mut impl CryptoRngCore, now_ms: u64) {
+        let (mut tx, mut nonce) = ([0u8; disco::TXID], [0u8; 24]);
+        rng.fill_bytes(&mut tx);
+        rng.fill_bytes(&mut nonce);
+        if self.pings.len() == PINGS_MAX {
+            self.pings.pop_front();
+        }
+        self.pings.push_back((tx, key));
+        mark(&mut self.pinged, key, now_ms);
+        let ping = Message::Ping { tx, node_key: Some(self.wg.public()) };
+        self.out.push((Dest::Udp(ip, port), disco::seal(&self.disco, their_disco, nonce, &ping)));
+    }
+
+    /// Pings the direct paths of the active peers every `HEARTBEAT_MS`.
+    fn heartbeat(&mut self, rng: &mut impl CryptoRngCore, now_ms: u64) {
+        let since = |v: &[([u8; LEN], u64)], k: [u8; LEN]| v.iter().find(|e| e.0 == k).map(|e| now_ms.saturating_sub(e.1));
+        let due: Vec<([u8; LEN], [u8; 4], u16)> = self
+            .direct
+            .iter()
+            .filter(|d| now_ms.saturating_sub(d.3) < DIRECT_MS)
+            .filter(|d| since(&self.active, d.0).is_some_and(|t| t < ACTIVE_MS))
+            .filter(|d| since(&self.pinged, d.0).is_none_or(|t| t >= HEARTBEAT_MS))
+            .map(|d| (d.0, d.1, d.2))
+            .collect();
+        for (key, ip, port) in due {
+            let Some(their_disco) = self.netmap.peers.iter().find(|p| p.node_key() == Some(key)).and_then(|p| p.disco_key()) else { continue };
+            self.stats.heartbeats += 1;
+            self.ping(key, &their_disco, ip, port, rng, now_ms);
+        }
+    }
+
     fn drop(&mut self, why: &'static str) {
         self.stats.dropped += 1;
         self.last_drop = why;
+    }
+}
+
+/// Notes `key` at `now_ms` in a list of (node key, ms).
+fn mark(v: &mut Vec<([u8; LEN], u64)>, key: [u8; LEN], now_ms: u64) {
+    match v.iter_mut().find(|e| e.0 == key) {
+        Some(e) => e.1 = now_ms,
+        None => v.push((key, now_ms)),
     }
 }
 
@@ -418,6 +470,29 @@ mod tests {
         // Not tried again within PROBE_MS.
         n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         assert!(n.poll(&mut Zero, 20_020).iter().all(|o| !matches!(o.0, Dest::Derp(_))));
+        // While packets went to the peer, a heartbeat ping on its path
+        // every HEARTBEAT_MS; its pong keeps the path past DIRECT_MS.
+        assert!(n.poll(&mut Zero, 22_000).is_empty());
+        let out = n.poll(&mut Zero, 23_100);
+        assert_eq!((out.len(), out[0].0), (1, Dest::Udp([198, 51, 100, 7], 41641)));
+        let Message::Ping { tx, .. } = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &out[0].1).unwrap() else { panic!() };
+        let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [8; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
+        n.from_udp([198, 51, 100, 7], 41641, &pong, &mut Zero, 23_110);
+        assert_eq!(n.direct_peers(36_000), 1);
+        // Idle past ACTIVE_MS: no heartbeat, and the path lapses.
+        let mut t = 23_100;
+        while t < 90_000 {
+            t += 3_000;
+            for (d, m) in n.poll(&mut Zero, t) {
+                if let Some(Message::Ping { tx, .. }) = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &m) {
+                    assert!(t < 20_020 + ACTIVE_MS);
+                    let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [8; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
+                    let Dest::Udp(ip, port) = d else { panic!() };
+                    n.from_udp(ip, port, &pong, &mut Zero, t);
+                }
+            }
+        }
+        assert_eq!((n.direct_peers(t), n.stats.heartbeats), (0, 14));
         n.apply_map(br#"{"ControlTime":"2026-11-11T05:31:49.25Z"}"#, 1000).unwrap();
         // 1,794,375,109 s after 1970, and 2.25 s later.
         let t = n.tai64n(3000).unwrap();

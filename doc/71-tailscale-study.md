@@ -458,3 +458,10 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - 実機: `run init 1` で `START.CFG` を書き直し、リセットした。
   - ts は init から起動し、名前引きに 2 回失敗（2 秒、4 秒待ち）した後、起動から 21 秒で map を受けた（前の版では 41 秒）。
   - ホストの `tailscale ping` は DERP の後に `via 192.168.2.129:41641` になった。
+
+### 14.5 直の経路を保つ Ping（2026-11-12）
+- Tailscale の heartbeat にならった。パケットを送るか受けるかした相手を、45 秒の間「通信中」とする（`ACTIVE_MS`、Tailscale の sessionActiveTimeout）。通信中の相手の直の経路へは、3 秒ごとに disco の Ping を UDP で送る（`HEARTBEAT_MS`、heartbeatInterval）。その Pong で経路の期限（15 秒）が延び、途中の NAT も対応表を保つ。
+- 通信のない相手には送らない。経路は 15 秒で切れ、次の通信でまた探す（§14.3）。
+- 経路探し（§14.3）の Ping と同じ関数（`Node::ping`）で送る。数は `Stats::heartbeats`（`ts.direct` の `heartbeats`）。
+- Node の試験: 通信の後は 3 秒ごとに Ping、その Pong で 15 秒を過ぎても直のまま、通信が途絶えて 45 秒たつと Ping は止まり、経路が切れる。`cargo test -p tsclient` の 16 が通った。
+- 実機: ホストから 20 秒おきに ICMP の ping を 6 回送った。Tab5 はその間ずっと直の経路のままだった（`ts.direct peers=1` の後、0 に戻らない）。往復は 1 回目を除き 3〜6 ms。前の版なら、20 秒の間に 15 秒の期限が切れて DERP に戻っていた。

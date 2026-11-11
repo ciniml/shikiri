@@ -425,7 +425,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         let s = node.stats;
         let d = node.direct_peers(now_ms());
         if d != direct {
-            event!(Info, "ts.direct", peers = d, udp_in = s.udp_in, udp_out = s.udp_out, pongs = s.pongs);
+            event!(Info, "ts.direct", peers = d, udp_in = s.udp_in, udp_out = s.udp_out, pongs = s.pongs, heartbeats = s.heartbeats);
             direct = d;
         }
         if (s.handshakes, s.initiations, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.initiations, shown.echo_replies, shown.dropped, shown_web) {
