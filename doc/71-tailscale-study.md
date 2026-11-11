@@ -433,11 +433,17 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
   - 切れたときの TCP の状態と、最後の map からの時間を `ts.ctl_lost` に出すようにした。
 - まだ: IPv6 の endpoint、NAT の対応表を保つための Ping。
 
-### 14.3 その後（実機ではまだ試していない）
+### 14.3 その後
 - こちらからも直の経路を探す。DERP で送る相手には、5 秒に 1 回まで（`PROBE_MS`）次の 2 つを送る。
   - 相手の IPv4 の endpoint へ、UDP で disco の Ping（こちらの node key 付き）。
   - DERP で、こちらの endpoint を並べた CallMeMaybe。
 - こちらの Ping への Pong が UDP で来れば、その送り元を相手の経路にする（disco の box で相手の鍵が確かめられている）。これで、相手の home が別の DERP 領域でも、直に届けば話せる。Node の試験で確かめた。
 - UDP の読み取り: 毎回の巡回では聞かない。何かあった直後か、眠りが `net` の知らせ（UDP_WAIT、`udp_arm` の後の `wait`）で終わったときだけ読む。
 - `ota`: URL のホストが 100.64.0.0/10 のアドレスか `.ts.net` の名前なら、`svc:ts` でつなぐ。カーネルの確かめ（doc/67 §5）も同じ。tailnet から入れたカーネルは、起動のときに `ts` が動いていなければ確かめが済まない（`START.CFG` に `ts` を入れる）。許可に `svc:ts/tcp-connect`、`svc:ts/resolve`。
-- 実機の試験は、プローブが開けなくなって止まった（"The debug probe could not be created"、のちに attach の失敗）。同じハブの別の機器が、つながり損ね続けていた（error -71）。
+- 実機（2026-11-11）:
+  - 前の版（§14.1）を動かしていた途中、1,057 秒で Tab5 が固まった。ping も JTAG の attach も効かなくなり、利用者がリセットした。原因はまだ分からない（最後のログは wlan.stats）。同じハブの別の機器が、つながり損ね続けていた（error -71）。リセットの後は、ハブごと何度か付き直してから安定した。
+  - 新しい版:
+    - ホストの `tailscale ping` は DERP の後に `via 192.168.2.129:41641` になった。
+    - 双方の直の経路が切れてから Tab5 の `tsget` でホストの HTTP を取ると、取得の間は直の経路になった（`ts.direct peers=1`）。103,390 バイトを 499 ms で受けた（DERP 経由では 1,144 ms）。
+  - `ota app http://<ホストの 100.x>:28080/greeter.t5a`（利用者が Tab5 のターミナルで打った）で、`ota.installed` が出た（6,860 バイト）。サーバのログに Tab5 の 100.x からの GET が出た。ota は自動起動の印付きの版を入れた。
+  - shell の `ifconfig` は動いた（`shell.listed`）。`ts0` の表示は利用者の画面でしか見られない。
