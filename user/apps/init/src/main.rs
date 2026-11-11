@@ -33,7 +33,8 @@ const FILE_MAX: usize = 2 << 10;
 /// network there), the network services (`wifi 1`: with Bluetooth),
 /// Bluetooth LE and Matter (doc/49 §22: `ble` waits for `ready:bt`,
 /// `matter` for `svc:net`, doc/51 §3), the font service and the terminal
-/// (doc/45: `font` first, `term` connects to it).
+/// (doc/45: `font` first, `term` connects to it), and Tailscale (doc/71:
+/// `ts` with mode 0 runs only on a node that joined a tailnet already).
 const DEFAULT_LIST: &str = "\
 cfg
 wifi 1
@@ -43,6 +44,7 @@ ble
 matter
 font
 term
+ts
 ";
 
 /// The panel's (`run init 3`): `mtdash` owns the display instead of `term`.
@@ -54,6 +56,7 @@ netctl
 ble
 matter
 mtdash
+ts
 ";
 
 const TEST_LIST: &str = "\

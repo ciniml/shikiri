@@ -16,8 +16,11 @@
 //! `controlplane.tailscale.com`). The machine, node and disco keys are
 //! made on the first start and kept as the secret `ts.keys`.
 //!
-//! `run ts`. Exits only when it cannot start (the step); otherwise retries
-//! after failures.
+//! `run ts [MODE]`: 0 (as in START.CFG) starts only on a node that has
+//! its keys already (exit 0 with `ts.off` otherwise), so a device that
+//! never joined a tailnet does not ask the control server for one at each
+//! boot; 1 starts in any case, making the keys on the first start. Exits
+//! only when it cannot start (the step); otherwise retries after failures.
 
 extern crate alloc;
 
@@ -57,7 +60,8 @@ static HEAP: LockedHeap = LockedHeap::empty();
 
 const DEFAULT_SERVER: &str = "controlplane.tailscale.com";
 const DEFAULT_HOSTNAME: &str = "tab5";
-const RETRY_MS: u64 = 30_000;
+const RETRY_FIRST_MS: u64 = 2000;
+const RETRY_MAX_MS: u64 = 30_000;
 /// Re-registering while a person has not approved the node yet.
 const LOGIN_POLL_MS: u64 = 20_000;
 const RESOLVE_MS: u64 = 5000;
@@ -71,7 +75,7 @@ const UDP_PORT: u16 = 41641;
 const NETCHECK_ROUNDS: usize = 3;
 const NETCHECK_ROUND_MS: u64 = 700;
 
-fn main(_: usize, _: usize) -> usize {
+fn main(mode: usize, _: usize) -> usize {
     unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
     let mut seed = [0u8; 32];
     if random_fill(&mut seed).is_err() {
@@ -95,6 +99,10 @@ fn main(_: usize, _: usize) -> usize {
     let auth = text("ts.authkey", "");
     let keys = match cfg.get("ts.keys", &mut buf) {
         Ok(Some(v)) if v.len == 96 => Keys::from_bytes(buf[..96].try_into().unwrap()),
+        _ if mode == 0 && auth.is_empty() => {
+            event!(Info, "ts.off");
+            return 0;
+        }
         _ => {
             let k = Keys::generate(&mut rng);
             if cfg.set("ts.keys", &k.to_bytes(), true).is_err() {
@@ -114,11 +122,16 @@ fn main(_: usize, _: usize) -> usize {
     if svc.is_none() {
         event!(Warn, "ts.failed", step = "svc", error = "io");
     }
+    let mut retry = RETRY_FIRST_MS;
     loop {
+        let start = now_ms();
         let e = run(&mut rng, server, &hostname, &auth, &keys, svc.as_mut());
         let (step, error) = e;
-        event!(Warn, "ts.failed", step = step, error = describe(error));
-        sleep_ms(RETRY_MS);
+        event!(Warn, "ts.failed", step = step, error = describe(error), retry_ms = retry);
+        sleep_ms(retry);
+        // Short at first (at boot `net` may not have an address yet),
+        // longer while failures follow each other.
+        retry = if now_ms() - start > RETRY_MAX_MS * 2 { RETRY_FIRST_MS } else { (retry * 2).min(RETRY_MAX_MS) };
     }
 }
 
