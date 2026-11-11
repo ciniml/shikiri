@@ -60,6 +60,8 @@ const DPICLK_EN: u32 = 1 << 7;
 const HP_RST_EN0: usize = 0x500E_60C0;
 const RST_EN_GDMA: u32 = 1 << 21;
 const RST_EN_DSI_BRG: u32 = 1 << 26;
+/// `reset_cause` after `reset` (SW_SYS).
+const RESET_SOFTWARE: u32 = 3;
 
 // ---- DSI host (mipi_dsi_host_reg.h) ----
 const HOST: usize = 0x500A_0000;
@@ -696,6 +698,18 @@ pub fn init(panel: Panel, fb: usize) -> Result<(), &'static str> {
         wr(BRG_DPI_CONFIG_UPDATE, 1);
         wr(BRG_INT_ENA, BRG_UNDERRUN);
     }
+    // After a debug probe's reset the frame DMA sometimes does not start
+    // (`fifo` and `dma_status` stay 0, the screen keeps what it had; once
+    // so, every probe reset after it too). Setting up the DMA, the bridge
+    // and the 2D DMA's blocks again did not help; a software reset has
+    // always cleared it (doc/17 §13).
+    if !running() {
+        stuck();
+        if Esp32p4v1::reset_cause() != RESET_SOFTWARE {
+            event!(Warn, "display.reset");
+            Esp32p4v1::reset();
+        }
+    }
     delay_us(20_000); // a frame on screen before the light comes on
     backlight(true);
     let fifo = unsafe { rd(BRG_FIFO_FLOW_STATUS) };
@@ -709,6 +723,31 @@ pub fn init(panel: Panel, fb: usize) -> Result<(), &'static str> {
         fifo = fifo
     );
     Ok(())
+}
+
+/// Whether the frame DMA has started: within 2 ms the bridge's FIFO fills
+/// or the channel has moved data (a frame is ~21 ms).
+fn running() -> bool {
+    wait(2_000, || unsafe { rd(BRG_FIFO_FLOW_STATUS) != 0 || rd(CH_STATUS0) != 0 })
+}
+
+/// Logs the state of a frame DMA that did not start.
+fn stuck() {
+    event!(
+        Warn,
+        "display.dma_stuck",
+        chen = unsafe { rd(GDMA_CHEN0) },
+        cfg = unsafe { rd(GDMA_CFG0) },
+        ch_cfg1 = unsafe { rd(CH_CFG1) },
+        llp = unsafe { rd(CH_LLP0) },
+        ch_int = unsafe { rd(CH_INTSTATUS0) },
+        brg_en = unsafe { rd(BRG_EN) },
+        brg_int = unsafe { rd(BRG_INT_RAW) },
+        host_int0 = unsafe { rd(INT_ST0) },
+        host_int1 = unsafe { rd(INT_ST1) },
+        clk1 = unsafe { rd(SOC_CLK_CTRL1) },
+        rst0 = unsafe { rd(HP_RST_EN0) }
+    );
 }
 
 /// After frames: marks the used list items valid again; restarts the DMA

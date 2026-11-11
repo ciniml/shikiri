@@ -20,6 +20,7 @@ const CHEN0: u32 = 0x18;
 const CHEN1: u32 = 0x1C;
 const RESET0: u32 = 0x58;
 const CH1_LLP0: u32 = 0x128;
+const CH1_STATUS0: u32 = 0x130;
 const CH1_INTSTATUS0: u32 = 0x188;
 const CH1_INTSIGNAL_ENABLE0: u32 = 0x190;
 const CH1_INTCLEAR0: u32 = 0x198;
@@ -64,6 +65,9 @@ impl Dsi {
         match off {
             RESET0 => 0,
             CHEN0 => self.busy_until.is_some() as u32,
+            // The block in flight's count, as the chip shows it while
+            // sending (the kernel checks that the frame DMA started).
+            CH1_STATUS0 => if self.busy_until.is_some() { 230_399 } else { 0 },
             _ => self.gdma.get(&off).copied().unwrap_or(0),
         }
     }
