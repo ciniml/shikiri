@@ -465,3 +465,15 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - 経路探し（§14.3）の Ping と同じ関数（`Node::ping`）で送る。数は `Stats::heartbeats`（`ts.direct` の `heartbeats`）。
 - Node の試験: 通信の後は 3 秒ごとに Ping、その Pong で 15 秒を過ぎても直のまま、通信が途絶えて 45 秒たつと Ping は止まり、経路が切れる。`cargo test -p tsclient` の 16 が通った。
 - 実機: ホストから 20 秒おきに ICMP の ping を 6 回送った。Tab5 はその間ずっと直の経路のままだった（`ts.direct peers=1` の後、0 に戻らない）。往復は 1 回目を除き 3〜6 ms。前の版なら、20 秒の間に 15 秒の期限が切れて DERP に戻っていた。
+
+### 14.6 `svc:ts` の UDP（2026-11-12）
+- `svc:net` と同じ要求の形で UDP_BIND・UDP_SEND・UDP_RECV・UDP_WAIT・CLOSE を足した。ソケットは smoltcp の UDP（片道 4 個・4 KiB）で、TCP と合わせて 8 個まで。
+  - UDP_BIND: アドレスとリンクは見ない。port 0 なら空いている番号（49152 から）を選び、v1 で返す。ほかの客が同じ番号を使っていれば ADDR_IN_USE。
+  - UDP_SEND: 送り先は tailnet の相手。列が一杯なら 0 バイト。
+  - UDP_RECV: `UDP_HEADER` の後にデータ、送り元の port は slice の先頭、IPv4 は v1（`svc:net` と同じ）。
+  - UDP_WAIT: データグラムが待っていればすぐ 1。なければ答えを残し、届いたときに 1 を送る。先に客の次の要求が来たら、その答えの前に 0 を送る（答えの順を保つ）。
+- grant は `udp:PORT` か `udp:any`。
+- 試験: `run tsget IP PORT+0x10000` は UDP の版。5 個のデータグラムをエコーサーバへ送り、それぞれ UDP_WAIT で待つ（`tsget.udp`）。tsget の許可に `svc:ts/udp:any`。
+- 実機（ホストの 100.x の UDP エコー）:
+  - 起動直後の 1 回目は 5 個中 3 個が返った（最長 226 ms）。サーバには 5 個とも届いていた。最初の握手と経路探しの最中で、どこで落ちたかは追っていない。
+  - その後は 3 回とも 5 個中 5 個が返った。往復は 6〜12 ms。直の経路が切れた後（70 秒の間を空けた後）の 1 個目も最長 187 ms で返った。

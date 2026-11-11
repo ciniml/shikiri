@@ -1,15 +1,16 @@
-//! `svc:ts` (doc/71 §13): TCP on the tailnet for other apps, in
+//! `svc:ts` (doc/71 §13): TCP and UDP on the tailnet for other apps, in
 //! `svc:net`'s protocol (`t5_abi::net`), so `Net::connect_to("ts")` serves
 //! them unchanged. Of its requests: TCP_CONNECT, TCP_LISTEN (on the
 //! tailnet address; the address and link are ignored), TCP_STATE, SEND,
-//! RECV, CLOSE, and RESOLVE / RESOLVE_RESULT for the netmap's names (a
-//! peer's short name or its whole name, IPv4), IF_INFO (one interface,
-//! `ts0`: the tailnet address, packets in and out). The rest answer
-//! BAD_REQUEST.
+//! RECV, CLOSE, UDP_BIND (the same; port 0 takes a free one), UDP_SEND,
+//! UDP_RECV, UDP_WAIT (doc/71 §14.6), and RESOLVE / RESOLVE_RESULT for the
+//! netmap's names (a peer's short name or its whole name, IPv4), IF_INFO
+//! (one interface, `ts0`: the tailnet address, packets in and out). The
+//! rest answer BAD_REQUEST.
 //!
 //! Grants (`svc:ts/GRANT`) as `svc:net`'s: `tcp-connect` or
-//! `tcp-connect:PORT`, `tcp-listen:PORT` or `tcp-listen:any`, `resolve`,
-//! `info`.
+//! `tcp-connect:PORT`, `tcp-listen:PORT` or `tcp-listen:any`, `udp:PORT`
+//! or `udp:any`, `resolve`, `info`.
 //!
 //! The sockets are smoltcp's in the node; a new session with the control
 //! server and DERP (after a failure) starts with none, and the clients'
@@ -21,18 +22,21 @@ use t5_rt::net::{self as proto, op, state, status};
 use t5_rt::{Channel, Grants, Handle, Listener, Shm, event};
 use tsclient::node::Node;
 use tsclient::smoltcp::iface::SocketHandle;
-use tsclient::smoltcp::socket::tcp;
-use tsclient::smoltcp::wire::{IpAddress, Ipv4Address};
+use tsclient::smoltcp::socket::{tcp, udp};
+use tsclient::smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
 /// Clients at a time, each with `proto::SLICE` of shared memory.
 pub const CLIENTS: usize = 2;
 /// Sockets of all clients (each holds `BUF` twice).
 const SOCKETS: usize = 8;
 const BUF: usize = 4096;
+/// Datagrams a UDP socket holds each way.
+const DATAGRAMS: usize = 4;
 
 /// A client's socket, or the result of a RESOLVE.
 enum Sock {
     Tcp(SocketHandle),
+    Udp(SocketHandle),
     Resolved(Option<[u8; 4]>),
 }
 
@@ -41,6 +45,8 @@ struct Client {
     grants: Grants,
     /// By socket number - 1.
     socks: Vec<Option<Sock>>,
+    /// A UDP_WAIT not answered yet.
+    udp_waiting: bool,
 }
 
 pub struct Service {
@@ -101,7 +107,7 @@ impl Service {
             busy = true;
             let Some(i) = self.clients.iter().position(Option::is_none) else { continue };
             if self.pool_shm.grant(&c, i * proto::SLICE, proto::SLICE).is_ok() {
-                self.clients[i] = Some(Client { grants: c.peer_grants(), chan: c, socks: Vec::new() });
+                self.clients[i] = Some(Client { grants: c.peer_grants(), chan: c, socks: Vec::new(), udp_waiting: false });
             }
         }
         let mut msg = [0u8; proto::REQUEST_SIZE_V6];
@@ -118,8 +124,20 @@ impl Service {
                     }
                 };
                 busy = true;
-                let r = self.request(i, &msg[..len], node);
-                let _ = self.clients[i].as_ref().unwrap().chan.send(&r);
+                // A UDP_WAIT still out is answered (0) before this
+                // request's reply, keeping the replies in order.
+                let c = self.clients[i].as_mut().unwrap();
+                if core::mem::take(&mut c.udp_waiting) {
+                    let _ = c.chan.send(&reply(status::OK, 0, 0));
+                }
+                if let Some(r) = self.request(i, &msg[..len], node) {
+                    let _ = self.clients[i].as_ref().unwrap().chan.send(&r);
+                }
+            }
+            // A datagram for a client waiting for one.
+            if let Some(c) = self.clients[i].as_mut().filter(|c| c.udp_waiting && udp_ready(c, node)) {
+                c.udp_waiting = false;
+                let _ = c.chan.send(&reply(status::OK, 1, 0));
             }
         }
         // Sockets closed by their clients that have finished.
@@ -139,18 +157,39 @@ impl Service {
     fn drop_client(&mut self, i: usize, node: &mut Node) {
         if let Some(c) = self.clients[i].take() {
             for s in c.socks.into_iter().flatten() {
-                if let Sock::Tcp(h) = s {
-                    node.tun.sockets.get_mut::<tcp::Socket>(h).abort();
-                    self.closing.push(h);
+                match s {
+                    Sock::Tcp(h) => {
+                        node.tun.sockets.get_mut::<tcp::Socket>(h).abort();
+                        self.closing.push(h);
+                    }
+                    Sock::Udp(h) => {
+                        node.tun.sockets.remove(h);
+                        self.used -= 1;
+                    }
+                    Sock::Resolved(_) => {}
                 }
             }
         }
     }
 
-    fn request(&mut self, i: usize, m: &[u8], node: &mut Node) -> [u8; proto::REPLY_SIZE] {
+    /// The reply to request `m` of client `i`; None for a UDP_WAIT
+    /// answered later.
+    fn request(&mut self, i: usize, m: &[u8], node: &mut Node) -> Option<[u8; proto::REPLY_SIZE]> {
         if m.len() < proto::REQUEST_SIZE {
-            return reply(status::BAD_REQUEST, 0, 0);
+            return Some(reply(status::BAD_REQUEST, 0, 0));
         }
+        if m[0] == op::UDP_WAIT {
+            let c = self.clients[i].as_mut().unwrap();
+            if udp_ready(c, node) {
+                return Some(reply(status::OK, 1, 0));
+            }
+            c.udp_waiting = true;
+            return None;
+        }
+        Some(self.answer(i, m, node))
+    }
+
+    fn answer(&mut self, i: usize, m: &[u8], node: &mut Node) -> [u8; proto::REPLY_SIZE] {
         let u = |o: usize| u32::from_le_bytes(m[o..o + 4].try_into().unwrap());
         let (code, sock, a, b) = (m[0], u16::from_le_bytes([m[2], m[3]]), u(4), u(8));
         if m[1] == proto::FAMILY_V6 {
@@ -167,6 +206,10 @@ impl Service {
         let c = self.clients[i].as_mut().unwrap();
         let tcp_of = |c: &Client| match c.socks.get((sock as usize).wrapping_sub(1)) {
             Some(Some(Sock::Tcp(h))) => Some(*h),
+            _ => None,
+        };
+        let udp_of = |c: &Client| match c.socks.get((sock as usize).wrapping_sub(1)) {
+            Some(Some(Sock::Udp(h))) => Some(*h),
             _ => None,
         };
         match code {
@@ -229,10 +272,66 @@ impl Service {
                 let ended = !s.may_recv() && !matches!(s.state(), tcp::State::SynSent | tcp::State::SynReceived | tcp::State::Listen);
                 reply(status::OK, 0, ended as u32)
             }
+            op::UDP_BIND => {
+                if node.tun.ip.is_none() {
+                    return reply(status::NO_ADDRESS, 0, 0);
+                }
+                if self.used == SOCKETS {
+                    return reply(status::NO_SOCKETS, 0, 0);
+                }
+                let taken = |p: u16| self.clients.iter().flatten().flat_map(|c| c.socks.iter().flatten()).any(|s| matches!(s, Sock::Udp(h) if node.tun.sockets.get::<udp::Socket>(*h).endpoint().port == p));
+                let port = match b as u16 {
+                    0 => loop {
+                        let p = self.next_port;
+                        self.next_port = if p == 65535 { 49152 } else { p + 1 };
+                        if !taken(p) {
+                            break p;
+                        }
+                    },
+                    p if taken(p) => return reply(status::ADDR_IN_USE, 0, 0),
+                    p => p,
+                };
+                let buf = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; DATAGRAMS], vec![0; BUF]);
+                let mut s = udp::Socket::new(buf(), buf());
+                if s.bind(port).is_err() {
+                    return reply(status::BAD_REQUEST, 0, 0);
+                }
+                let h = node.tun.sockets.add(s);
+                self.used += 1;
+                let c = self.clients[i].as_mut().unwrap();
+                reply(status::OK, add(c, Sock::Udp(h)) as u32, port as u32)
+            }
+            op::UDP_SEND => {
+                let Some(h) = udp_of(c) else { return reply(status::NOT_CONNECTED, 0, 0) };
+                let s = node.tun.sockets.get_mut::<udp::Socket>(h);
+                let (ip, port, n) = (a.to_be_bytes(), (b >> 16) as u16, ((b & 0xFFFF) as usize).min(mem.len()));
+                match s.send_slice(&mem[..n], IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(ip[0], ip[1], ip[2], ip[3])), port)) {
+                    Ok(()) => reply(status::OK, n as u32, 0),
+                    Err(udp::SendError::BufferFull) => reply(status::OK, 0, 0),
+                    Err(_) => reply(status::UNREACHABLE, 0, 0),
+                }
+            }
+            op::UDP_RECV => {
+                let Some(h) = udp_of(c) else { return reply(status::NOT_CONNECTED, 0, 0) };
+                let s = node.tun.sockets.get_mut::<udp::Socket>(h);
+                match s.recv_slice(&mut mem[proto::UDP_HEADER..]) {
+                    Ok((n, meta)) => {
+                        let IpAddress::Ipv4(from) = meta.endpoint.addr;
+                        mem[..2].copy_from_slice(&meta.endpoint.port.to_le_bytes());
+                        reply(status::OK, n as u32, u32::from_be_bytes(from.octets()))
+                    }
+                    Err(_) => reply(status::OK, 0, 0),
+                }
+            }
             op::CLOSE => match c.socks.get_mut((sock as usize).wrapping_sub(1)).and_then(Option::take) {
                 Some(Sock::Tcp(h)) => {
                     node.tun.sockets.get_mut::<tcp::Socket>(h).close();
                     self.closing.push(h);
+                    reply(status::OK, 0, 0)
+                }
+                Some(Sock::Udp(h)) => {
+                    node.tun.sockets.remove(h);
+                    self.used -= 1;
                     reply(status::OK, 0, 0)
                 }
                 Some(Sock::Resolved(_)) => reply(status::OK, 0, 0),
@@ -270,6 +369,7 @@ impl Service {
         let g = &self.clients[i].as_ref()?.grants;
         let port_ok = |kind: &[u8]| g.values(kind).any(|v| v == b"any" || core::str::from_utf8(v).ok().and_then(|v| v.parse::<u16>().ok()) == Some(port));
         let (ok, what) = match code {
+            op::UDP_BIND => (port_ok(b"udp"), "udp"),
             op::TCP_LISTEN => (port_ok(b"tcp-listen"), "tcp-listen"),
             op::TCP_CONNECT => (g.has(b"tcp-connect") || port_ok(b"tcp-connect"), "tcp-connect"),
             op::RESOLVE | op::RESOLVE_RESULT => (g.has(b"resolve"), "resolve"),
@@ -278,6 +378,11 @@ impl Service {
         };
         (!ok).then_some(what)
     }
+}
+
+/// A datagram waits on one of the client's UDP sockets.
+fn udp_ready(c: &Client, node: &Node) -> bool {
+    c.socks.iter().flatten().any(|s| matches!(s, Sock::Udp(h) if node.tun.sockets.get::<udp::Socket>(*h).can_recv()))
 }
 
 /// A free socket number (from 1) for `s`.
