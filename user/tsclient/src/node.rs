@@ -300,6 +300,17 @@ impl Node {
         self.direct.iter().filter(|d| now_ms.saturating_sub(d.3) < DIRECT_MS).count()
     }
 
+    /// The direct path to the peer with node key `key` (address, port), if
+    /// one is in use now.
+    pub fn direct_path(&self, key: &[u8; LEN], now_ms: u64) -> Option<([u8; 4], u16)> {
+        self.direct.iter().find(|d| d.0 == *key && now_ms.saturating_sub(d.3) < DIRECT_MS).map(|d| (d.1, d.2))
+    }
+
+    /// When packets last went to or came from the peer with node key `key`.
+    pub fn last_active(&self, key: &[u8; LEN]) -> Option<u64> {
+        self.active.iter().find(|a| a.0 == *key).map(|a| a.1)
+    }
+
     /// Sends `packet` to peer `peer`, starting a handshake if one is due;
     /// without a session it waits for the handshake.
     fn send(&mut self, peer: usize, packet: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) {
@@ -479,6 +490,8 @@ mod tests {
         let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [8; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
         n.from_udp([198, 51, 100, 7], 41641, &pong, &mut Zero, 23_110);
         assert_eq!(n.direct_peers(36_000), 1);
+        assert_eq!(n.direct_path(&[5; 32], 36_000), Some(([198, 51, 100, 7], 41641)));
+        assert_eq!(n.last_active(&[5; 32]), Some(20_020));
         // Idle past ACTIVE_MS: no heartbeat, and the path lapses.
         let mut t = 23_100;
         while t < 90_000 {
@@ -493,6 +506,7 @@ mod tests {
             }
         }
         assert_eq!((n.direct_peers(t), n.stats.heartbeats), (0, 14));
+        assert_eq!(n.direct_path(&[5; 32], t), None);
         n.apply_map(br#"{"ControlTime":"2026-11-11T05:31:49.25Z"}"#, 1000).unwrap();
         // 1,794,375,109 s after 1970, and 2.25 s later.
         let t = n.tai64n(3000).unwrap();

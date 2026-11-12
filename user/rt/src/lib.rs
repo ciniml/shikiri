@@ -1140,6 +1140,13 @@ impl Net {
         Ok((up != 0).then_some(len as usize))
     }
 
+    /// `svc:ts`: the record (`net::peer`) of this node (`k` = 0) or a peer
+    /// at the start of the slice. `NO_ADDRESS` past the last.
+    pub fn peer_info(&self, k: u32) -> Result<&[u8], NetError> {
+        let (_, len) = self.call(net::op::PEER_INFO, 0, k, 0)?;
+        Ok(&self.slice[..(len as usize).min(net::peer::RECORD)])
+    }
+
     /// Asks `op` on `s` every millisecond until it answers (1, value[,
     /// IPv6 address]).
     fn poll_result(&self, op: u8, s: u16, ms: u64) -> Result<(u32, Option<Ipv6Addr>), NetError> {

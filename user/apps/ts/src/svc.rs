@@ -5,7 +5,8 @@
 //! RECV, CLOSE, UDP_BIND (the same; port 0 takes a free one), UDP_SEND,
 //! UDP_RECV, UDP_WAIT (doc/71 §14.6), and RESOLVE / RESOLVE_RESULT for the
 //! netmap's names (a peer's short name or its whole name, IPv4), IF_INFO
-//! (one interface, `ts0`: the tailnet address, packets in and out). The
+//! (one interface, `ts0`: the tailnet address, packets in and out),
+//! PEER_INFO (this node and the peers: name, address, path; doc/71 §14.8). The
 //! rest answer BAD_REQUEST.
 //!
 //! Grants (`svc:ts/GRANT`) as `svc:net`'s: `tcp-connect` or
@@ -360,6 +361,10 @@ impl Service {
                 r[32..36].copy_from_slice(&node.stats.packets_out.to_le_bytes());
                 reply(status::OK, 1, proto::iface::HEADER as u32)
             }
+            op::PEER_INFO => match peer_info(node, a as usize, &mut mem[..proto::peer::RECORD]) {
+                true => reply(status::OK, 1, proto::peer::RECORD as u32),
+                false => reply(status::NO_ADDRESS, 0, 0),
+            },
             _ => reply(status::BAD_REQUEST, 0, 0),
         }
     }
@@ -373,7 +378,7 @@ impl Service {
             op::TCP_LISTEN => (port_ok(b"tcp-listen"), "tcp-listen"),
             op::TCP_CONNECT => (g.has(b"tcp-connect") || port_ok(b"tcp-connect"), "tcp-connect"),
             op::RESOLVE | op::RESOLVE_RESULT => (g.has(b"resolve"), "resolve"),
-            op::IF_INFO => (g.has(b"info"), "info"),
+            op::IF_INFO | op::PEER_INFO => (g.has(b"info"), "info"),
             _ => (true, ""),
         };
         (!ok).then_some(what)
@@ -397,6 +402,43 @@ fn add(c: &mut Client, s: Sock) -> usize {
             c.socks.len()
         }
     }
+}
+
+/// PEER_INFO: the record (`net::peer`) of this node (`k` = 0) or peer
+/// `k` - 1 in `r`; false past the last.
+fn peer_info(node: &Node, k: usize, r: &mut [u8]) -> bool {
+    use proto::peer;
+    let Some(p) = (if k == 0 { node.netmap.node.as_ref() } else { node.netmap.peers.get(k - 1) }) else { return false };
+    let now = crate::now_ms();
+    r.fill(0);
+    let name = p.name.split('.').next().unwrap_or("").as_bytes();
+    let n = name.len().min(peer::NAME);
+    r[..n].copy_from_slice(&name[..n]);
+    r[48..52].copy_from_slice(&u32::from_be_bytes(p.ipv4().unwrap_or([0; 4])).to_le_bytes());
+    let mut flags = match p.online {
+        Some(true) => peer::ONLINE,
+        Some(false) => peer::OFFLINE,
+        None => 0,
+    };
+    if k == 0 {
+        flags |= peer::SELF;
+    }
+    let key = p.node_key();
+    if let Some((ip, port)) = key.and_then(|key| node.direct_path(&key, now)) {
+        flags |= peer::DIRECT;
+        r[54..56].copy_from_slice(&port.to_le_bytes());
+        r[56..60].copy_from_slice(&u32::from_be_bytes(ip).to_le_bytes());
+    }
+    r[52] = flags;
+    let region = if k == 0 { node.home_region } else { p.home_region() };
+    if let Some((reg, _)) = node.netmap.derp_region(region) {
+        let code = reg.region_code.as_bytes();
+        let n = code.len().min(8);
+        r[60..60 + n].copy_from_slice(&code[..n]);
+    }
+    let idle = key.and_then(|key| node.last_active(&key)).map_or(u32::MAX, |t| (now.saturating_sub(t) / 1000) as u32);
+    r[68..72].copy_from_slice(&idle.to_le_bytes());
+    true
 }
 
 /// A netmap name's IPv4 address: this node or a peer, by its short name

@@ -80,6 +80,8 @@ pub mod op {
     pub const UDP_JOIN: u8 = 15;
     pub const UDP_WAIT: u8 = 16;
     pub const LINK_RENEW: u8 = 17;
+    /// `svc:ts` only (doc/71 §14.8): `a` = 0 this node, 1.. the peers.
+    pub const PEER_INFO: u8 = 18;
 }
 
 /// IF_INFO's record in the slice (doc/41): `name[8]` (NUL-padded) | `mac[6]`
@@ -93,6 +95,24 @@ pub mod iface {
     /// IPv6 addresses a record holds at most.
     pub const V6_MAX: usize = 4;
     pub const RECORD_MAX: usize = HEADER + V6_ENTRY * V6_MAX;
+}
+
+/// PEER_INFO's record in the slice: `name[48]` (the netmap's name up to
+/// the first dot, NUL-padded) | `u32` IPv4 address | `u8` flags | `u8` 0 |
+/// `u16` direct path's port | `u32` direct path's address | `region[8]`
+/// (home DERP region's code, NUL-padded) | `u32` seconds since packets
+/// last went or came (`u32::MAX`: never). Numbers little-endian, addresses
+/// as IF_INFO's. `NO_ADDRESS` past the last peer.
+pub mod peer {
+    pub const RECORD: usize = 72;
+    pub const NAME: usize = 48;
+    pub const SELF: u8 = 1 << 0;
+    /// The control server says it is online.
+    pub const ONLINE: u8 = 1 << 1;
+    /// The control server says it is offline.
+    pub const OFFLINE: u8 = 1 << 2;
+    /// Sent to over UDP now (else through DERP).
+    pub const DIRECT: u8 = 1 << 3;
 }
 
 pub mod status {

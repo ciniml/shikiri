@@ -401,6 +401,7 @@ impl Shell {
                  fg PID|APP            put its screen in front\n\
                  ping HOST             ping an address or name\n\
                  ifconfig              the network interfaces\n\
+                 ts                    the tailnet's nodes and paths\n\
                  top                   CPU use per process (any key ends)\n\
                  nc HOST PORT          a TCP connection, a line at a time\n\
                                        (Ctrl-C or Ctrl-D ends)\n\
@@ -476,6 +477,7 @@ impl Shell {
             },
             "top" => top(o),
             "ifconfig" => ifconfig(o),
+            "ts" => ts(o),
             "nc" => match (args.first(), args.get(1).and_then(|p| p.parse::<u16>().ok())) {
                 (Some(h), Some(port)) => nc(o, h, port),
                 _ => o.str("usage: nc HOST PORT\n"),
@@ -1187,6 +1189,78 @@ fn ifconfig(o: &mut Out) {
         interfaces(o, &ts);
     }
     event!(Info, "shell.listed", what = "ifconfig", count = 0u32);
+}
+
+/// The tailnet's nodes (doc/71 §14.8): this one, then the peers, each with
+/// its address and how packets go (`direct` ADDR:PORT, or `derp` REGION),
+/// and how long since packets last went or came.
+fn ts(o: &mut Out) {
+    let Ok(ts) = Net::connect_to("ts") else {
+        o.str("ts: not running\n");
+        return;
+    };
+    let mut count = 0u32;
+    for k in 0.. {
+        // NO_ADDRESS past the last.
+        let Ok(r) = ts.peer_info(k) else { break };
+        if r.len() < net::peer::RECORD {
+            break;
+        }
+        let u = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+        let flags = r[52];
+        o.col(name_of(&r[..net::peer::NAME]), 16);
+        o.raw(b' ');
+        let ip = u(48);
+        let mut a = [0u8; 15];
+        o.col(ip_text(ip, &mut a), 16);
+        o.raw(b' ');
+        if flags & net::peer::SELF != 0 {
+            o.str("self    ");
+        } else if flags & net::peer::OFFLINE != 0 {
+            o.str("offline ");
+        } else if flags & net::peer::DIRECT != 0 {
+            o.str("direct  ");
+        } else {
+            o.str("derp    ");
+        }
+        if flags & net::peer::DIRECT != 0 {
+            o.ip(u(56));
+            o.raw(b':');
+            o.num(u16::from_le_bytes([r[54], r[55]]) as u64);
+        } else {
+            o.str(name_of(&r[60..68]));
+        }
+        let idle = u(68);
+        if flags & net::peer::SELF == 0 && idle != u32::MAX {
+            o.str("  ");
+            o.num(idle as u64);
+            o.str("s ago");
+        }
+        o.str("\n");
+        count += 1;
+    }
+    if count == 0 {
+        o.str("ts: not on a tailnet yet\n");
+    }
+    event!(Info, "shell.listed", what = "ts", count = count);
+}
+
+/// `ip` as text in `buf`.
+fn ip_text(ip: u32, buf: &mut [u8; 15]) -> &str {
+    let mut n = 0;
+    for (i, o) in ip.to_be_bytes().iter().enumerate() {
+        if i > 0 {
+            buf[n] = b'.';
+            n += 1;
+        }
+        let s = [o / 100, o / 10 % 10, o % 10];
+        let skip = if *o >= 100 { 0 } else if *o >= 10 { 1 } else { 2 };
+        for d in &s[skip..] {
+            buf[n] = b'0' + d;
+            n += 1;
+        }
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("")
 }
 
 /// The interfaces a network service reports.

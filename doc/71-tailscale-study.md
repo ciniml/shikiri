@@ -484,3 +484,11 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
   - どの原因でも、ts からは何も送らないので、相手から来なくなったことに気づけなかった。
 - 直し: 制御サーバ（map の `KeepAlive`）も DERP サーバ（keepalive のフレーム）も、ほぼ 1 分ごとに何かを送ってくる。どちらかから 180 秒何も来なければ（`SILENT_MS`）、`ts.silent`（それぞれ最後に来てからの時間）を出してつなぎ直す。
 - 実機: 通信のない状態で約 400 秒、`ts.silent` は出なかった（誤って切らない）。死んだ接続はもう一度は起こせていないので、この直しで戻るところはまだ見ていない。
+
+### 14.8 shell の `ts`（2026-11-13）
+- ts の状態（相手、経路）はログでしか見られなかった。shell から見られるようにした。
+- `svc:ts` に要求 `PEER_INFO`（`t5_abi::net::op`、18。`svc:net` は `BAD_REQUEST`）。`a` = 0 がこのノード、1 から相手。答えの v1 は記録の長さ、最後より先は `NO_ADDRESS`。許可は `IF_INFO` と同じ `info`。
+- 記録（`net::peer`、72 バイト）: 名前（最初の `.` まで、48）、IPv4、フラグ（`SELF`・`ONLINE`・`OFFLINE`・`DIRECT`）、直の経路のポートとアドレス、ホームの DERP の地域のコード（8）、パケットを最後に送ったか受けてからの秒数（なければ `u32::MAX`）。
+- Node に `direct_path`（今使っている直の経路）と `last_active`（§14.5 の通信中の印）を足した。
+- `t5_rt::Net::peer_info(k)`。shell の `ts` は 1 行に 1 ノード: 名前、アドレス、`self` / `direct` / `derp` / `offline`、直なら ADDR:PORT、そうでなければ DERP の地域、最後の通信からの秒数。ts が動いていなければ `ts: not running`。
+- 実機: 利用者が Tab5 で `ts` を打った。ホストからの ping が止まっている間はホストの行が `derp` か `offline`（直の経路は 15 秒で切れる、§14.5）。2 秒おきの ping の間は `direct 192.168.2.x:41641` になった。`cargo test -p tsclient` の 16 が通った（`direct_path` と `last_active` を足した）。
