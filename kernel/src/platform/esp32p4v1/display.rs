@@ -209,7 +209,9 @@ struct Timing {
 
 const ILI9881C_TIMING: Timing = Timing { hsw: 40, hbp: 140, hfp: 40, vsw: 4, vbp: 20, vfp: 20 };
 const LANE_MBPS: u32 = 1040;
-const DPI_MHZ: u32 = 80;
+/// PLL_F240M / 4: about 48 fps, 88 MB/s from PSRAM. At 80 MHz (64 fps,
+/// 118 MB/s) the bridge ran dry while term redrew (doc/17 §14).
+const DPI_MHZ: u32 = 60;
 /// 20 MHz reference x 52 / 1 (m6-dsi.md §4.2).
 const PLL_N: u32 = 1;
 const PLL_M: u32 = 52;
