@@ -23,6 +23,9 @@ pub struct Options {
     /// Reset the target after attaching, to see a boot from the start (RTT
     /// data is consumed when read).
     pub reset: bool,
+    /// After the reset, this long before reading the target's memory (the
+    /// boot runs without the debug module's accesses).
+    pub attach_delay: Duration,
 }
 
 /// Finds `_SEGGER_RTT` in an ELF.
@@ -151,6 +154,8 @@ fn stream_on(
         // kernel writes the id again once it has set up the block.
         core.write_8(opts.control_block, &[0u8; 16]).map_err(|e| format!("clearing the RTT id: {e}"))?;
         core.reset().map_err(|e| format!("reset: {e}"))?;
+        drop(core);
+        std::thread::sleep(opts.attach_delay);
     }
     eprintln!("t5log: attached to {} via {}", opts.chip, opts.probe);
 

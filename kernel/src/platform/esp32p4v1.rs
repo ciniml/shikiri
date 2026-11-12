@@ -102,6 +102,9 @@ const LP_WDT_STG_RESET_SYSTEM: u32 = 3;
 // Reset cause (lp_clkrst_reg.h LP_CLKRST_RESET_CAUSE_REG, HPCORE0 bits
 // [12:7]); values are RESET_REASON in esp_rom/esp32p4/include/esp32p4/rom/rtc.h.
 const LP_CLKRST_RESET_CAUSE: usize = 0x5011_1010;
+/// LP_CLKRST_RESET_CAUSE for a debug probe's reset (reset_reasons.h: RESET_REASON_CPU_JTAG,
+/// "a reset command from JTAG").
+const RESET_CPU_JTAG: u32 = 0x18;
 const ROM_SOFTWARE_RESET: usize = 0x4FC0_0094;
 const EFUSE_RD_MAC_SYS_2: usize = 0x5012_D04C;
 
@@ -900,6 +903,15 @@ impl Platform for Esp32p4v1 {
     }
 
     fn psram_init() -> Result<(usize, usize), &'static str> {
+        // A debug probe's reset resets the CPUs only: the caches, the PSRAM
+        // controller and the DMAs go on as they were. About 1 in 5 of the
+        // boots after one then hangs at the first write to the PSRAM (the
+        // watchdog resets 4 s later), and the frame DMA may not start
+        // (doc/17 §13). A software reset resets them all; start again.
+        if Self::reset_cause() == RESET_CPU_JTAG {
+            t5_abi::event!(Warn, "boot.reset_again", reset_cause = RESET_CPU_JTAG);
+            Self::reset();
+        }
         // A reset that did not go through `reset` (a debug probe's, the
         // watchdog's) leaves the frame DMA reading PSRAM; stop it before the
         // PSRAM is set up again (doc/17 §10).

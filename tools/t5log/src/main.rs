@@ -38,7 +38,7 @@ const USAGE: &str = "usage:
   t5log schemas -o OUT ELF...
   t5log check ELF...
   t5log rtt --probe VID:PID:SERIAL --elf KERNEL [--elf APP]... [--schemas FILE]... \
-            [--chip esp32p4] [--chip-description YAML] [--reset] [--json] \
+            [--chip esp32p4] [--chip-description YAML] [--reset [--attach-delay MS]] [--json] \
             [--cmd COMMAND]... [--until-done]
   t5log decode [--schemas FILE]... [--elf ELF]... [--pretty] [--hex] [--tcp HOST:PORT | INPUT]
   t5log status --probe VID:PID:SERIAL [--chip esp32p4] [--chip-description YAML]
@@ -413,6 +413,7 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
     let mut chip = "esp32p4".to_string();
     let mut chip_description = None;
     let mut reset = false;
+    let mut attach_delay = 0;
     let mut pretty = true;
     let mut cmds: Vec<String> = Vec::new();
     let mut until_done = false;
@@ -428,6 +429,7 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
             "--chip" => chip = val()?,
             "--chip-description" => chip_description = Some(val()?),
             "--reset" => reset = true,
+            "--attach-delay" => attach_delay = val()?.parse().map_err(|_| "--attach-delay takes milliseconds")?,
             "--json" => pretty = false,
             "--cmd" => {
                 let v = val()?;
@@ -452,6 +454,7 @@ fn cmd_rtt(args: &[String]) -> Result<(), String> {
         channel: 0,
         poll: std::time::Duration::from_millis(10),
         reset,
+        attach_delay: std::time::Duration::from_millis(attach_delay),
     };
     // Lines typed on stdin become commands too.
     let (tx, rx) = std::sync::mpsc::channel::<String>();
