@@ -6,7 +6,7 @@
 //! bytes, as `tsget.done`. IP as a number (100.64.0.2 is 1681915906);
 //! PORT 0 is 80. PORT + 0x10000: UDP instead (doc/71 §14.6), `ROUNDS`
 //! datagrams to an echo server there, each waited for with UDP_WAIT, as
-//! `tsget.udp`.
+//! `tsget.udp` (a reply after its round counts as `late`).
 
 use t5_rt::{Net, event, time_ns, wait};
 
@@ -72,33 +72,54 @@ fn get(ip: u32, port: u16) -> Result<(u32, u32, u32), &'static str> {
 const ROUNDS: u32 = 5;
 const ECHO_MS: u64 = 2000;
 
-/// Datagrams to an echo server: how many came back, and the round trips.
+/// Datagrams to an echo server: how many came back, how many of those
+/// after their round's `ECHO_MS` (taken in a later round or in a last
+/// `ECHO_MS`), and the round trips.
 fn echo(ip: u32, port: u16) -> Result<(), &'static str> {
     let mut net = Net::connect_to("ts").map_err(|_| "connect to svc:ts")?;
     let s = net.udp_bind(0).map_err(|_| "udp bind")?;
-    let (mut back, mut min_us, mut max_us) = (0u32, u32::MAX, 0u32);
+    let (mut min_us, mut max_us) = (u32::MAX, 0u32);
+    let mut sent_at = [0u64; ROUNDS as usize];
+    let mut back = [false; ROUNDS as usize];
+    let mut late = 0u32;
     let mut buf = [0u8; 64];
-    for i in 0..ROUNDS {
-        let msg = [b't', b's', b'g', b'e', b't', b'0' + i as u8];
+    // Rounds, then the last wait (round ROUNDS).
+    for i in 0..=ROUNDS as usize {
         let start = time_ns();
-        net.udp_send(s, ip, port, &msg).map_err(|_| "udp send")?;
+        if i < ROUNDS as usize {
+            let msg = [b't', b's', b'g', b'e', b't', b'0' + i as u8];
+            sent_at[i] = start;
+            net.udp_send(s, ip, port, &msg).map_err(|_| "udp send")?;
+        }
         let end = start + ECHO_MS * 1_000_000;
         loop {
             let now = time_ns();
-            if now >= end {
+            if now >= end || back.iter().all(|&b| b) {
                 break;
             }
             net.udp_arm().map_err(|_| "udp arm")?;
             let _ = wait(&[net.handle()], end - now);
             let Ok((n, from, _)) = net.udp_recv(s, &mut buf, 0) else { continue };
-            if from == ip && buf[..n] == msg {
-                let us = ((time_ns() - start) / 1000) as u32;
-                (back, min_us, max_us) = (back + 1, min_us.min(us), max_us.max(us));
+            // Which round's: `tsgetN`.
+            let k = match &buf[..n] {
+                [b't', b's', b'g', b'e', b't', d] if from == ip && d.wrapping_sub(b'0') < ROUNDS as u8 => (d - b'0') as usize,
+                _ => continue,
+            };
+            if back[k] {
+                continue;
+            }
+            back[k] = true;
+            let us = ((time_ns() - sent_at[k]) / 1000) as u32;
+            (min_us, max_us) = (min_us.min(us), max_us.max(us));
+            if k != i {
+                late += 1;
+            } else {
                 break;
             }
         }
     }
     let _ = net.close(s);
-    event!(Info, "tsget.udp", ip = ip, port = port as u32, sent = ROUNDS, back = back, min_us = if back > 0 { min_us } else { 0 }, max_us = max_us);
+    let back = back.iter().filter(|&&b| b).count() as u32;
+    event!(Info, "tsget.udp", ip = ip, port = port as u32, sent = ROUNDS, back = back, late = late, min_us = if back > 0 { min_us } else { 0 }, max_us = max_us);
     if back == 0 { Err("no echo") } else { Ok(()) }
 }
