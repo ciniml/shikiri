@@ -29,7 +29,11 @@
 //! - 11: the soft-AP router set (doc/58 R4, scenario A): `ap0` a LAN of its
 //!   own (192.168.70.1/24, DHCP server) masqueraded behind Wi-Fi's station
 //!   or the wired Ethernet, whichever leads out; only the PC and the AP's
-//!   stations may start traffic to the board or through it.
+//!   stations may start traffic to the board or through it;
+//! - 12: the guard set, but TCP in from Wi-Fi silently dropped (doc/71
+//!   §14.10): the control server and DERP fall quiet as if a NAT on the
+//!   way forgot the connections, to see `ts.silent` reconnect. `2` undoes
+//!   it.
 //!
 //! At boot (autostart, doc/30) it runs with mode 0, maybe before `net` and
 //! `fs` are up: it waits up to 10 s for each.
@@ -56,6 +60,18 @@ pass forward state established,related
 ";
 
 const GUARD_SET: &str = "\
+policy in drop
+policy forward drop
+pass in on host
+pass in state established,related
+pass in on wlan0 proto udp port 5540
+pass in on wlan0 proto udp port 5353
+pass forward on host
+pass forward state established,related
+";
+
+const TS_CUT_SET: &str = "\
+drop in on wlan0 proto tcp
 policy in drop
 policy forward drop
 pass in on host
@@ -144,6 +160,7 @@ fn main(mode: usize, _: usize) -> usize {
         9 => load(ROUTER_SET),
         10 => load(ROUTER_SET_PC),
         11 => load(AP_ROUTER_SET),
+        12 => load(TS_CUT_SET),
         _ => Err(1),
     };
     match r {
