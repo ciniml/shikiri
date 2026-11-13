@@ -401,7 +401,7 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - Tab5: ホストの tailnet のアドレスに立てた `python3 -m http.server` へ `run tsget <ホストの 100.x> 28080`。こちらからの握手に 40 ms で応答が来て、200、4,388 バイト（168 ms）。103,390 バイトは 1,144 ms（約 90 KB/s、dropped=0）。閉じたポートでは RST で `establish` の失敗になる。
 - はじめはポート 8000 で試し、つながった直後にデータなしで FIN が返った。`ts.tcp` のトレースで TCP の流れは正しく、ホストの 0.0.0.0:8000 で別のもの（docker らしい）が待っていて、tailnet からの 8000 番がそちらへ行っていた（ホストの curl も python のログに出ていなかった）。Tab5 の側の問題ではなかった。
 - 試験の途中で、制御の接続が 1 回切れた（`ts.failed step=map stream error=io`）。30 秒後につなぎ直した。原因はまだ見ていない（それまでの版は 1 時間以上切れなかった）。
-- まだ: `ota` を `svc:ts` で使う（100.64.0.0/10 か `.ts.net` の名前なら `ts` につなぐ）、UDP、shell の `ts` コマンド、相手の home が別の DERP 領域のとき（こちらは自分の home の DERP にしか送らない。相手がそこにいなければ届かない）。
+- まだ: `ota` を `svc:ts` で使う（100.64.0.0/10 か `.ts.net` の名前なら `ts` につなぐ）、UDP、shell の `ts` コマンド、相手の home が別の DERP 領域のとき（こちらは自分の home の DERP にしか送らない。相手がそこにいなければ届かない。→ §14.12）。
 
 ## 14. 段 T5（最小）: 直の経路と、ifconfig の ts0（2026-11-11）
 
@@ -533,4 +533,18 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
   - 実機: ホストから ICMP の ping で `ts.direct peers=1 ... udp6_in=3 unsent=0`。ホストの `tailscale ping` は `via [fd89:…:1f24]:41641 in 22ms`（Tab5 の ULA）になった。ping は 30 回中 30 回返った。
   - ただし経路は双方がそれぞれ選ぶので、IPv6 になるとは限らない。後で見ると、ホストは `active; direct 192.168.2.129:41641`（IPv4。ホストは速さで選ぶ）、Tab5 はホストの 192.168.2.14:41641（ホストの WireGuard が来たアドレス）に送っていた。その間の `udp6_in` は 1,147 個中 118 個。
   - 利用者が shell の `ts` で「direct にならない」と見た件: 通信のない間は 15 秒で derp に戻るので、ping と見る時が重なっていなかった。10 分の ping の間に見ると direct だった。確かめるため、`run tsget 0 0` で PEER_INFO を `tsget.peer` に出せるようにした（tsget に `svc:ts/info`）。ping の間、prometheus は `flags=10`（ONLINE・DIRECT）、192.168.2.14:41641。
+
+### 14.12 相手の home の DERP が別の地域のとき（2026-11-13）
+- 前は、DERP で送るものをすべて自分の home の DERP に送っていた。DERP のサーバは地域の中でしか転送しないので、相手の home が別の地域で直の経路もできなければ届かなかった。
+- 直し:
+  - `Node::peer_region`: 相手の home の地域（netmap の `HomeDERP`、なければ `DERP` の `127.3.3.40:N`）。
+  - ts は、DERP で送る相手の地域が自分の home と違えば、その地域の DERP に 2 本目の接続（`Relay`）を開いて送る（`ts.relay`）。相手は、こちらの home の地域に送ってくるので、受けるのは今までどおり home。2 本目に来たものも受ける。
+  - 2 本目は同時に 1 本まで。別の地域が要れば開き直す。60 秒送らなければ閉じる（`RELAY_IDLE_MS`、Tailscale の derpInactiveCleanupTime）。`ts.relay_closed` に理由（idle・read・send・other）と送った数。
+  - 開けなかった地域は 30 秒試さない（`RELAY_RETRY_MS`。開く間はループが止まるため）。その間は home に送る（前と同じ）。
+  - TLS のバッファ（約 21 KB）は 2 本目のものを別に持つ。`Relay` の中で、バッファを `Derp` より後に落とす。
+- 実機（試験用の版: home を地域 1（ニューヨーク）に固定、UDP なし。コミットしていない）:
+  - ホスト（home は東京、地域 7）から ping を 20 回。Tab5 は最初の握手の応答で地域 7 の DERP を開き（`ts.relay region=7`）、20 回とも返った（往復は約 170〜290 ms。行きはニューヨーク、帰りは東京）。
+  - 最後に送ってから 60 秒で `ts.relay_closed region=7 why=idle sent=22`。
+  - 通常の版に戻すと、ホストは同じ地域なので 2 本目は開かず、直の経路になった（ping 10 回中 10 回）。
+- `cargo test -p tsclient` の 16、virt が通った。
 

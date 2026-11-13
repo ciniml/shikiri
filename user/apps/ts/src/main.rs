@@ -80,6 +80,13 @@ const NETCHECK_ROUND_MS: u64 = 700;
 /// map's `KeepAlive`): nothing for this long and the connection is taken
 /// as dead (its TCP can die without a word: a NAT that forgot it).
 const SILENT_MS: u64 = 180_000;
+/// A connection to another region's DERP (a peer's home, doc/71 §14.12)
+/// closes after this long without a packet sent (Tailscale's
+/// derpInactiveCleanupTime).
+const RELAY_IDLE_MS: u64 = 60_000;
+/// After failing to reach a region's DERP, not tried again for this long
+/// (connecting stops the loop meanwhile).
+const RELAY_RETRY_MS: u64 = 30_000;
 
 fn main(mode: usize, _: usize) -> usize {
     unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
@@ -242,6 +249,37 @@ fn tls_open<'a>(net: &Rc<RefCell<Net>>, bufs: &'a mut Bufs, ip: u32, port: u16, 
     Ok((Buffered::new(t), s))
 }
 
+/// A connection to another region's DERP, for peers whose home it is: we
+/// send there; they answer through ours.
+struct Relay {
+    region: i32,
+    derp: Derp<Tls<'static>>,
+    s: u16,
+    /// When a packet last went through it.
+    used: u64,
+    sent: u32,
+    // After `derp`, so dropped after it: the TLS record buffers it uses.
+    _bufs: Box<Bufs>,
+}
+
+impl Relay {
+    fn open(net: &Rc<RefCell<Net>>, map: &tsclient::netmap::NetMap, region: i32, keys: &Keys, rng: &mut ChaCha20Rng) -> Result<Relay, &'static str> {
+        let Some((_, n)) = map.derp_region(region) else { return Err("no region") };
+        let (host, port) = (n.host_name.clone(), if n.derp_port == 0 { 443 } else { n.derp_port });
+        let ip = net.borrow_mut().resolve(&host, RESOLVE_MS).map_err(|_| "resolve")?;
+        let mut bufs = Box::new(Bufs::new());
+        // SAFETY: the buffers are on the heap and outlive `derp` (they
+        // move with the Box, and the field order drops `derp` first).
+        let b: &'static mut Bufs = unsafe { &mut *(&mut *bufs as *mut Bufs) };
+        let (t, s) = tls_open(net, b, ip, port, &host, rng).map_err(|(step, _)| step)?;
+        let mut nonce = [0u8; 24];
+        rng.fill_bytes(&mut nonce);
+        let derp = Derp::connect(t, &host, &keys.node, nonce).map_err(|_| "derp")?;
+        event!(Info, "ts.relay", region = region as u32, host = host.as_str(), ip = ip);
+        Ok(Relay { region, derp, s, used: now_ms(), sent: 0, _bufs: bufs })
+    }
+}
+
 /// One session with the control server and DERP, until it fails.
 fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, keys: &Keys, mut svc: Option<&mut svc::Service>) -> (&'static str, Error) {
     let Ok(net) = Net::connect() else { return ("net", Error::Io) };
@@ -365,6 +403,9 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     let mut udp_unsent = 0u32;
     let mut shown_web = 0;
     let started = now_ms();
+    let mut relay: Option<Relay> = None;
+    // A region whose DERP could not be reached, and when.
+    let mut relay_failed: Option<(i32, u64)> = None;
     loop {
         let mut busy = false;
         if m.ready() || h.buffered() || waiting(&net, ctl_s) {
@@ -401,6 +442,29 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 node.from_derp(&src, &data, rng, now_ms());
             }
         }
+        // The other region's DERP: packets for us (peers mostly use ours),
+        // keep-alives; closed when idle or broken.
+        if let Some(r) = relay.as_mut() {
+            let mut gone = None;
+            if r.derp.buffered() || waiting(&net, r.s) {
+                busy = true;
+                match r.derp.read() {
+                    Ok(Frame::Packet { src, data }) => {
+                        let (src, data) = (src, data.to_vec());
+                        node.from_derp(&src, &data, rng, now_ms());
+                    }
+                    Ok(_) => {}
+                    Err(_) => gone = Some("read"),
+                }
+            }
+            if gone.is_none() && now_ms() - r.used > RELAY_IDLE_MS {
+                gone = Some("idle");
+            }
+            if let Some(why) = gone {
+                event!(Info, "ts.relay_closed", region = r.region as u32, why = why, sent = r.sent);
+                relay = None;
+            }
+        }
         let now = now_ms();
         if now - last_map > SILENT_MS || now - last_derp > SILENT_MS {
             event!(Warn, "ts.silent", since_map_ms = (now - last_map) as u32, since_derp_ms = (now - last_derp) as u32, up_s = ((now - started) / 1000) as u32);
@@ -431,8 +495,35 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
             busy = true;
             match dest {
                 Dest::Derp(peer) => {
-                    if let Err(e) = derp.send(&peer, &m) {
-                        return ("derp send", e);
+                    let r = node.peer_region(&peer);
+                    if r != 0 && r != region && relay.as_ref().is_none_or(|x| x.region != r) && relay_failed.is_none_or(|(f, at)| f != r || now_ms() - at > RELAY_RETRY_MS) {
+                        if let Some(old) = relay.take() {
+                            event!(Info, "ts.relay_closed", region = old.region as u32, why = "other", sent = old.sent);
+                        }
+                        match Relay::open(&net, &node.netmap, r, keys, rng) {
+                            Ok(x) => relay = Some(x),
+                            Err(step) => {
+                                event!(Warn, "ts.failed", step = "relay", error = step, region = r as u32);
+                                relay_failed = Some((r, now_ms()));
+                            }
+                        }
+                    }
+                    match relay.as_mut().filter(|x| x.region == r) {
+                        Some(x) => {
+                            x.used = now_ms();
+                            x.sent += 1;
+                            if x.derp.send(&peer, &m).is_err() {
+                                event!(Info, "ts.relay_closed", region = r as u32, why = "send", sent = x.sent);
+                                relay = None;
+                            }
+                        }
+                        // Ours, as before: the peer gets it only if it is on
+                        // our region's servers too.
+                        None => {
+                            if let Err(e) = derp.send(&peer, &m) {
+                                return ("derp send", e);
+                            }
+                        }
                     }
                 }
                 Dest::Udp(a) => {

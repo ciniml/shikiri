@@ -329,6 +329,11 @@ impl Node {
         ula || global && self.global_v6
     }
 
+    /// The home DERP region of the peer with node key `key` (0: unknown).
+    pub fn peer_region(&self, key: &[u8; LEN]) -> i32 {
+        self.netmap.peers.iter().find(|p| p.node_key() == Some(*key)).map_or(0, |p| p.home_region())
+    }
+
     /// When packets last went to or came from the peer with node key `key`.
     pub fn last_active(&self, key: &[u8; LEN]) -> Option<u64> {
         self.active.iter().find(|a| a.0 == *key).map(|a| a.1)
