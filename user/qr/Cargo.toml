@@ -1,0 +1,8 @@
+[package]
+name = "qr"
+version = "0.1.0"
+edition = "2024"
+license = "BSL-1.0"
+description = "QR codes in byte mode, versions 1 to 10, without alloc (doc/71 §14.15)"
+
+[dependencies]

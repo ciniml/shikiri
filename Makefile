@@ -99,7 +99,7 @@ QEMU_FLAGS := -M virt -smp 2 -cpu rv32,s=off,h=off,mmu=off,d=off,pmp=on -bios no
 QEMU_STORE := -device loader,file=$(BUILD)/store/appmeta.bin,addr=0x84410000,force-raw=on \
               -device loader,file=$(BUILD)/store/apps.bin,addr=0x84420000,force-raw=on
 
-.PHONY: all keys apps tools kernel-virt kernel-p4 image-p4 kernel-p4evb image-p4evb kernel-p4evb3 image-p4evb3 boot boot-v3 run-virt test-virt \
+.PHONY: all keys apps tools test-qr kernel-virt kernel-p4 image-p4 kernel-p4evb image-p4evb kernel-p4evb3 image-p4evb3 boot boot-v3 run-virt test-virt \
         schemas-virt schemas-p4 emu test-emu test-p4emu backup-flash flash-p4 flash-store monitor \
         probe-rs rtt clean kupdate-test-kernels flash-kernel-p4 kupdate install-apps
 
@@ -386,6 +386,10 @@ emu:
 
 test-emu:
 	cd emu && cargo test --release
+
+# The QR encoder (user/qr) on the host: the apps' target needs build-std.
+test-qr:
+	cargo test --release --manifest-path user/qr/Cargo.toml --target $(shell rustc -vV | sed -n 's/^host: //p') --target-dir target/host-qr
 
 # The app store goes into the emulated flash at its partition offsets.
 EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.bin@420000

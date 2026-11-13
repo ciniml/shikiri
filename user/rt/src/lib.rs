@@ -1152,6 +1152,13 @@ impl Net {
         Ok(&self.slice[..(len as usize).min(net::peer::RECORD)])
     }
 
+    /// `svc:ts`: whether the node is on the tailnet (`net::login`), and
+    /// the login URL while a person has to approve it (empty otherwise).
+    pub fn login_info(&self) -> Result<(u32, &[u8]), NetError> {
+        let (state, len) = self.call(net::op::LOGIN_INFO, 0, 0, 0)?;
+        Ok((state, &self.slice[..(len as usize).min(self.slice.len())]))
+    }
+
     /// Asks `op` on `s` every millisecond until it answers (1, value[,
     /// IPv6 address]).
     fn poll_result(&self, op: u8, s: u16, ms: u64) -> Result<(u32, Option<Ipv6Addr>), NetError> {

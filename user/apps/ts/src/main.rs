@@ -16,7 +16,8 @@
 //! loop that serves both connections (each read only when bytes wait).
 //!
 //! Settings (`svc:cfg`): `ts.authkey` (secret: a pre-auth key; without
-//! one the control server gives a login URL, logged as `ts.login`),
+//! one the control server gives a login URL, logged as `ts.login` and
+//! answered to LOGIN_INFO for the shell's `ts`, doc/71 §14.15),
 //! `ts.hostname` (default `tab5`), `ts.server` (default
 //! `controlplane.tailscale.com`). The machine, node and disco keys are
 //! made on the first start and kept as the secret `ts.keys`.
@@ -147,10 +148,38 @@ fn main(mode: usize, _: usize) -> usize {
         let e = run(&mut rng, server, &hostname, &auth, &keys, svc.as_mut());
         let (step, error) = e;
         event!(Warn, "ts.failed", step = step, error = describe(error), retry_ms = retry);
-        sleep_ms(retry);
+        if let Some(svc) = svc.as_mut() {
+            svc.login = svc::Login::Connecting;
+        }
+        nap(svc.as_mut(), retry);
         // Short at first (at boot `net` may not have an address yet),
         // longer while failures follow each other.
         retry = if now_ms() - start > RETRY_MAX_MS * 2 { RETRY_FIRST_MS } else { (retry * 2).min(RETRY_MAX_MS) };
+    }
+}
+
+/// Sleeps `ms`, answering `svc:ts`'s clients meanwhile (between sessions:
+/// LOGIN_INFO for the shell's `ts`, doc/71 §14.15).
+fn nap(mut svc: Option<&mut svc::Service>, ms: u64) {
+    let end = now_ms() + ms;
+    let Some(svc) = svc.as_deref_mut() else {
+        sleep_ms(ms);
+        return;
+    };
+    loop {
+        svc.serve(None);
+        let now = now_ms();
+        if now >= end {
+            return;
+        }
+        let hs = svc.handles();
+        let ev = wait(&hs, (end - now) * 1_000_000).ok();
+        drop(hs);
+        if let Some(ev) = ev
+            && ev.kind == t5_rt::chan::PEER_CLOSED
+        {
+            svc.closed(ev.index, None);
+        }
     }
 }
 
@@ -328,14 +357,18 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         }
         if !r.auth_url.is_empty() {
             event!(Warn, "ts.login", url = r.auth_url.as_str());
+            if let Some(svc) = svc.as_deref_mut() {
+                svc.login = svc::Login::Url(r.auth_url.clone());
+            }
         }
-        sleep_ms(LOGIN_POLL_MS);
+        nap(svc.as_deref_mut(), LOGIN_POLL_MS);
     }
 
     // The first map response: the DERP map to pick home from.
     let mut node = Node::new(keys.node.clone(), keys.disco.clone(), rng, now_ms());
     if let Some(svc) = svc.as_deref_mut() {
         svc.reset();
+        svc.login = svc::Login::Joined;
     }
     if TRACE_TCP {
         node.tap = Some(trace);
@@ -478,7 +511,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         }
         web.step(&mut node, |n| status(n, hostname, region, &host, started));
         if let Some(svc) = svc.as_deref_mut() {
-            busy |= svc.serve(&mut node);
+            busy |= svc.serve(Some(&mut node));
         }
         // Read only after traffic or when `net` woke the nap for a
         // datagram (UDP_WAIT): not one call per round while idle.
@@ -594,7 +627,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 Some(ev) if armed && ev.index == net_at => udp_check = true,
                 Some(ev) if ev.kind == t5_rt::chan::PEER_CLOSED => {
                     if let Some(svc) = svc.as_deref_mut() {
-                        svc.closed(ev.index, &mut node);
+                        svc.closed(ev.index, Some(&mut node));
                     }
                 }
                 _ => {}

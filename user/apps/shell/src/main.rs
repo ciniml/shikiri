@@ -407,6 +407,7 @@ impl Shell {
                  ping HOST             ping an address or name\n\
                  ifconfig              the network interfaces\n\
                  ts                    the tailnet's nodes and paths\n\
+                 qr TEXT               TEXT as a QR code\n\
                  top                   CPU use per process (any key ends)\n\
                  nc HOST PORT          a TCP connection, a line at a time\n\
                                        (Ctrl-C or Ctrl-D ends)\n\
@@ -483,6 +484,23 @@ impl Shell {
             "top" => top(o),
             "ifconfig" => ifconfig(o),
             "ts" => ts(o),
+            "qr" if !args.is_empty() => {
+                let mut buf = [0u8; LINE_MAX];
+                let mut n = 0;
+                for (i, a) in args.iter().enumerate() {
+                    if n + usize::from(i > 0) + a.len() > buf.len() {
+                        break;
+                    }
+                    if i > 0 {
+                        buf[n] = b' ';
+                        n += 1;
+                    }
+                    buf[n..n + a.len()].copy_from_slice(a.as_bytes());
+                    n += a.len();
+                }
+                qr(o, &buf[..n]);
+            }
+            "qr" => o.str("usage: qr TEXT\n"),
             "nc" => match (args.first(), args.get(1).and_then(|p| p.parse::<u16>().ok())) {
                 (Some(h), Some(port)) => nc(o, h, port),
                 _ => o.str("usage: nc HOST PORT\n"),
@@ -1199,12 +1217,29 @@ fn ifconfig(o: &mut Out) {
 /// The tailnet's nodes (doc/71 §14.8): this one, then the peers, each with
 /// its address and how packets go (`direct` ADDR:PORT, or `derp` REGION),
 /// how long since packets last went or came, and the direct path that
-/// lapsed while idle (`was` ADDR:PORT).
+/// lapsed while idle (`was` ADDR:PORT). Before the node is on the tailnet,
+/// that it is connecting, or the login URL and its QR code (§14.15).
 fn ts(o: &mut Out) {
     let Ok(ts) = Net::connect_to("ts") else {
         o.str("ts: not running\n");
         return;
     };
+    match ts.login_info() {
+        Ok((net::login::WAITING, url)) => {
+            o.str("ts: log in to approve this node:\n");
+            o.str(core::str::from_utf8(url).unwrap_or("?"));
+            o.str("\n");
+            qr(o, url);
+            event!(Info, "shell.listed", what = "ts", count = 0u32);
+            return;
+        }
+        Ok((net::login::CONNECTING, _)) => {
+            o.str("ts: connecting\n");
+            event!(Info, "shell.listed", what = "ts", count = 0u32);
+            return;
+        }
+        _ => {}
+    }
     let mut count = 0u32;
     for k in 0.. {
         // NO_ADDRESS past the last.
@@ -1264,6 +1299,31 @@ fn ts(o: &mut Out) {
         o.str("ts: not on a tailnet yet\n");
     }
     event!(Info, "shell.listed", what = "ts", count = count);
+}
+
+/// `text` as a QR code, two modules a character (the upper and lower half
+/// blocks), light on dark with a quiet zone of 2; None if it is too long.
+fn qr(o: &mut Out, text: &[u8]) {
+    const QUIET: usize = 2;
+    let Some(q) = qr::Qr::encode(text, qr::Ecl::L) else {
+        o.str("(too long for a QR code)\n");
+        return;
+    };
+    let n = q.size() + 2 * QUIET;
+    // Outside the quiet zone counts as dark (the background).
+    let light = |x: usize, y: usize| y < n && !q.get(x.wrapping_sub(QUIET), y.wrapping_sub(QUIET));
+    for y in (0..n).step_by(2) {
+        o.str("\x1b[97;40m");
+        for x in 0..n {
+            o.str(match (light(x, y), light(x, y + 1)) {
+                (true, true) => "\u{2588}",
+                (true, false) => "\u{2580}",
+                (false, true) => "\u{2584}",
+                (false, false) => " ",
+            });
+        }
+        o.str("\x1b[0m\n");
+    }
 }
 
 /// `ip` as text in `buf`.

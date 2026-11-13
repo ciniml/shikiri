@@ -1305,6 +1305,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qr"
+version = "0.1.0"
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1471,6 +1475,7 @@ dependencies = [
 name = "shell"
 version = "0.1.0"
 dependencies = [
+ "qr",
  "t5-rt",
 ]
 

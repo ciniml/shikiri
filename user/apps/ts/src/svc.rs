@@ -11,17 +11,23 @@
 //! UDP_RECV, UDP_WAIT (doc/71 §14.6), and RESOLVE / RESOLVE_RESULT for the
 //! netmap's names (a peer's short name or its whole name, IPv4), IF_INFO
 //! (one interface, `ts0`: the tailnet address, packets in and out),
-//! PEER_INFO (this node and the peers: name, address, path; doc/71 §14.8). The
-//! rest answer BAD_REQUEST.
+//! PEER_INFO (this node and the peers: name, address, path; doc/71 §14.8),
+//! LOGIN_INFO (whether on the tailnet, the login URL while a person has to
+//! approve the node; §14.15). The rest answer BAD_REQUEST.
+//!
+//! Served between sessions too (connecting, waiting for the login, the
+//! nap before a retry): then LOGIN_INFO answers, PEER_INFO and IF_INFO
+//! find nothing, the rest answer NOT_CONNECTED.
 //!
 //! Grants (`svc:ts/GRANT`) as `svc:net`'s: `tcp-connect` or
 //! `tcp-connect:PORT`, `tcp-listen:PORT` or `tcp-listen:any`, `udp:PORT`
-//! or `udp:any`, `resolve`, `info`.
+//! or `udp:any`, `resolve`, `info` (IF_INFO, PEER_INFO, LOGIN_INFO).
 //!
 //! The sockets are smoltcp's in the node; a new session with the control
 //! server and DERP (after a failure) starts with none, and the clients'
 //! old socket numbers then answer NOT_CONNECTED.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use t5_rt::net::{self as proto, op, state, status};
@@ -55,7 +61,16 @@ struct Client {
     udp_waiting: bool,
 }
 
+/// Where the node is in joining the tailnet (LOGIN_INFO).
+pub enum Login {
+    Connecting,
+    /// A person has to open the URL and approve the node.
+    Url(String),
+    Joined,
+}
+
 pub struct Service {
+    pub login: Login,
     listener: Listener,
     pool_shm: Shm,
     pool: &'static mut [u8],
@@ -80,7 +95,7 @@ impl Service {
         let pool_shm = Shm::alloc(CLIENTS * proto::SLICE).ok()?;
         let pool = pool_shm.map().ok()?;
         let listener = Listener::open("ts").ok()?;
-        Some(Service { listener, pool_shm, pool, clients: [const { None }; CLIENTS], closing: Vec::new(), used: 0, next_port: 49152 })
+        Some(Service { login: Login::Connecting, listener, pool_shm, pool, clients: [const { None }; CLIENTS], closing: Vec::new(), used: 0, next_port: 49152 })
     }
 
     /// The handles to `wait` on: the listener, then the clients.
@@ -92,7 +107,7 @@ impl Service {
 
     /// `wait` on `handles()` said the handle at `index` closed: its client
     /// went away (a read only says there is nothing).
-    pub fn closed(&mut self, index: usize, node: &mut Node) {
+    pub fn closed(&mut self, index: usize, node: Option<&mut Node>) {
         let Some(i) = (0..CLIENTS).filter(|&i| self.clients[i].is_some()).nth(index.wrapping_sub(1)) else { return };
         self.drop_client(i, node);
     }
@@ -106,8 +121,9 @@ impl Service {
         self.used = 0;
     }
 
-    /// Takes new clients and answers every request waiting.
-    pub fn serve(&mut self, node: &mut Node) -> bool {
+    /// Takes new clients and answers every request waiting; `node` is
+    /// None between sessions.
+    pub fn serve(&mut self, mut node: Option<&mut Node>) -> bool {
         let mut busy = false;
         while let Ok(c) = self.listener.accept() {
             busy = true;
@@ -125,7 +141,7 @@ impl Service {
                     Err(t5_rt::Error::Busy) => break,
                     Err(_) => {
                         // The client is gone.
-                        self.drop_client(i, node);
+                        self.drop_client(i, node.as_deref_mut());
                         break;
                     }
                 };
@@ -136,17 +152,18 @@ impl Service {
                 if core::mem::take(&mut c.udp_waiting) {
                     let _ = c.chan.send(&reply(status::OK, 0, 0));
                 }
-                if let Some(r) = self.request(i, &msg[..len], node) {
+                if let Some(r) = self.request(i, &msg[..len], node.as_deref_mut()) {
                     let _ = self.clients[i].as_ref().unwrap().chan.send(&r);
                 }
             }
             // A datagram for a client waiting for one.
-            if let Some(c) = self.clients[i].as_mut().filter(|c| c.udp_waiting && udp_ready(c, node)) {
+            if let Some(c) = self.clients[i].as_mut().filter(|c| c.udp_waiting && node.as_deref().is_some_and(|n| udp_ready(c, n))) {
                 c.udp_waiting = false;
                 let _ = c.chan.send(&reply(status::OK, 1, 0));
             }
         }
         // Sockets closed by their clients that have finished.
+        let Some(node) = node else { return busy };
         let sockets = &mut node.tun.sockets;
         let before = self.closing.len();
         self.closing.retain(|&h| {
@@ -160,8 +177,11 @@ impl Service {
         busy
     }
 
-    fn drop_client(&mut self, i: usize, node: &mut Node) {
-        if let Some(c) = self.clients[i].take() {
+    /// Between sessions the sockets went with the node (`reset` follows).
+    fn drop_client(&mut self, i: usize, node: Option<&mut Node>) {
+        if let Some(c) = self.clients[i].take()
+            && let Some(node) = node
+        {
             for s in c.socks.into_iter().flatten() {
                 match s {
                     Sock::Tcp(h) => {
@@ -180,11 +200,13 @@ impl Service {
 
     /// The reply to request `m` of client `i`; None for a UDP_WAIT
     /// answered later.
-    fn request(&mut self, i: usize, m: &[u8], node: &mut Node) -> Option<[u8; proto::REPLY_SIZE]> {
+    fn request(&mut self, i: usize, m: &[u8], node: Option<&mut Node>) -> Option<[u8; proto::REPLY_SIZE]> {
         if m.len() < proto::REQUEST_SIZE {
             return Some(reply(status::BAD_REQUEST, 0, 0));
         }
-        if m[0] == op::UDP_WAIT {
+        if m[0] == op::UDP_WAIT
+            && let Some(node) = node.as_deref()
+        {
             let c = self.clients[i].as_mut().unwrap();
             if udp_ready(c, node) {
                 return Some(reply(status::OK, 1, 0));
@@ -195,7 +217,7 @@ impl Service {
         Some(self.answer(i, m, node))
     }
 
-    fn answer(&mut self, i: usize, m: &[u8], node: &mut Node) -> [u8; proto::REPLY_SIZE] {
+    fn answer(&mut self, i: usize, m: &[u8], node: Option<&mut Node>) -> [u8; proto::REPLY_SIZE] {
         let u = |o: usize| u32::from_le_bytes(m[o..o + 4].try_into().unwrap());
         let (code, sock, a, b) = (m[0], u16::from_le_bytes([m[2], m[3]]), u(4), u(8));
         if m[1] == proto::FAMILY_V6 {
@@ -209,6 +231,26 @@ impl Service {
             return reply(status::DENIED, 0, 0);
         }
         let mem = &mut self.pool[i * proto::SLICE..(i + 1) * proto::SLICE];
+        if code == op::LOGIN_INFO {
+            return match &self.login {
+                Login::Connecting => reply(status::OK, proto::login::CONNECTING, 0),
+                Login::Url(url) => {
+                    let n = url.len().min(proto::SLICE);
+                    mem[..n].copy_from_slice(&url.as_bytes()[..n]);
+                    reply(status::OK, proto::login::WAITING, n as u32)
+                }
+                Login::Joined => reply(status::OK, proto::login::JOINED, 0),
+            };
+        }
+        let Some(node) = node else {
+            return match code {
+                op::IF_INFO if a == 0 => reply(status::OK, 0, 0),
+                op::IF_INFO | op::PEER_INFO => reply(status::NO_ADDRESS, 0, 0),
+                // A UDP_WAIT: nothing waits.
+                op::UDP_WAIT => reply(status::OK, 0, 0),
+                _ => reply(status::NOT_CONNECTED, 0, 0),
+            };
+        };
         let c = self.clients[i].as_mut().unwrap();
         let tcp_of = |c: &Client| match c.socks.get((sock as usize).wrapping_sub(1)) {
             Some(Some(Sock::Tcp(h))) => Some(*h),
@@ -383,7 +425,7 @@ impl Service {
             op::TCP_LISTEN => (port_ok(b"tcp-listen"), "tcp-listen"),
             op::TCP_CONNECT => (g.has(b"tcp-connect") || port_ok(b"tcp-connect"), "tcp-connect"),
             op::RESOLVE | op::RESOLVE_RESULT => (g.has(b"resolve"), "resolve"),
-            op::IF_INFO | op::PEER_INFO => (g.has(b"info"), "info"),
+            op::IF_INFO | op::PEER_INFO | op::LOGIN_INFO => (g.has(b"info"), "info"),
             _ => (true, ""),
         };
         (!ok).then_some(what)

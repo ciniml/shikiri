@@ -87,6 +87,19 @@ pub mod op {
     pub const LINK_RENEW: u8 = 17;
     /// `svc:ts` only (doc/71 §14.8): `a` = 0 this node, 1.. the peers.
     pub const PEER_INFO: u8 = 18;
+    /// `svc:ts` only (doc/71 §14.15): v0 a `login` state, v1 the login
+    /// URL's bytes put in the slice (with `login::WAITING`).
+    pub const LOGIN_INFO: u8 = 19;
+}
+
+/// LOGIN_INFO's states.
+pub mod login {
+    /// Not on the tailnet: starting, connecting, or waiting to retry.
+    pub const CONNECTING: u32 = 0;
+    /// A person has to open the login URL and approve the node.
+    pub const WAITING: u32 = 1;
+    /// On the tailnet (the control server authorized the node).
+    pub const JOINED: u32 = 2;
 }
 
 /// IF_INFO's record in the slice (doc/41): `name[8]` (NUL-padded) | `mac[6]`

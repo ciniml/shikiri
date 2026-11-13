@@ -45,7 +45,7 @@
 | disco | `TS💬` + disco 公開鍵 + nonce + NaCl box（ping、pong、CallMeMaybe） | **最小の pong だけ**（推測で要る） | DERP 越しの ping に pong を返すだけなら小さい。答えなくても DERP で通るかは未確認（§2.3） |
 | STUN と直の経路 | DERP の STUN（3478）で外のアドレスを知り、disco で穴をあける | **後回し** | DERP だけで通る。速さと遅れは悪くなる |
 | MagicDNS | 100.100.100.100 の DNS | **後回し** | netmap の名前（`host.tailnet.ts.net.`）から自分で引けば足りる |
-| 対話のログイン | `AuthURL` を利用者がブラウザで開く | **後回し**（画面に QR を出す形で後で） | auth key なら URL は要らない |
+| 対話のログイン | `AuthURL` を利用者がブラウザで開く | **後回し** → 実装した（§14.15: shell の `ts` が URL と QR を出す） | auth key なら URL は要らない |
 | そのほか | exit node、subnet router、Taildrop、SSH、serve/funnel、key の自動の入れ替え、Tailnet Lock、ログの送信 | **出さない** | tailscale-rs も多くは未対応（確認、README） |
 
 ### 2.3 DERP だけの版で通るか
@@ -558,4 +558,17 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - 通信が止まると直の経路は約 60 秒で切れ（通信中は 45 秒まで Ping、その後 15 秒で期限）、shell の `ts` は derp になる。利用者が「direct にならない」と見たのはこれ（§14.11）。
 - 直し: Node は切れた経路も覚えている（`Node::last_path`）。PEER_INFO の flags に `WAS_DIRECT`（16）を足し、今は直でないが前の直の経路を経路の欄に入れる。shell の `ts` は、derp の行の後ろに `was ADDR:PORT` を付ける（offline の相手には付けない）。
 - 実機: ホストから ping 5 回の直後は `flags=10`（ONLINE・DIRECT）、75 秒後は `flags=18`（ONLINE・WAS_DIRECT）で 192.168.8.107:41641（`run tsget 0 0`）。`cargo test -p tsclient` の 17、virt が通った。
+
+### 14.15 対話のログインの URL を QR で（2026-11-14）
+- auth key がないと、制御サーバは登録の答えに login の URL（`AuthURL`）を返す。これまでは `ts.login` のイベントに出すだけで、Tab5 の画面からは見えなかった。
+- `svc:ts` に要求 `LOGIN_INFO`（`t5_abi::net::op`、19）を足した。v0 は状態（`net::login`: 0 = つなぎ中、1 = ログイン待ち、2 = tailnet にいる）、ログイン待ちのとき v1 は共有メモリに入れた URL のバイト数。許可は `IF_INFO`・`PEER_INFO` と同じ `info`。
+- これまで `svc:ts` は、制御サーバとのセッションの中（map が来た後）でしか答えなかった。ログイン待ちの 20 秒の間や、失敗の後の待ち（2〜30 秒）の間は、shell の `ts` が答えを待って止まっていた。`nap` で待つ間も `svc:ts` に答える（ノードがないので `LOGIN_INFO` だけが中身を返し、`PEER_INFO`・`IF_INFO` は「ない」、ほかは `NOT_CONNECTED`）。TLS の接続や netcheck の最中（数秒）は今も答えない。
+- shell の `ts`: ログイン待ちなら「log in to approve this node:」、URL、その QR を出す。つなぎ中なら `ts: connecting`。
+- QR は自作のクレート `user/qr`（no_std、alloc なし）。バイトのモード、型番 1〜10、誤り訂正 L〜H。最小の型番を L で選び、同じ型番に収まる限り訂正の段を上げる。マスクは規格の減点（N1〜N4）が最小のもの。
+  - 端末は 16 x 32 画素の升なので、上半分・下半分のブロック（U+2580、U+2584、U+2588、フォントサービスの Terminus にある）で 1 字に 2 モジュールを縦に入れ、16 x 16 画素の正方形にした。暗い地に明るいモジュールが要るので、`ESC[97;40m` で白地・黒の模様にし、周りの余白は 2 モジュール。
+  - 43 バイトの URL は型番 3（29 モジュール）で、33 桁 × 17 行。端末（80 桁 × 22 行）に収まる。
+  - 実機の tailnet の登録を崩さずに見られるよう、shell に `qr TEXT` を足した。
+- 試験:
+  - `make test-qr`: qrencode 4.1.1 で作った 5 つ（型番 1、3、7、8、10。型番 7 以上の版情報、型番 10 の 16 ビットの長さを含む）と、8 つのマスクのうち 1 つでモジュールがすべて一致する。選んだマスクは 2 つで qrencode と同じ、3 つで違った（libqrencode の減点は規格どおりでない。どのマスクでも読め、形式情報がマスクを示す）。選んだマスクが 8 つの中で減点が最小であることも試す。
+  - t5emu: `qr https://login.tailscale.com/a/…` を打って画面を撮り、画素から読んだ 29 x 29 のモジュールが、qrencode の符号をマスク 4 にしたものとデータの部分ですべて一致し、形式情報もマスク 4 を示すことを確かめた。
 
