@@ -7,6 +7,21 @@ use rand_core::CryptoRngCore;
 
 pub const LEN: usize = 32;
 
+/// Bytes of the kernel's `random` per seed: it claims 16 bits of
+/// min-entropy per 32-bit word (doc/47 §5), so 256 bits in these.
+pub const RAW_SEED: usize = 64;
+
+/// The random generator's seed from `RAW_SEED` bytes of the kernel's
+/// `random`, conditioned by BLAKE2s (doc/47 §8, doc/71 §4.6): its raw
+/// words are XORs of registers and a timer, biased bit by bit.
+pub fn seed(raw: &[u8; RAW_SEED]) -> [u8; 32] {
+    use blake2::{Blake2s256, Digest};
+    let mut d = Blake2s256::new();
+    d.update(b"tab5-os ts seed v1");
+    d.update(raw);
+    d.finalize().into()
+}
+
 #[derive(Clone)]
 pub struct KeyPair {
     pub private: [u8; LEN],
@@ -114,6 +129,14 @@ mod tests {
         // RFC 7748 §6.1: Alice's public key.
         let a = from_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a").unwrap();
         assert_eq!(to_hex("", &KeyPair::from_private(a).public), "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+    }
+
+    #[test]
+    fn seed_is_blake2s() {
+        let mut raw = [0u8; RAW_SEED];
+        raw.iter_mut().enumerate().for_each(|(i, b)| *b = i as u8);
+        // hashlib.blake2s(b"tab5-os ts seed v1" + bytes(range(64))).
+        assert_eq!(to_hex("", &seed(&raw)), "5cd4bd13639f6dd2f691fecce6ed8404df45734d62602874f2e821dcae8ab3db");
     }
 
     #[test]

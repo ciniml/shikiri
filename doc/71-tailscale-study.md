@@ -200,7 +200,7 @@ tailscale-rs の crate（a2a56c4 で確認）:
 
 ### 4.6 乱数
 - カーネルの `random`（doc/47）を使う。SAR ADC のエントロピー源とヘルステストがあり、統計の検定は通っている。
-- doc/47 §8 の残り「鍵を作るアプリのための、ハッシュや DRBG を使った条件付け」がまだ。`ts` の中で、`random` の 64 バイトを BLAKE2s に通して ChaCha20 の乱数器の種にする（判断の案。mtport の `KernelRng` と同じ場所に置けば Matter も使える）。
+- doc/47 §8 の残り「鍵を作るアプリのための、ハッシュや DRBG を使った条件付け」がまだ。`ts` の中で、`random` の 64 バイトを BLAKE2s に通して ChaCha20 の乱数器の種にする（判断の案。mtport の `KernelRng` と同じ場所に置けば Matter も使える）。→ 2026-11-13 に ts で入れた（§14.13）。Matter（`KernelRng`）はまだ生のまま。
 - `random` が `Fail` を返したとき（ヘルステストの失敗）は、鍵を作らずに止まる。`net` のように時刻に戻ってはいけない。
 
 ### 4.7 時刻
@@ -547,4 +547,10 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
   - 最後に送ってから 60 秒で `ts.relay_closed region=7 why=idle sent=22`。
   - 通常の版に戻すと、ホストは同じ地域なので 2 本目は開かず、直の経路になった（ping 10 回中 10 回）。
 - `cargo test -p tsclient` の 16、virt が通った。
+
+### 14.13 乱数の種の条件付け（2026-11-13）
+- 前は `random` の 32 バイトをそのまま ChaCha20 の種にしていた。`random` の生の語はレジスタの値の XOR とタイマーで、ビットごとに偏りがある（doc/47 §5）。
+- `tsclient::keys::seed`: `random` の 64 バイト（`RAW_SEED`。主張する最小エントロピーは 1 語 16 ビットなので 256 ビット）を、ラベル `tab5-os ts seed v1` を付けて BLAKE2s に通し、32 バイトの種にする。`random` が失敗したら（ヘルステスト）、今までどおり鍵を作らずに止まる。
+- 試験: Python の `hashlib.blake2s` で求めた値と一致。`cargo test -p tsclient` の 17、virt が通った。
+- 実機: 入れ直して再起動。鍵は設定に保存済みなので node key は変わらず（`ts.start node=` が同じ）、登録・DERP・直の経路まで前と同じ。
 

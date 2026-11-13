@@ -90,12 +90,13 @@ const RELAY_RETRY_MS: u64 = 30_000;
 
 fn main(mode: usize, _: usize) -> usize {
     unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
-    let mut seed = [0u8; 32];
-    if random_fill(&mut seed).is_err() {
+    // A health test's failure: no keys from a generator we cannot trust.
+    let mut raw = [0u8; tsclient::keys::RAW_SEED];
+    if random_fill(&mut raw).is_err() {
         event!(Error, "ts.failed", step = "random");
         return 1;
     }
-    let mut rng = ChaCha20Rng::from_seed(seed);
+    let mut rng = ChaCha20Rng::from_seed(tsclient::keys::seed(&raw));
     let Ok(cfg) = Config::connect_within(5000) else {
         event!(Error, "ts.failed", step = "cfg");
         return 2;
