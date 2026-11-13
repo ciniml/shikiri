@@ -6,13 +6,18 @@
 //! bytes, as `tsget.done`. IP as a number (100.64.0.2 is 1681915906);
 //! PORT 0 is 80. PORT + 0x10000: UDP instead (doc/71 §14.6), `ROUNDS`
 //! datagrams to an echo server there, each waited for with UDP_WAIT, as
-//! `tsget.udp` (a reply after its round counts as `late`).
+//! `tsget.udp` (a reply after its round counts as `late`). `run tsget 0
+//! 0`: PEER_INFO of every node as `tsget.peer` (what the shell's `ts`
+//! shows, for the log).
 
 use t5_rt::{Net, event, time_ns, wait};
 
 t5_rt::entry!(main);
 
 fn main(ip: usize, port: usize) -> usize {
+    if ip == 0 && port == 0 {
+        return peers();
+    }
     if port > 0xFFFF {
         return match echo(ip as u32, port as u16) {
             Ok(()) => 0,
@@ -33,6 +38,21 @@ fn main(ip: usize, port: usize) -> usize {
             1
         }
     }
+}
+
+fn peers() -> usize {
+    let Ok(ts) = Net::connect_to("ts") else { return 1 };
+    for k in 0.. {
+        let Ok(r) = ts.peer_info(k) else { break };
+        if r.len() < t5_rt::net::peer::RECORD {
+            return 2;
+        }
+        let name = &r[..t5_rt::net::peer::NAME];
+        let name = core::str::from_utf8(&name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())]).unwrap_or("?");
+        let u = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+        event!(Info, "tsget.peer", k = k, name = name, flags = r[52] as u32, port = u16::from_le_bytes([r[54], r[55]]) as u32, ip4 = u(56), ip6 = &r[72..88], idle_s = u(68));
+    }
+    0
 }
 
 /// The status code, the bytes received and the time taken (ms).

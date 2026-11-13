@@ -531,4 +531,6 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
   - なので、IPv6 の経路をこの環境で通すには、守りの規則に `pass in on wlan0 proto udp port 41641` が要る。
 - 守りの規則に UDP 41641 を足した（利用者が了承、入れたまま）。41641 に来るものは WireGuard と disco の暗号で確かめられ、Tailscale もふつうこのポートを開けて使う。Matter（5540）と mDNS（5353）と同じ扱い。`netctl 7` で SD の `T5OS/NET.RUL` を書き直し、`netctl 0` で読み込んだ（`net.rules rules=7`）。mode 12 の規則にも同じ行を足した。
   - 実機: ホストから ICMP の ping で `ts.direct peers=1 ... udp6_in=3 unsent=0`。ホストの `tailscale ping` は `via [fd89:…:1f24]:41641 in 22ms`（Tab5 の ULA）になった。ping は 30 回中 30 回返った。
+  - ただし経路は双方がそれぞれ選ぶので、IPv6 になるとは限らない。後で見ると、ホストは `active; direct 192.168.2.129:41641`（IPv4。ホストは速さで選ぶ）、Tab5 はホストの 192.168.2.14:41641（ホストの WireGuard が来たアドレス）に送っていた。その間の `udp6_in` は 1,147 個中 118 個。
+  - 利用者が shell の `ts` で「direct にならない」と見た件: 通信のない間は 15 秒で derp に戻るので、ping と見る時が重なっていなかった。10 分の ping の間に見ると direct だった。確かめるため、`run tsget 0 0` で PEER_INFO を `tsget.peer` に出せるようにした（tsget に `svc:ts/info`）。ping の間、prometheus は `flags=10`（ONLINE・DIRECT）、192.168.2.14:41641。
 
