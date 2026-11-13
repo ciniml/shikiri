@@ -3,7 +3,7 @@ name = "mtport"
 version = "0.1.0"
 edition = "2024"
 description = "simple-matter's platform adapters for tab5-os (doc/49): the RNG and the key-value store"
-license = "MIT OR Apache-2.0"
+license = "BSL-1.0"
 
 [dependencies]
 t5-rt = { path = "../rt" }

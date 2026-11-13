@@ -3,7 +3,7 @@ name = "elf2t5a"
 version = "0.1.0"
 edition = "2024"
 description = "Checks a static-PIE app ELF and converts it into a signed T5A image"
-license = "MIT OR Apache-2.0"
+license = "BSL-1.0"
 
 [dependencies]
 t5-abi = { path = "../../abi" }

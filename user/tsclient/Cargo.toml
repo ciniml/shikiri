@@ -2,7 +2,7 @@
 name = "tsclient"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "BSL-1.0"
 description = "A Tailscale client's protocols without I/O (doc/71): Noise IK, HTTP/2, the control requests, the netmap"
 
 [dependencies]

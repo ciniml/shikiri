@@ -3,7 +3,7 @@ name = "t5store"
 version = "0.1.0"
 edition = "2024"
 description = "Builds and lists tab5-os app store images (appmeta + apps partitions, doc/14 §2)"
-license = "MIT OR Apache-2.0"
+license = "BSL-1.0"
 
 [dependencies]
 t5-abi = { path = "../../abi" }

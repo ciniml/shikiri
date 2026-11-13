@@ -58,3 +58,12 @@ make boot          # ESP-IDF ブートローダとパーティションテーブ
 必要なもの: rustup（stable と nightly-2026-09-10、アプリ用の `riscv32imafc-unknown-none-elf` とカーネル用の `riscv32imac-unknown-none-elf`）、`qemu-system-riscv32`、espflash 4.4 以上、ESP-IDF 6.0。
 
 `make backup-flash` / `make flash-p4` は実機を読み書きする。flash-p4 はブートローダとパーティションテーブルを書き換え、既存のファームウェアを上書きする。
+
+## ライセンス
+
+Copyright (c) 2026 Kenta IDA
+
+Shikiri は [Boost Software License 1.0](LICENSE) で公開する。
+
+`third_party/` の中は、それぞれ元のライセンスのまま（smoltcp は 0BSD、embedded-tls は Apache-2.0、embedded-sdmmc は MIT または Apache-2.0、フォントの Noto Sans JP と Terminus は SIL Open Font License 1.1）。各ディレクトリのライセンスの文書と [third_party/README.md](third_party/README.md) を見ること。
+

@@ -2,7 +2,7 @@
 name = "kumiki-t5os"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "BSL-1.0"
 description = "kumiki on tab5-os: the display as a FramebufferPanel, an I2C device and a delay for embedded-hal drivers (doc/68, doc/69)"
 
 [dependencies]

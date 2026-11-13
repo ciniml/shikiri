@@ -3,7 +3,7 @@ name = "t5emu"
 version = "0.1.0"
 edition = "2024"
 description = "ESP32-P4 rev v1.x emulator for tab5-os (doc/08 plan B, doc/11)"
-license = "MIT OR Apache-2.0"
+license = "BSL-1.0"
 
 [dependencies]
 # Log decoding for the verdict and the console view (doc/12).
