@@ -329,6 +329,12 @@ impl Node {
         ula || global && self.global_v6
     }
 
+    /// The last direct path to the peer with node key `key`, in use now or
+    /// lapsed, and when it was last confirmed.
+    pub fn last_path(&self, key: &[u8; LEN]) -> Option<(Addr, u64)> {
+        self.direct.iter().find(|d| d.0 == *key).map(|d| (d.1, d.2))
+    }
+
     /// The home DERP region of the peer with node key `key` (0: unknown).
     pub fn peer_region(&self, key: &[u8; LEN]) -> i32 {
         self.netmap.peers.iter().find(|p| p.node_key() == Some(*key)).map_or(0, |p| p.home_region())
@@ -537,6 +543,7 @@ mod tests {
         }
         assert_eq!((n.direct_peers(t), n.stats.heartbeats), (0, 14));
         assert_eq!(n.direct_path(&[5; 32], t), None);
+        assert_eq!(n.last_path(&[5; 32]).map(|p| p.0), Some(disco::v4([198, 51, 100, 7], 41641)));
         // IPv6 endpoints: ULA ones get pings, global ones only with
         // global_v6, link-local ones never; a pong from the ULA one makes
         // the path, and a ping from there gets a pong there.

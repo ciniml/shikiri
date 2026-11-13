@@ -1193,7 +1193,8 @@ fn ifconfig(o: &mut Out) {
 
 /// The tailnet's nodes (doc/71 §14.8): this one, then the peers, each with
 /// its address and how packets go (`direct` ADDR:PORT, or `derp` REGION),
-/// and how long since packets last went or came.
+/// how long since packets last went or came, and the direct path that
+/// lapsed while idle (`was` ADDR:PORT).
 fn ts(o: &mut Out) {
     let Ok(ts) = Net::connect_to("ts") else {
         o.str("ts: not running\n");
@@ -1223,7 +1224,7 @@ fn ts(o: &mut Out) {
         } else {
             o.str("derp    ");
         }
-        if flags & net::peer::DIRECT != 0 {
+        let path = |o: &mut Out| {
             let v6: [u8; 16] = r[72..88].try_into().unwrap();
             if v6 == [0; 16] {
                 o.ip(u(56));
@@ -1234,6 +1235,9 @@ fn ts(o: &mut Out) {
             }
             o.raw(b':');
             o.num(u16::from_le_bytes([r[54], r[55]]) as u64);
+        };
+        if flags & net::peer::DIRECT != 0 {
+            path(o);
         } else {
             o.str(name_of(&r[60..68]));
         }
@@ -1242,6 +1246,11 @@ fn ts(o: &mut Out) {
             o.str("  ");
             o.num(idle as u64);
             o.str("s ago");
+        }
+        // Direct before: the path is found again on the next traffic.
+        if flags & net::peer::WAS_DIRECT != 0 && flags & net::peer::OFFLINE == 0 {
+            o.str("  was ");
+            path(o);
         }
         o.str("\n");
         count += 1;

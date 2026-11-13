@@ -424,8 +424,8 @@ fn peer_info(node: &Node, k: usize, r: &mut [u8]) -> bool {
         flags |= peer::SELF;
     }
     let key = p.node_key();
-    if let Some((ip, port)) = key.and_then(|key| node.direct_path(&key, now)) {
-        flags |= peer::DIRECT;
+    if let Some(((ip, port), _)) = key.and_then(|key| node.last_path(&key)) {
+        flags |= if key.and_then(|key| node.direct_path(&key, now)).is_some() { peer::DIRECT } else { peer::WAS_DIRECT };
         r[54..56].copy_from_slice(&port.to_le_bytes());
         match core::net::Ipv6Addr::from(ip).to_ipv4_mapped() {
             Some(v4) => r[56..60].copy_from_slice(&v4.to_bits().to_le_bytes()),

@@ -115,6 +115,9 @@ pub mod peer {
     pub const OFFLINE: u8 = 1 << 2;
     /// Sent to over UDP now (else through DERP).
     pub const DIRECT: u8 = 1 << 3;
+    /// Not `DIRECT`, but the path fields hold the last direct path, which
+    /// lapsed (no traffic: doc/71 §14.5).
+    pub const WAS_DIRECT: u8 = 1 << 4;
 }
 
 pub mod status {
