@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Disco, Tailscale's path discovery (tailscale.com/disco): `TS💬`, the
 //! sender's disco key, a nonce, and a NaCl box (tag, then ciphertext) from
 //! the sender's disco key to the receiver's. Inside, a type and a version

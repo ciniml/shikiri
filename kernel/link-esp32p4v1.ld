@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Kenta IDA
+ * Distributed under the Boost Software License, Version 1.0.
+ * (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+ * SPDX-License-Identifier: BSL-1.0
+ */
+
 /* ESP32-P4 rev v1.x (M5Stack Tab5), booted by the ESP-IDF 2nd stage
  * bootloader.
  *

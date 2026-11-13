@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! tsclient against a control server from the host (doc/71): the server
 //! key, the Noise channel, register, the map stream, DERP and WireGuard:
 //! answers pings to its tailnet address for TS_SECONDS (default 120).

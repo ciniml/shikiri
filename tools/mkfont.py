@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 """Builds the font service's glyph file (doc/45).
 
 usage: tools/mkfont.py OUT.bin [--sheet SHEET.png]

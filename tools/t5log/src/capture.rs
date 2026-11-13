@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Screen captures from the console line (doc/54, `t5_abi::capture`): the
 //! frames put back together, turned to the user's view and written as PNG.
 

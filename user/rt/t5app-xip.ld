@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Kenta IDA
+ * Distributed under the Boost Software License, Version 1.0.
+ * (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+ * SPDX-License-Identifier: BSL-1.0
+ */
+
 /* XIP layout for tab5-os apps (doc/15): like t5app.ld, but the data is
  * linked 0x0800_0000 above the text, the distance between the ESP32-P4's
  * flash and PSRAM windows. The text then runs from flash where it lies and

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Masquerade (N5, doc/25 §2): a forwarded packet that leaves by a link
 //! with a `masquerade` rule for its source gets the link's address as its
 //! source, and a port of its own (TCP, UDP) or echo identifier (ICMP) from

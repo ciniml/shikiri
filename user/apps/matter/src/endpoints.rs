@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Endpoints that apps bring (doc/53): four slots, endpoints 2 to 5, each
 //! of one kind made of simple-matter's clusters. A slot belongs to an
 //! owner, `APP/LABEL`, kept in the store so the app gets the same endpoint

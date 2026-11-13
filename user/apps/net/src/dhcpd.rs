@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! A DHCP server for a downstream Ethernet link (N5, doc/25 §3), set by
 //! `dhcp-server on LINK range FIRST-LAST [dns ADDR]`: it answers DISCOVER
 //! with an OFFER and REQUEST with an ACK (or a NAK), from the range, giving

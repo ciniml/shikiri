@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The screen as apps see it (M6c, doc/17 §6): the orientation, the touch
 //! points (read by the kernel while someone has `touch` open, or given by
 //! the host with `tap`/`swipe`, doc/54) and the seats (doc/60): each

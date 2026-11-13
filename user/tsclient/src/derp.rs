@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! A DERP client (Tailscale's relay; the reference's `tailscale_derp.c`,
 //! tailscale.com/derp): `GET /derp` upgraded on TLS, the server's key, our
 //! node key and a NaCl box of `{"version":2}`, the server's info, then

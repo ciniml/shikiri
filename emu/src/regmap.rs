@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Register files keyed by address. The std `HashMap`'s SipHash was about a
 //! third of the emulator's time: the interrupt routing reads registers on
 //! every instruction. Addresses need no protection against chosen keys, so

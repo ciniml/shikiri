@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! `memcpy` and `memset` for RV32 (doc/34 §13), for the kernel and the
 //! apps; they replace the weak ones of `compiler_builtins`.
 //!

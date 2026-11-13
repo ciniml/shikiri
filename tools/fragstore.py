@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 """A fragmented copy of an app store image (doc/65), for the emulator: the
 same apps, moved so that one or two free extents lie before each and none
 after the last, so no free run is longer than two extents though many

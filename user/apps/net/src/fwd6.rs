@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! IPv6 forwarding and the NDP proxy (V4, doc/27). The devices put IPv6
 //! packets that are not for the Tab5 in the forwarding inbox (as for IPv4)
 //! and copy neighbor discovery messages here (`snoop`); `Stack::forward6`

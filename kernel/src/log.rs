@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The kernel side of structured logging (doc/12 §2.4): the sink behind
 //! `event!`, the record ring, the RTT up-channel and the console output.
 //!

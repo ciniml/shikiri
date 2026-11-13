@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Kernel updates (M5a, doc/16 §3): a T5K package received over the
 //! control channel goes into the kernel slot that is not running; once its
 //! signature and image check out, a new otadata entry selects it for the

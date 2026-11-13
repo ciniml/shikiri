@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! WireGuard (the whitepaper, §5): both sides of the handshake
 //! (Noise_IKpsk2 with the zero pre-shared key, as Tailscale) and the
 //! transport messages, for the peers of the netmap. Packets arrive

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! A DNS relay for a downstream link (doc/29 §2): it runs with the DHCP
 //! server, which gives the link's own address as the DNS server. Queries
 //! that come to UDP 53 there go to the DNS server Wi-Fi's DHCP gave, with

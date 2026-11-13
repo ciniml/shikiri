@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Wi-Fi (N2b-3, doc/22): the esp_hosted transport to the ESP32-C6 (the
 //! platform's SDIO driver) split into three objects. `wlan:ctl` carries the
 //! serial interface (RPC) for the Wi-Fi service; `netdev:wlan0` carries the

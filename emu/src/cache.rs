@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Model of the L1 cache incoherence found on the Tab5 in M1 (doc/09 §2).
 //!
 //! L2MEM sits behind a write-back L1 D-cache and an L1 I-cache that do not

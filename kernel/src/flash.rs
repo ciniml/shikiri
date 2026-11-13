@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Erasing and writing flash (doc/14 §5.2). Only the app store partitions
 //! (`appmeta` and `apps`), otadata, the kernel slot the running kernel did
 //! not start from (doc/16 §3.2), the settings' 64 KiB (`flash:cfg`, doc/51

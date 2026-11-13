@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! What an app needs before it starts (doc/51 §3): its image's Needs TLV
 //! names services (`svc:NAME`, someone is listening) and marks
 //! (`ready:NAME`, a process holds a handle on it). A start whose needs are

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The device role (doc/49 §5): simple-matter's core put together for an
 //! On/Off light, as `simple-matter-cffi` does it (its `Light`, `Owned`,
 //! `Shim::housekeep`), without composition, custom clusters, BLE or

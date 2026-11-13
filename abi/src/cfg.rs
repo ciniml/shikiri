@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The settings service (doc/50, doc/51): named values kept by the `cfg`
 //! process. A client connects to `svc:cfg`; its grants (doc/52) say which
 //! keys it may read (`svc:cfg/r:PREFIX`), change (`w:PREFIX`) and read the

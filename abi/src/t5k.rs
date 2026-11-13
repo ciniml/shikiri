@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! T5K: a signed kernel package (doc/16 §2). An ESP app image as espflash
 //! writes it, followed by a small header and the same signature footer as
 //! T5A. The whole package is written to a kernel slot as is; the

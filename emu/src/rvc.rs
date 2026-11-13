@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Expands RV32C (with the F loads/stores) into the equivalent 32-bit
 //! instruction, so the executor only has to decode one format. Encodings are
 //! from the RISC-V Unprivileged ISA, chapter "C" (Compressed) tables 16.5-16.7.

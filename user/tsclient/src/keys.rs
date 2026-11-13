@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Curve25519 keys: the machine key (the Noise channel to the control
 //! server), the node key (WireGuard and DERP), the disco key (path
 //! discovery). Written as `prefix:` and 64 hex digits (`nodekey:…`).

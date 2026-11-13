@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The PC end of the host link (doc/21) inside the emulator: a smoltcp
 //! interface at 10.55.0.1/24 whose packets travel as frames on the USJ
 //! console, as `t5log hostlink` sends them. Once started it pings the

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The host link (N2a, doc/21): IP packets between the network service and
 //! a PC, on the console line (USB Serial/JTAG on the Tab5) next to the log.
 //! Both directions use the log's framing (COBS, 0x00 between frames); a

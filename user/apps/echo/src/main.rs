@@ -1,4 +1,9 @@
 #![no_std]
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 #![no_main]
 
 //! M5c test app (doc/16 §5.4): both ends of the channel `chan:echo`.

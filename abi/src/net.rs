@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The network service's protocol (N1, doc/research/net-stack.md §3.4). A
 //! client connects to `svc:net` and is granted `SLICE` bytes of shared
 //! memory for data; requests and replies are channel messages:

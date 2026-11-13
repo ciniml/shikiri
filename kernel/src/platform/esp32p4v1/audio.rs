@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! I2S0 for audio on the Tab5 (doc/70), with kumiki-p4v1-hal's driver:
 //! 48 kHz 16-bit stereo, full duplex, the TX and RX rings on the AHB-GDMA.
 //!

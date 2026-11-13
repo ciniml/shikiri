@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The Tab5's clip-on keyboard (doc/39): I2C 0x6D on ExtPort1 (I2C0, SDA =
 //! GPIO0, SCL = GPIO1), INT = GPIO50 (active low). Its firmware runs in HID
 //! mode and queues key events as (modifier, usage) pairs of the USB HID

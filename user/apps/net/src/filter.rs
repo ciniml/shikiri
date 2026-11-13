@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Packet filter and connection tracking (N4, doc/24; IPv6: doc/26 §3).
 //! Every IP packet passes one hook: `IN` (to the Tab5), `FORWARD` (through
 //! it) or `OUT` (from it); loopback (127/8, ::1) is not filtered. The active rule set is read top down

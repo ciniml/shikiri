@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! PVT (automatic adjustment of the HP core voltage) and the 360 MHz CPU
 //! clock, after ESP-IDF 6.0 (doc/research/m4-psram-and-clock.md §10):
 //! `esp_hw_support/port/esp32p4/pmu_pvt.c` (`pvt_auto_dbias_init`,

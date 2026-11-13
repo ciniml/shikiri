@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The wired Ethernet (doc/58 R2): `netdev:eth0` for the network service.
 //! The platform's EMAC driver keeps the frames in its DMA rings; this
 //! object reads and writes them whole and reports the PHY's link. The

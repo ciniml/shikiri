@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! A read buffer under the protocols, over TLS: reads with a whole
 //! record's room, so that TLS itself never keeps decrypted bytes. What is
 //! waiting is then here or still on the TCP connection (embedded-tls

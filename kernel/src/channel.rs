@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Channels (M5c, doc/16 §5): named two-way pipes between processes. The
 //! first `open("chan:NAME")` takes end A, the next end B; a message written
 //! on one end is queued whole for the other. The table is fixed: there is no

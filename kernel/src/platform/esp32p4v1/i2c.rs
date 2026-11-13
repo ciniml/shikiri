@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! I2C masters (I2C1 on the Tab5's internal bus, I2C0 on ExtPort1),
 //! polled, after ESP-IDF 6.0 `esp_hal_i2c` and `esp_driver_i2c`
 //! (doc/research/m6-panel-touch.md §1). One transfer is at most one command

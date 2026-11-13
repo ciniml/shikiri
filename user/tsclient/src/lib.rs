@@ -1,4 +1,9 @@
 #![cfg_attr(not(test), no_std)]
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 
 //! A Tailscale client's protocols (doc/71), after the reference in C for
 //! the Tab5 (portable_terminal's `components/tailscale`): the machine,

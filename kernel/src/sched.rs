@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Round-robin scheduler driven by a one-shot timer (doc/07 §4.3, doc/10).
 //!
 //! The kernel is a loop: pick a ready process, arm the alarm for the end of

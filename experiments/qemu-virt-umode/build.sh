@@ -1,4 +1,9 @@
 #!/bin/sh
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 set -e
 CC=$HOME/.espressif/tools/riscv32-esp-elf/esp-14.2.0_20260121/riscv32-esp-elf/bin/riscv32-esp-elf-gcc
 cd "$(dirname "$0")"

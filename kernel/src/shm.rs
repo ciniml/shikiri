@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Shared memory (N0b, doc/19 §2): a fixed area of PSRAM handed out in
 //! 64 KiB units. A handle on `shm` refers to a window of one region; the
 //! process that allocated a region can grant a 128-byte-aligned part of it

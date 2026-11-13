@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Tab completion (doc/62): the word at the end of the line, from the
 //! commands (first word), the store's apps (`run`), the processes (`fg`),
 //! the settings' subcommands (`cfg`), or the SD card's files (`ls`, `cat`,

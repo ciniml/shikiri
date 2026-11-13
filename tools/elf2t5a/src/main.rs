@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! elf2t5a: checks that an app ELF is a static PIE the kernel can load and
 //! converts it into a signed T5A v1 image (`t5_abi::t5a`, doc/14 §1).
 //!

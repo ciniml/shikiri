@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! SoC/board layer. The architecture layer (`arch::riscv32`) is shared; each
 //! platform provides the console, exit path and memory layout (doc/08 §3.3).
 

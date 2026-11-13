@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The async runtime for this service only (doc/48 §1: async starts in
 //! `ble`): one top-level future, polled again at once whenever something
 //! woke it; otherwise the process `wait`s on the handles that pending I/O

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Tab5 board (M6a, doc/17 §5): IO expander #1 releases the LCD and touch
 //! resets, the touch controller on I2C tells which of the three panel lots
 //! this is, and touch points are read by polling

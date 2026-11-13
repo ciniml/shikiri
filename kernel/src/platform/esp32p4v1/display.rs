@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The Tab5's MIPI-DSI display (M6b, doc/17): LDO VO3 for the D-PHY, the
 //! DesignWare DSI host and its D-PHY, the DSI bridge, and DW-GDMA streaming
 //! a 720x1280 RGB565 framebuffer from PSRAM, one frame per DMA block.

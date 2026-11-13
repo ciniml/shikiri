@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! `proc:list`, `proc:apps` and `proc:kill` (doc/40). A system call runs
 //! while the scheduler holds the calling process, so, as for `proc:spawn`,
 //! the service loop does the work: it takes the snapshots that open

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The display path of M6b (doc/17 §7), as far as the kernel's bring-up
 //! sees it: the DSI host reports a locked PHY and empty command FIFOs (DCS
 //! reads get no answer), the bridge and the rest are plain registers, and

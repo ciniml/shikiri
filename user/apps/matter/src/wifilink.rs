@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The Wi-Fi network for Matter's NetworkCommissioning (doc/49 §20): the
 //! cluster's driver (`TabWifi`) keeps a commissioner's ConnectNetwork for
 //! the main loop, which asks `svc:wifi` (`WifiLink`) to join and feeds the

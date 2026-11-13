@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! I2C1 (0x500C_5000) with the Tab5's internal bus devices that M6a talks
 //! to (doc/17 §7): the two PI4IOE5V6408 IO expanders (0x43, 0x44) and the
 //! GT911 touch controller (0x14) of the ILI9881C lot, as on the Tab5 at hand,

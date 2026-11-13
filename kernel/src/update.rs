@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! `update` (doc/67): an app installs apps and kernel packages as the
 //! host's control commands do. A request waits in the object until the
 //! service loop carries it out (installs write flash, which the service

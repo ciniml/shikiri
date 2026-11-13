@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! `capture` (doc/54): sends the framebuffer on the console line as
 //! `t5_abi::capture` frames, a little at a time from the scheduler loop so
 //! the processes keep running. The pixels are read as they are at the time

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 """The apps whose install failed in a `t5log rtt` log of `make install-apps`
 (doc/49 §20): t5log prints each install's request numbers (`-> #A..#B
 install FILE`), the kernel answers a refused one with `ctl.failed

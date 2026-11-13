@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Just enough of an HTTP/2 client for the control server, over the Noise
 //! stream: requests as POSTs (HPACK literals, no Huffman), responses read
 //! frame by frame, the `:status` from the static table. Flow control: the

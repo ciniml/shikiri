@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Memory bandwidth of the PSRAM through the caches and without them, and
 //! of the L1 cache, for doc/43. Runs on a free process slot (`buf`, at
 //! least 2 * `BYTES`) in the kernel, interrupts off; the other core keeps

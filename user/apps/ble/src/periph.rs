@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The peripheral role (doc/48 M4): the client's GATT service, built at
 //! run time behind the GAP and GATT services, advertised until one central
 //! connects; its writes go to the client (each after the connection's

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Kenta IDA
+ * Distributed under the Boost Software License, Version 1.0.
+ * (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+ * SPDX-License-Identifier: BSL-1.0
+ */
+
 /* Shared kernel layout. Platform scripts define the RAM region, the
  * REGION_TEXT / REGION_RODATA / REGION_HOT / REGION_LOG / REGION_BSS /
  * REGION_STACK1 aliases and the KERNEL_STACK and KERNEL_STACK1 (second

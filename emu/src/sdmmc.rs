@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The SDMMC host (Synopsys DesignWare MMC) and a microSD card on slot 0,
 //! as the kernel's `platform/esp32p4v1/sd.rs` drives them (doc/64): a
 //! command runs at once, when CMD is written with its start bit; data moves

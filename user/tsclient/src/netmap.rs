@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The map responses (tailcfg.MapResponse, the fields the reference's
 //! `tailscale_netmap.c` uses) and the netmap they build up: this node,
 //! the peers, the DERP regions.

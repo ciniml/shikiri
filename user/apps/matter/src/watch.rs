@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Attributes the controller keeps subscribed to (`watch`), and their last
 //! values (`values`), for a panel that shows nodes and must survive
 //! restarts on either side: the list is in the store, `matter` subscribes

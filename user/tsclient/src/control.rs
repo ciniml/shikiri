@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The control server's steps, as the reference (`tailscale_control.c`):
 //! `GET /key` over TLS for the server's Noise key, then on a second TLS
 //! connection `POST /ts2021` with the Noise initiation in a header, the

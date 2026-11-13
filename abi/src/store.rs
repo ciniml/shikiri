@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! App store layout in flash (doc/14 §2, doc/05 §5.2).
 //!
 //! - `appmeta` (0x41_0000, 64 KiB): sectors 0 and 1 (4 KiB each) hold two

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Definitions shared between the kernel, the user runtime (`t5-rt`) and host
 //! tools. See doc/07-architecture-proposal.md §4 for the syscall ABI and
 //! doc/04-dynamic-loading-and-abi.md and doc/14-m3-design.md for the T5A image format.

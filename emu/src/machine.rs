@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The HP core: RV32IMAFC with M and U modes (no S, no MMU), the rev v1.x
 //! CLIC trap model, PMP, and the ESP32-P4 quirks the kernel depends on
 //! (doc/11 §2):

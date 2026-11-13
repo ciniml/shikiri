@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Kenta IDA
+ * Distributed under the Boost Software License, Version 1.0.
+ * (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+ * SPDX-License-Identifier: BSL-1.0
+ */
+
 /* Static-PIE layout for tab5-os apps. Linked at 0; the kernel relocates the
  * image to wherever it loads it. [0, __t5_text_end) becomes R-X and
  * [__t5_text_end, __t5_mem_end) RW- under PMP, so the boundary is aligned to

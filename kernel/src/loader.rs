@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Loads a signed T5A v1 image (`t5_abi::t5a`, doc/14 §1) into memory:
 //! verifies the Ed25519 signature, checks the TLVs, copies the image (or,
 //! for an XIP image, maps its text where it lies in flash, doc/15),

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The Ethernet MAC (EMAC) in RMII mode with an IP101GRI PHY, as the
 //! ESP32-P4-Function-EV-Board wires it (doc/58 R2). Register recipe from
 //! ESP-IDF: esp_hal_emac (emac_ll.h, emac_hal.c, emac_periph.c), esp_eth

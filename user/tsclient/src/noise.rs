@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! ts2021's Noise channel to the control server: the IK handshake
 //! (Noise_IK_25519_ChaChaPoly_BLAKE2s, prologue "Tailscale Control
 //! Protocol v1"), then records of `[4][length, 2 bytes BE][ciphertext]`

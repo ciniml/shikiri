@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Kenta IDA
+ * Distributed under the Boost Software License, Version 1.0.
+ * (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+ * SPDX-License-Identifier: BSL-1.0
+ */
+
 /* ESP32-P4 chip v3.x (ECO5, the EV-Board v1.6.x; doc/58 R1b), booted by the
  * ESP-IDF 2nd stage bootloader built for v3 (boot/sdkconfig.v3). The same
  * sections as link-esp32p4v1.ld; only L2MEM is laid out differently:

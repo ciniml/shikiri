@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The tailnet's IP inside the node (doc/71 form A): smoltcp on a device
 //! of two queues. WireGuard's decrypted packets go into `rx`; what smoltcp
 //! sends comes out of `tx` for the node to encrypt to the peer that has

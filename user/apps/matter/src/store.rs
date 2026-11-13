@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The store: the SD card's (`mtport::FileKvs`), or, for the emulator's
 //! test (doc/49 §16: no SD card there), one in memory that the process
 //! forgets when it ends.

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! ESP32-P4-Function-EV-Board v1.5.x (doc/58 §2, §3.1): no display or
 //! touch is fitted, no IO expander or PMIC. Its schematic (v1.52) wires
 //! the ESP32-C6-MINI-1 on SDIO slot 1 (CLK 18, CMD 19, D0-D3 14-17) with

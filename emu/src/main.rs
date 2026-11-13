@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! t5emu: runs a tab5-os kernel ELF built for the ESP32-P4 rev v1.x
 //! (`make kernel-p4`) without the hardware. See doc/11-emulator.md.
 //!

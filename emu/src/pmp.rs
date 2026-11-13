@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! PMP as implemented on the ESP32-P4 rev v1.x HP cores (doc/01 §3): 16
 //! entries, 128-byte granularity (G = 5), TOR and NAPOT (NA4 is not
 //! selectable when G >= 1), lock bit. Rules follow the RISC-V Privileged ISA

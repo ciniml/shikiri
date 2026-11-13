@@ -1,4 +1,9 @@
 #![no_std]
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 #![no_main]
 
 //! M7c test client (doc/18 §5), in its own folder (`~`, doc/52 §3.4):

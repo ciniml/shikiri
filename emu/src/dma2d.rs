@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The PPA's blending engine and the 2D-DMA, as the kernel uses them
 //! (doc/44, doc/research/ppa-dma2d-registers.md): an operation runs at
 //! once, when it starts, on memory itself (the DMA bypasses the caches).

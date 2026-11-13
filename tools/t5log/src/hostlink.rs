@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! `t5log hostlink` (N2a, doc/21): the PC end of the host link. The Tab5's
 //! console line (USB Serial/JTAG, a CDC-ACM port) carries COBS frames: log
 //! records, and IP packets whose first byte is `PACKET`. Packets go to and

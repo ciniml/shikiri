@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Forwarding between the links (N3, doc/23 §3): packets the devices found
 //! not to be for the Tab5 wait in `inbox`; `Stack::forward` routes each one
 //! (longest prefix), lowers its TTL, and sends it out of the link the route

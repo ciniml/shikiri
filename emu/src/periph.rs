@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Peripherals of the ESP32-P4 rev v1.x that the kernel uses. Register
 //! layouts come from ESP-IDF 6.0 `components/soc/esp32p4/register/hw_ver1`
 //! and `components/soc/esp32p4/include/soc/clic_reg.h` (doc/10 §2.1).

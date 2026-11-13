@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Screen capture on the console line (doc/54). The kernel sends the
 //! framebuffer as COBS frames next to the log records, each starting with
 //! `FRAME` (no log record starts with it: its level is at most 4; the host

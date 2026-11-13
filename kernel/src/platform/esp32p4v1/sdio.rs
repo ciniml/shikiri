@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The ESP32-C6 Wi-Fi chip on SDMMC slot 1 (N2b, doc/22): power, reset and
 //! the SDIO card's identification. Pins through the GPIO matrix, the
 //! board's (`board::SDIO`, doc/58 §3.1): on the Tab5 CLK 12, CMD 13, D0-D3

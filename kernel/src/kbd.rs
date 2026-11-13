@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! `kbd` (doc/39): the keyboard's events, read by the kernel every
 //! service round while a process has it open. While processes hold seats
 //! (doc/60), the events reach the holder only when its seat is in front.

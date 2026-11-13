@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The links' devices for smoltcp (doc/23 §2). Each one decides, frame by
 //! frame, whether a packet is for the Tab5 (it goes to smoltcp) or passes
 //! through (it goes to the forwarding inbox, `fwd`).

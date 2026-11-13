@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The `audio:out` and `audio:in` objects (doc/70 §3, stage A2): PCM frames
 //! (16-bit stereo) through `write` / `read`, mixed and split here.
 //!

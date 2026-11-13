@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 """Checks the long names (VFAT LFN) in a FAT32 disk image (doc/63): every
 live LFN entry belongs to a run, in order (the last part first, with the
 0x40 flag), right before the 8.3 entry whose checksum it carries; no

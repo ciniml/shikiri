@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 """Checks `mtpanel` (doc/53 §4) on the Tab5 through the console line alone
 (doc/54, doc/55): taps and swipes go in as `tap`/`swipe`, and what the
 screen shows is read back from `capture`: the colours by pixel, the text

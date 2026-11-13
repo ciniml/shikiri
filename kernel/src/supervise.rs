@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Starting again the apps that fail (doc/56 §3). An app started through a
 //! `proc:spawn` handle with `spawn::RESTART` set (init's list) is watched:
 //! when it faults or ends with a code other than 0, the service loop starts

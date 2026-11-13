@@ -63,7 +63,7 @@ make boot          # ESP-IDF ブートローダとパーティションテーブ
 
 Copyright (c) 2026 Kenta IDA
 
-Shikiri は [Boost Software License 1.0](LICENSE) で公開する。
+Shikiri は [Boost Software License 1.0](LICENSE) で公開する。各ソースファイルの先頭に、著作権とライセンスの表記（`SPDX-License-Identifier: BSL-1.0`）を入れてある。
 
 `third_party/` の中は、それぞれ元のライセンスのまま（smoltcp は 0BSD、embedded-tls は Apache-2.0、embedded-sdmmc は MIT または Apache-2.0、フォントの Noto Sans JP と Terminus は SIL Open Font License 1.1）。各ディレクトリのライセンスの文書と [third_party/README.md](third_party/README.md) を見ること。
 

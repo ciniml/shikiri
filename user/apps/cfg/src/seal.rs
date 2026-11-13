@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Secrets sealed with AES-256-GCM (doc/51 §2.3): a value becomes `nonce
 //! (12) | ciphertext | tag (16)`, its key name the associated data, so a
 //! sealed value moved to another key does not open. The key is 32 random

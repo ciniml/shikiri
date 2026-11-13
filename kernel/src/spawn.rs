@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! `proc:spawn` (doc/38): requests to start store apps. A system call
 //! runs while the scheduler holds the calling process, so the requests are
 //! queued here and the service loop, which has the scheduler and the

@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! Who each process is (doc/52 §3.2): its app name, the pid that started it,
 //! and its signed Permissions TLV, copied when it starts (the store's image
 //! may be replaced while it runs). The kernel checks `open` against it, and

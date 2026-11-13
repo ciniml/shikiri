@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The test LAN (`test0`, doc/23 §4): a second Ethernet link whose far end
 //! is a host simulated inside `net`, so forwarding can be tried where there
 //! is no second real network (t5emu, or the Tab5 with only the host link).

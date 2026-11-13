@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The AHB-GDMA (0x5008_5000) and I2S0 (0x500C_6000) for audio (doc/70):
 //! enough for kumiki-p4v1-hal's I2S driver in the kernel.
 //!

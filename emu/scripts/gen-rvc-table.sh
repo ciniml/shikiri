@@ -1,4 +1,9 @@
 #!/bin/sh
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 # Generates the RVC reference table used by `cargo test` in emu/ (rvc.rs,
 # cross_check_with_llvm_table): every 16-bit encoding is disassembled with
 # llvm-mc (+c,+f), and the disassembly is reassembled without C to get the

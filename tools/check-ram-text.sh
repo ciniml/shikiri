@@ -1,4 +1,9 @@
 #!/bin/sh
+# Copyright (c) 2026 Kenta IDA
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+# SPDX-License-Identifier: BSL-1.0
+
 # Checks that the kernel's .ram_text (code that runs while the L2 cache and
 # with it the flash window are suspended, doc/14 §5.2) never reaches flash:
 # every jal/j stays inside the section and nothing is addressed pc-relative

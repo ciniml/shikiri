@@ -1,3 +1,8 @@
+// Copyright (c) 2026 Kenta IDA
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE or copy at https://www.boost.org/LICENSE_1_0.txt)
+// SPDX-License-Identifier: BSL-1.0
+
 //! The Tab5's microSD card (M7a, doc/18): the SDMMC host (Synopsys
 //! DesignWare MMC) on slot 0's fixed IO_MUX pins, polled, one data line at
 //! 400 kHz. Data moves by the host's internal DMA (IDMAC): CPU reads of the
