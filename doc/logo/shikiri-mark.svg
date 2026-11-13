@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="Shikiri">
+  <!-- A shoji: rooms split by kumiko. One room is lit, set in from its
+       bars: an app in its own protected region. -->
+  <rect x="49" y="40" width="22" height="16" fill="#D24A2E"/>
+  <g fill="none" stroke="#1F2328" stroke-linecap="square">
+    <rect x="8" y="8" width="104" height="104" stroke-width="8"/>
+    <path d="M44 12V108M76 12V108" stroke-width="4"/>
+    <path d="M12 35H108M12 61H108M12 87H108" stroke-width="3"/>
+  </g>
+</svg>

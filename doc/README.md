@@ -1,4 +1,4 @@
-# tab5-os 調査ドキュメント
+# Shikiri（旧 tab5-os）調査ドキュメント
 
 M5Stack Tab5（ESP32-P4）で動く Rust 製の自作 OS（カーネルは M モード、アプリは U モード、アプリの動的ロード、syscall、更新）に向けた調査と提案をまとめたもの。
 

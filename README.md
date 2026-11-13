@@ -1,6 +1,12 @@
-# tab5-os
+<img src="doc/logo/shikiri.svg" alt="shikiri" width="330">
 
-M5Stack Tab5（ESP32-P4 rev v1.x）向けの Rust 製の自作 OS（開発中）。カーネルは M モード、アプリは U モードで動かし、PMP で分離する。
+# Shikiri（仕切り）
+
+権限を分け、メモリ保護（PMP/MPU）でアプリを仕切る、Rust 製の自作 OS（開発中）。カーネルは M モード、アプリは U モードで動かし、PMP で分離する。今は M5Stack Tab5（ESP32-P4 rev v1.x）向けで、同じ構成（特権の分離とメモリ保護）をとれるほかのハードウェアにも移していく予定。
+
+> **名前について**: 元は Tab5 向けの「tab5-os」だった。そのため、crate やツール、形式の名前に `t5` の接頭辞がまだ残っている（`t5_abi`、`t5_rt`、`t5log`、`elf2t5a`、アプリの `.t5a`、カーネルの `.t5k`、SD の `T5OS/`、エミュレータの `t5emu` など）。ドキュメントの「tab5-os」も同じ。移植に合わせて改める。
+
+ロゴは障子の格子（[doc/logo/](doc/logo/)）。組子で仕切られた部屋のうち 1 つに明かりが灯り、その明かりは桟から離れている。自分の領域に閉じ込められたアプリを表す。
 
 - 設計と調査: [doc/](doc/README.md)（結論は [doc/07](doc/07-architecture-proposal.md)）
 - 進捗: M0（雛形、静的 PIE、ブートローダ）、M1-virt（QEMU virt）、M1a/M1b（実機の Tab5 で U モードの hello と保護テスト 7 件。記録は [doc/09](doc/09-bringup-m1.md)）、**M2（タイマ割り込みによるプリエンプション、sleep/yield/time、FPU の遅延切り替え。QEMU と実機で PASS。記録は [doc/10](doc/10-m2-scheduling.md)）**、エミュレータ t5emu 初版（実機用カーネルが無改造で PASS。[doc/11](doc/11-emulator.md)）、**M3（署名した T5A v1 をフラッシュのアプリストアから検証して起動。RTT のコマンドで再起動なしに起動・停止。ホストから送ったアプリをカーネルが検証してフラッシュに書き込む。ハンドルとタイマ（open/ctl/wait/close）。[doc/14](doc/14-m3-design.md)）**、**M4a（32MB の PSRAM を初期化し、アプリを PSRAM で動かす。[doc/research/m4-psram-and-clock.md](doc/research/m4-psram-and-clock.md)）**、**M4b（アプリの text をフラッシュから直接実行し、data を PSRAM に置く。[doc/15](doc/15-m4b-xip.md)）**、**M4c（電圧の自動調整 PVT を移植し、CPU を 360MHz に。[doc/research/m4-psram-and-clock.md §10](doc/research/m4-psram-and-clock.md)）**、**構造化ログ L1〜L3（テキストログを廃止。USB と RTT（probe-rs）で回収。lock-up の後も次の起動で回収できる。[doc/12](doc/12-structured-logging.md)）**
