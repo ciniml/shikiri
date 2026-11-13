@@ -529,4 +529,6 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
     - ホストが知らせる IPv6 の endpoint はグローバル（2400:…）だけ（ホストの ULA は入っていない）。Tab5 にはそこへの経路がないので、Tab5 からは送らない。
     - ホストは Tab5 の ULA に Ping を送るはず。しかし守りの規則（doc/24 §4）は IPv6 にもかかり、Wi-Fi から始まる UDP 41641 を捨てる。ホストから Tab5 の ULA への ICMPv6 の ping も返らない（近隣探索は通る）。IPv4 で直の経路ができるのは、Tab5 が先に送って接続の表に載るから。
   - なので、IPv6 の経路をこの環境で通すには、守りの規則に `pass in on wlan0 proto udp port 41641` が要る。
+- 守りの規則に UDP 41641 を足した（利用者が了承、入れたまま）。41641 に来るものは WireGuard と disco の暗号で確かめられ、Tailscale もふつうこのポートを開けて使う。Matter（5540）と mDNS（5353）と同じ扱い。`netctl 7` で SD の `T5OS/NET.RUL` を書き直し、`netctl 0` で読み込んだ（`net.rules rules=7`）。mode 12 の規則にも同じ行を足した。
+  - 実機: ホストから ICMP の ping で `ts.direct peers=1 ... udp6_in=3 unsent=0`。ホストの `tailscale ping` は `via [fd89:…:1f24]:41641 in 22ms`（Tab5 の ULA）になった。ping は 30 回中 30 回返った。
 
