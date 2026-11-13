@@ -99,12 +99,14 @@ pub mod iface {
 
 /// PEER_INFO's record in the slice: `name[48]` (the netmap's name up to
 /// the first dot, NUL-padded) | `u32` IPv4 address | `u8` flags | `u8` 0 |
-/// `u16` direct path's port | `u32` direct path's address | `region[8]`
+/// `u16` direct path's port | `u32` direct path's IPv4 address | `region[8]`
 /// (home DERP region's code, NUL-padded) | `u32` seconds since packets
-/// last went or came (`u32::MAX`: never). Numbers little-endian, addresses
-/// as IF_INFO's. `NO_ADDRESS` past the last peer.
+/// last went or came (`u32::MAX`: never) | `[u8; 16]` direct path's IPv6
+/// address (zero for an IPv4 path, whose address is the `u32` before).
+/// Numbers little-endian, addresses as IF_INFO's. `NO_ADDRESS` past the
+/// last peer.
 pub mod peer {
-    pub const RECORD: usize = 72;
+    pub const RECORD: usize = 88;
     pub const NAME: usize = 48;
     pub const SELF: u8 = 1 << 0;
     /// The control server says it is online.

@@ -1224,7 +1224,14 @@ fn ts(o: &mut Out) {
             o.str("derp    ");
         }
         if flags & net::peer::DIRECT != 0 {
-            o.ip(u(56));
+            let v6: [u8; 16] = r[72..88].try_into().unwrap();
+            if v6 == [0; 16] {
+                o.ip(u(56));
+            } else {
+                o.raw(b'[');
+                o.ip6(v6);
+                o.raw(b']');
+            }
             o.raw(b':');
             o.num(u16::from_le_bytes([r[54], r[55]]) as u64);
         } else {

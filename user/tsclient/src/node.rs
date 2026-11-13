@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use rand_core::CryptoRngCore;
 
 use crate::Result;
-use crate::disco::{self, Message};
+use crate::disco::{self, Addr, Message};
 use crate::keys::{KeyPair, LEN};
 use crate::netmap::{MapResponse, NetMap, unix_ms};
 use crate::tun::Tun;
@@ -45,14 +45,16 @@ const PINGS_MAX: usize = 16;
 /// The DERP region's address in a pong (Tailscale's magic IP and the
 /// region as the port).
 const DERP_MAGIC_IP: [u8; 4] = [127, 3, 3, 40];
+/// The start of an IPv4-mapped IPv6 address (::ffff:a.b.c.d).
+const V4_MAPPED: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF];
 
 /// Where a message goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dest {
     /// Through DERP to a node key.
     Derp([u8; LEN]),
-    /// Over UDP to an IPv4 address and port.
-    Udp([u8; 4], u16),
+    /// Over UDP to an address (IPv4-mapped for IPv4) and port.
+    Udp(Addr),
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -66,6 +68,8 @@ pub struct Stats {
     pub initiations: u32,
     pub udp_in: u32,
     pub udp_out: u32,
+    /// Of `udp_in`, from IPv6 addresses.
+    pub udp6_in: u32,
     pub pongs: u32,
     pub heartbeats: u32,
 }
@@ -89,9 +93,13 @@ pub struct Node {
     /// The home DERP region (for pongs to pings that came through it).
     pub home_region: i32,
     /// Peers heard over UDP: (node key, address, port, when).
-    direct: Vec<([u8; LEN], [u8; 4], u16, u64)>,
+    direct: Vec<([u8; LEN], Addr, u64)>,
     /// This node's endpoints (for CallMeMaybe), set by the caller.
-    pub endpoints: Vec<([u8; 4], u16)>,
+    pub endpoints: Vec<Addr>,
+    /// Whether to try peers' global IPv6 endpoints (the caller sets it when
+    /// a router offers a way out): ULA ones are tried always, as they may
+    /// be on our link.
+    pub global_v6: bool,
     /// When a direct path to a peer was last tried: (node key, ms).
     probed: Vec<([u8; LEN], u64)>,
     /// Packets last went to or came from a peer: (node key, ms).
@@ -122,6 +130,7 @@ impl Node {
             home_region: 0,
             direct: Vec::new(),
             endpoints: Vec::new(),
+            global_v6: false,
             probed: Vec::new(),
             active: Vec::new(),
             pinged: Vec::new(),
@@ -170,11 +179,14 @@ impl Node {
         self.received(r, Dest::Derp(*src), rng, now_ms);
     }
 
-    /// A datagram on the UDP port from `ip`:`port`.
-    pub fn from_udp(&mut self, ip: [u8; 4], port: u16, data: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) {
+    /// A datagram on the UDP port from `from` (IPv4-mapped for IPv4).
+    pub fn from_udp(&mut self, from: Addr, data: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) {
         self.stats.udp_in += 1;
+        if from.0[..12] != V4_MAPPED {
+            self.stats.udp6_in += 1;
+        }
         if data.starts_with(disco::MAGIC) {
-            self.disco(Dest::Udp(ip, port), data, rng, now_ms);
+            self.disco(Dest::Udp(from), data, rng, now_ms);
             return;
         }
         let r = self.wg.receive(None, data, rng, now_ms);
@@ -182,9 +194,9 @@ impl Node {
         if let Received::Packet { peer, .. } | Received::Established { peer } = r {
             let key = self.wg.peers[peer].key;
             self.direct.retain(|d| d.0 != key);
-            self.direct.push((key, ip, port, now_ms));
+            self.direct.push((key, from, now_ms));
         }
-        self.received(r, Dest::Udp(ip, port), rng, now_ms);
+        self.received(r, Dest::Udp(from), rng, now_ms);
     }
 
     fn received(&mut self, r: Received, from: Dest, rng: &mut impl CryptoRngCore, now_ms: u64) {
@@ -228,7 +240,7 @@ impl Node {
         match m {
             Message::Ping { tx, .. } => {
                 let src = match from {
-                    Dest::Udp(ip, port) => disco::v4(ip, port),
+                    Dest::Udp(a) => a,
                     Dest::Derp(_) => disco::v4(DERP_MAGIC_IP, self.home_region as u16),
                 };
                 rng.fill_bytes(&mut nonce);
@@ -237,24 +249,23 @@ impl Node {
                 self.out.push((from, pong));
             }
             Message::CallMeMaybe { endpoints } => {
-                for (a, port) in endpoints {
-                    // IPv4 only (IPv4-mapped).
-                    if a[..12] != [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF] {
+                for a in endpoints {
+                    if !self.worth_trying(&a) {
                         continue;
                     }
                     let mut tx = [0u8; disco::TXID];
                     rng.fill_bytes(&mut tx);
                     rng.fill_bytes(&mut nonce);
                     let ping = Message::Ping { tx, node_key: Some(self.wg.public()) };
-                    self.out.push((Dest::Udp(a[12..].try_into().unwrap(), port), disco::seal(&self.disco, &sender, nonce, &ping)));
+                    self.out.push((Dest::Udp(a), disco::seal(&self.disco, &sender, nonce, &ping)));
                 }
             }
             Message::Pong { tx, .. } => {
                 // An answer to our ping straight from the peer: its path.
-                if let (Dest::Udp(ip, port), Some(i)) = (from, self.pings.iter().position(|p| p.0 == tx)) {
+                if let (Dest::Udp(a), Some(i)) = (from, self.pings.iter().position(|p| p.0 == tx)) {
                     let (_, key) = self.pings.remove(i).unwrap();
                     self.direct.retain(|d| d.0 != key);
-                    self.direct.push((key, ip, port, now_ms));
+                    self.direct.push((key, a, now_ms));
                 }
             }
             Message::Other(_) => {}
@@ -290,20 +301,32 @@ impl Node {
     fn dest(&self, peer: usize, now_ms: u64) -> Dest {
         let key = self.wg.peers[peer].key;
         match self.direct.iter().find(|d| d.0 == key) {
-            Some(&(_, ip, port, at)) if now_ms.saturating_sub(at) < DIRECT_MS => Dest::Udp(ip, port),
+            Some(&(_, a, at)) if now_ms.saturating_sub(at) < DIRECT_MS => Dest::Udp(a),
             _ => Dest::Derp(key),
         }
     }
 
     /// Peers sent to over UDP now.
     pub fn direct_peers(&self, now_ms: u64) -> usize {
-        self.direct.iter().filter(|d| now_ms.saturating_sub(d.3) < DIRECT_MS).count()
+        self.direct.iter().filter(|d| now_ms.saturating_sub(d.2) < DIRECT_MS).count()
     }
 
     /// The direct path to the peer with node key `key` (address, port), if
     /// one is in use now.
-    pub fn direct_path(&self, key: &[u8; LEN], now_ms: u64) -> Option<([u8; 4], u16)> {
-        self.direct.iter().find(|d| d.0 == *key && now_ms.saturating_sub(d.3) < DIRECT_MS).map(|d| (d.1, d.2))
+    pub fn direct_path(&self, key: &[u8; LEN], now_ms: u64) -> Option<Addr> {
+        self.direct.iter().find(|d| d.0 == *key && now_ms.saturating_sub(d.2) < DIRECT_MS).map(|d| d.1)
+    }
+
+    /// Whether to ping a peer's endpoint `a`: IPv4; IPv6 unicast but
+    /// link-local (it needs a scope), global ones only with `global_v6`.
+    fn worth_trying(&self, a: &Addr) -> bool {
+        let ip = &a.0;
+        if ip[..12] == V4_MAPPED {
+            return true;
+        }
+        let ula = ip[0] & 0xFE == 0xFC;
+        let global = ip[0] & 0xE0 == 0x20;
+        ula || global && self.global_v6
     }
 
     /// When packets last went to or came from the peer with node key `key`.
@@ -342,7 +365,7 @@ impl Node {
     }
 
     /// Tries for a direct path to peer `peer` (not more often than
-    /// `PROBE_MS`): pings to its IPv4 endpoints, a CallMeMaybe with ours
+    /// `PROBE_MS`): pings to its endpoints, a CallMeMaybe with ours
     /// through DERP.
     fn probe(&mut self, peer: usize, rng: &mut impl CryptoRngCore, now_ms: u64) {
         let key = self.wg.peers[peer].key;
@@ -353,28 +376,21 @@ impl Node {
         self.probed.push((key, now_ms));
         let Some(p) = self.netmap.peers.iter().find(|p| p.node_key() == Some(key)) else { return };
         let Some(their_disco) = p.disco_key() else { return };
-        let eps: Vec<([u8; 4], u16)> = p
-            .endpoints
-            .iter()
-            .filter_map(|e| {
-                let (ip, port) = e.rsplit_once(':')?;
-                Some((crate::netmap::parse_v4(ip)?, port.parse().ok()?))
-            })
-            .collect();
-        for (ip, port) in eps {
-            self.ping(key, &their_disco, ip, port, rng, now_ms);
+        let eps: Vec<Addr> = p.endpoints.iter().filter_map(|e| parse_endpoint(e)).filter(|a| self.worth_trying(a)).collect();
+        for a in eps {
+            self.ping(key, &their_disco, a, rng, now_ms);
         }
         let mut nonce = [0u8; 24];
         if !self.endpoints.is_empty() {
             rng.fill_bytes(&mut nonce);
-            let cmm = Message::CallMeMaybe { endpoints: self.endpoints.iter().map(|&(ip, port)| disco::v4(ip, port)).collect() };
+            let cmm = Message::CallMeMaybe { endpoints: self.endpoints.clone() };
             self.out.push((Dest::Derp(key), disco::seal(&self.disco, &their_disco, nonce, &cmm)));
         }
     }
 
-    /// A disco ping over UDP to peer `key` at `ip`:`port`; its pong makes
-    /// (or keeps) the path.
-    fn ping(&mut self, key: [u8; LEN], their_disco: &[u8; LEN], ip: [u8; 4], port: u16, rng: &mut impl CryptoRngCore, now_ms: u64) {
+    /// A disco ping over UDP to peer `key` at `to`; its pong makes (or
+    /// keeps) the path.
+    fn ping(&mut self, key: [u8; LEN], their_disco: &[u8; LEN], to: Addr, rng: &mut impl CryptoRngCore, now_ms: u64) {
         let (mut tx, mut nonce) = ([0u8; disco::TXID], [0u8; 24]);
         rng.fill_bytes(&mut tx);
         rng.fill_bytes(&mut nonce);
@@ -384,30 +400,39 @@ impl Node {
         self.pings.push_back((tx, key));
         mark(&mut self.pinged, key, now_ms);
         let ping = Message::Ping { tx, node_key: Some(self.wg.public()) };
-        self.out.push((Dest::Udp(ip, port), disco::seal(&self.disco, their_disco, nonce, &ping)));
+        self.out.push((Dest::Udp(to), disco::seal(&self.disco, their_disco, nonce, &ping)));
     }
 
     /// Pings the direct paths of the active peers every `HEARTBEAT_MS`.
     fn heartbeat(&mut self, rng: &mut impl CryptoRngCore, now_ms: u64) {
         let since = |v: &[([u8; LEN], u64)], k: [u8; LEN]| v.iter().find(|e| e.0 == k).map(|e| now_ms.saturating_sub(e.1));
-        let due: Vec<([u8; LEN], [u8; 4], u16)> = self
+        let due: Vec<([u8; LEN], Addr)> = self
             .direct
             .iter()
-            .filter(|d| now_ms.saturating_sub(d.3) < DIRECT_MS)
+            .filter(|d| now_ms.saturating_sub(d.2) < DIRECT_MS)
             .filter(|d| since(&self.active, d.0).is_some_and(|t| t < ACTIVE_MS))
             .filter(|d| since(&self.pinged, d.0).is_none_or(|t| t >= HEARTBEAT_MS))
-            .map(|d| (d.0, d.1, d.2))
+            .map(|d| (d.0, d.1))
             .collect();
-        for (key, ip, port) in due {
+        for (key, a) in due {
             let Some(their_disco) = self.netmap.peers.iter().find(|p| p.node_key() == Some(key)).and_then(|p| p.disco_key()) else { continue };
             self.stats.heartbeats += 1;
-            self.ping(key, &their_disco, ip, port, rng, now_ms);
+            self.ping(key, &their_disco, a, rng, now_ms);
         }
     }
 
     fn drop(&mut self, why: &'static str) {
         self.stats.dropped += 1;
         self.last_drop = why;
+    }
+}
+
+/// An endpoint as the netmap writes it: `198.51.100.7:41641` or
+/// `[2001:db8::7]:41641`.
+pub fn parse_endpoint(e: &str) -> Option<Addr> {
+    match e.parse::<core::net::SocketAddr>().ok()? {
+        core::net::SocketAddr::V4(a) => Some(disco::v4(a.ip().octets(), a.port())),
+        core::net::SocketAddr::V6(a) => Some((a.ip().octets(), a.port())),
     }
 }
 
@@ -455,10 +480,10 @@ mod tests {
         let json = alloc::format!(r#"{{"Peers":[{{"ID":5,"Key":"nodekey:{}","DiscoKey":"discokey:{}","Addresses":["100.64.0.7/32"]}}]}}"#, "05".repeat(32), crate::keys::to_hex("", &peer_disco.public));
         n.apply_map(json.as_bytes(), 0).unwrap();
         let ping = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [6; 24], &Message::Ping { tx: [9; 12], node_key: None });
-        n.from_udp([192, 0, 2, 9], 41641, &ping, &mut Zero, 0);
+        n.from_udp(disco::v4([192, 0, 2, 9], 41641), &ping, &mut Zero, 0);
         let out = n.poll(&mut Zero, 0);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, Dest::Udp([192, 0, 2, 9], 41641));
+        assert_eq!(out[0].0, Dest::Udp(disco::v4([192, 0, 2, 9], 41641)));
         let pong = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &out[0].1).unwrap();
         assert_eq!(pong, Message::Pong { tx: [9; 12], src: disco::v4([192, 0, 2, 9], 41641) });
 
@@ -467,16 +492,16 @@ mod tests {
         // the path.
         let json = alloc::format!(r#"{{"PeersChanged":[{{"ID":5,"Key":"nodekey:{}","DiscoKey":"discokey:{}","Addresses":["100.64.0.7/32"],"Endpoints":["198.51.100.7:41641"]}}]}}"#, "05".repeat(32), crate::keys::to_hex("", &peer_disco.public));
         n.apply_map(json.as_bytes(), 20_000).unwrap();
-        n.endpoints = alloc::vec![([192, 0, 2, 1], 41641)];
+        n.endpoints = alloc::vec![disco::v4([192, 0, 2, 1], 41641)];
         n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         let out = n.poll(&mut Zero, 20_000);
-        let ping = out.iter().find(|o| o.0 == Dest::Udp([198, 51, 100, 7], 41641)).unwrap();
+        let ping = out.iter().find(|o| o.0 == Dest::Udp(disco::v4([198, 51, 100, 7], 41641))).unwrap();
         let Message::Ping { tx, .. } = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &ping.1).unwrap() else { panic!() };
         let cmm = out.iter().find(|o| o.0 == Dest::Derp([5; 32])).unwrap();
         assert_eq!(disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &cmm.1), Some(Message::CallMeMaybe { endpoints: alloc::vec![disco::v4([192, 0, 2, 1], 41641)] }));
         assert_eq!(n.direct_peers(20_000), 0);
         let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [7; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
-        n.from_udp([198, 51, 100, 7], 41641, &pong, &mut Zero, 20_010);
+        n.from_udp(disco::v4([198, 51, 100, 7], 41641), &pong, &mut Zero, 20_010);
         assert_eq!(n.direct_peers(20_010), 1);
         // Not tried again within PROBE_MS.
         n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
@@ -485,12 +510,12 @@ mod tests {
         // every HEARTBEAT_MS; its pong keeps the path past DIRECT_MS.
         assert!(n.poll(&mut Zero, 22_000).is_empty());
         let out = n.poll(&mut Zero, 23_100);
-        assert_eq!((out.len(), out[0].0), (1, Dest::Udp([198, 51, 100, 7], 41641)));
+        assert_eq!((out.len(), out[0].0), (1, Dest::Udp(disco::v4([198, 51, 100, 7], 41641))));
         let Message::Ping { tx, .. } = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &out[0].1).unwrap() else { panic!() };
         let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [8; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
-        n.from_udp([198, 51, 100, 7], 41641, &pong, &mut Zero, 23_110);
+        n.from_udp(disco::v4([198, 51, 100, 7], 41641), &pong, &mut Zero, 23_110);
         assert_eq!(n.direct_peers(36_000), 1);
-        assert_eq!(n.direct_path(&[5; 32], 36_000), Some(([198, 51, 100, 7], 41641)));
+        assert_eq!(n.direct_path(&[5; 32], 36_000), Some(disco::v4([198, 51, 100, 7], 41641)));
         assert_eq!(n.last_active(&[5; 32]), Some(20_020));
         // Idle past ACTIVE_MS: no heartbeat, and the path lapses.
         let mut t = 23_100;
@@ -500,13 +525,41 @@ mod tests {
                 if let Some(Message::Ping { tx, .. }) = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &m) {
                     assert!(t < 20_020 + ACTIVE_MS);
                     let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [8; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
-                    let Dest::Udp(ip, port) = d else { panic!() };
-                    n.from_udp(ip, port, &pong, &mut Zero, t);
+                    let Dest::Udp(a) = d else { panic!() };
+                    n.from_udp(a, &pong, &mut Zero, t);
                 }
             }
         }
         assert_eq!((n.direct_peers(t), n.stats.heartbeats), (0, 14));
         assert_eq!(n.direct_path(&[5; 32], t), None);
+        // IPv6 endpoints: ULA ones get pings, global ones only with
+        // global_v6, link-local ones never; a pong from the ULA one makes
+        // the path, and a ping from there gets a pong there.
+        assert_eq!(parse_endpoint("198.51.100.7:41641"), Some(disco::v4([198, 51, 100, 7], 41641)));
+        assert_eq!(parse_endpoint("fd00::7:41641"), None);
+        let ula = parse_endpoint("[fd00::7]:41641").unwrap();
+        let global = parse_endpoint("[2001:db8::7]:41641").unwrap();
+        let json = alloc::format!(r#"{{"PeersChanged":[{{"ID":5,"Key":"nodekey:{}","DiscoKey":"discokey:{}","Addresses":["100.64.0.7/32"],"Endpoints":["[fd00::7]:41641","[2001:db8::7]:41641","[fe80::7]:41641"]}}]}}"#, "05".repeat(32), crate::keys::to_hex("", &peer_disco.public));
+        n.apply_map(json.as_bytes(), t).unwrap();
+        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        let pings: Vec<Dest> = n.poll(&mut Zero, t).into_iter().map(|o| o.0).filter(|d| matches!(d, Dest::Udp(_))).collect();
+        assert_eq!(pings, alloc::vec![Dest::Udp(ula)]);
+        n.global_v6 = true;
+        t += PROBE_MS;
+        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        let out = n.poll(&mut Zero, t);
+        let pings: Vec<Dest> = out.iter().map(|o| o.0).filter(|d| matches!(d, Dest::Udp(_))).collect();
+        assert_eq!(pings, alloc::vec![Dest::Udp(ula), Dest::Udp(global)]);
+        let ping = out.iter().find(|o| o.0 == Dest::Udp(ula)).unwrap();
+        let Message::Ping { tx, .. } = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &ping.1).unwrap() else { panic!() };
+        let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [8; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
+        n.from_udp(ula, &pong, &mut Zero, t);
+        assert_eq!(n.direct_path(&[5; 32], t), Some(ula));
+        let ping = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [6; 24], &Message::Ping { tx: [9; 12], node_key: None });
+        n.from_udp(ula, &ping, &mut Zero, t);
+        let out = n.poll(&mut Zero, t);
+        let pong = out.iter().find(|o| o.0 == Dest::Udp(ula)).unwrap();
+        assert_eq!(disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &pong.1), Some(Message::Pong { tx: [9; 12], src: ula }));
         n.apply_map(br#"{"ControlTime":"2026-11-11T05:31:49.25Z"}"#, 1000).unwrap();
         // 1,794,375,109 s after 1970, and 2.25 s later.
         let t = n.tai64n(3000).unwrap();

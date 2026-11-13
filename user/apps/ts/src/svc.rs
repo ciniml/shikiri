@@ -427,7 +427,10 @@ fn peer_info(node: &Node, k: usize, r: &mut [u8]) -> bool {
     if let Some((ip, port)) = key.and_then(|key| node.direct_path(&key, now)) {
         flags |= peer::DIRECT;
         r[54..56].copy_from_slice(&port.to_le_bytes());
-        r[56..60].copy_from_slice(&u32::from_be_bytes(ip).to_le_bytes());
+        match core::net::Ipv6Addr::from(ip).to_ipv4_mapped() {
+            Some(v4) => r[56..60].copy_from_slice(&v4.to_bits().to_le_bytes()),
+            None => r[72..88].copy_from_slice(&ip),
+        }
     }
     r[52] = flags;
     let region = if k == 0 { node.home_region } else { p.home_region() };

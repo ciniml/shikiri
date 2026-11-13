@@ -966,6 +966,31 @@ impl Stack {
         }
     }
 
+    /// Whether interface `k` has a way to the IPv6 address `a`: one of its
+    /// networks or a route (from router advertisements). smoltcp keeps a
+    /// datagram it has no route for at the head of the socket's queue, and
+    /// all after it, IPv4 too, wait behind it (doc/71 §14.11).
+    fn reaches6(&mut self, k: usize, a: Ipv6Address) -> bool {
+        if a.is_multicast() || a.is_unicast_link_local() || a.is_loopback() {
+            return true;
+        }
+        let iface = match k {
+            IFACE0 => &mut self.iface,
+            _ => match self.eth[k - 1].as_mut() {
+                Some(e) => &mut e.iface,
+                None => return false,
+            },
+        };
+        let dst = IpAddress::Ipv6(a);
+        if iface.ip_addrs().iter().any(|c| c.contains_addr(&dst)) {
+            return true;
+        }
+        let t = now();
+        let mut found = false;
+        iface.routes_mut().update(|r| found = r.iter().any(|r| r.expires_at.is_none_or(|e| t <= e) && r.cidr.contains_addr(&dst)));
+        found
+    }
+
     /// Whether interface `k` has address `a`.
     fn has_addr(&self, k: usize, a: IpAddress) -> bool {
         match k {
@@ -1170,6 +1195,11 @@ impl Stack {
                 let slot = self.slots[sock as usize].unwrap();
                 // The bound socket on the link the destination is on.
                 let k = self.out_iface(a).filter(|&k| slot.socks[k].is_some()).unwrap_or(k0);
+                if let IpAddress::Ipv6(v6) = a
+                    && !self.reaches6(k, v6)
+                {
+                    return Err(status::UNREACHABLE);
+                }
                 let h = slot.socks[k].unwrap().handle;
                 let s = self.set(k).unwrap().get_mut::<udp::Socket>(h);
                 let (port, n) = ((b >> 16) as u16, (b & 0xFFFF) as usize);

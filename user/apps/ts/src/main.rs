@@ -26,10 +26,11 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::net::{IpAddr, Ipv6Addr, SocketAddr};
 use embedded_tls::blocking::TlsConnection;
 use embedded_tls::{TlsConfig, TlsContext};
 use linked_list_allocator::LockedHeap;
@@ -42,6 +43,7 @@ use tsclient::smoltcp::iface::SocketHandle;
 use tsclient::smoltcp::socket::tcp;
 use tsclient::node::{Dest, Node};
 use tsclient::stream::Buffered;
+use tsclient::disco::{self, Addr};
 use tsclient::{Error, control, keys::Keys, tls};
 
 mod svc;
@@ -343,9 +345,10 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     event!(Info, "ts.derp", region = region as u32, host = host.as_str(), ip = derp_ip);
     // Peers send to us through this region from now on.
     node.home_region = region;
-    node.endpoints = if udp.is_some() { endpoints(&net, UDP_PORT, nc.endpoint) } else { Vec::new() };
-    let eps: Vec<String> = node.endpoints.iter().map(|(ip, p)| alloc::format!("{}.{}.{}.{}:{p}", ip[0], ip[1], ip[2], ip[3])).collect();
-    event!(Info, "ts.endpoints", count = eps.len(), first = eps.first().map_or("", |e| e.as_str()));
+    (node.endpoints, node.global_v6) = if udp.is_some() { endpoints(&net, UDP_PORT, nc.endpoint) } else { (Vec::new(), false) };
+    let eps: Vec<String> = node.endpoints.iter().map(|a| sock_addr(a).to_string()).collect();
+    let v6 = node.endpoints.iter().filter(|a| a.0[..12] != disco::v4([0; 4], 0).0[..12]).count();
+    event!(Info, "ts.endpoints", count = eps.len(), first = eps.first().map_or("", |e| e.as_str()), v6 = v6, global_v6 = node.global_v6);
     if let Err(e) = control::update(&mut h, keys, hostname, region, &latency, &eps) {
         return ("update", e);
     }
@@ -358,6 +361,8 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     let mut last_derp = now_ms();
     let mut udp_check = true;
     let mut direct = 0;
+    // Datagrams `net` would not take (no route: an IPv6 address off our links).
+    let mut udp_unsent = 0u32;
     let mut shown_web = 0;
     let started = now_ms();
     loop {
@@ -410,12 +415,16 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         if let Some(s) = udp
             && (udp_check || busy)
         {
-            let r = net.borrow_mut().udp_recv(s, &mut udp_buf, 0);
+            let r = net.borrow_mut().udp_recv_ip(s, &mut udp_buf, 0);
             udp_check = false;
             if let Ok((n, ip, port)) = r {
                 busy = true;
                 udp_check = true;
-                node.from_udp(ip.to_be_bytes(), port, &udp_buf[..n], rng, now_ms());
+                let from = match ip {
+                    IpAddr::V4(a) => disco::v4(a.octets(), port),
+                    IpAddr::V6(a) => (a.octets(), port),
+                };
+                node.from_udp(from, &udp_buf[..n], rng, now_ms());
             }
         }
         for (dest, m) in node.poll(rng, now_ms()) {
@@ -426,9 +435,12 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                         return ("derp send", e);
                     }
                 }
-                Dest::Udp(ip, port) => {
+                Dest::Udp(a) => {
                     if let Some(s) = udp {
-                        let _ = net.borrow_mut().udp_send(s, u32::from_be_bytes(ip), port, &m);
+                        let to = sock_addr(&a);
+                        if net.borrow_mut().udp_send_ip(s, to.ip(), to.port(), &m).is_err() {
+                            udp_unsent += 1;
+                        }
                     }
                 }
             }
@@ -436,7 +448,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         let s = node.stats;
         let d = node.direct_peers(now_ms());
         if d != direct {
-            event!(Info, "ts.direct", peers = d, udp_in = s.udp_in, udp_out = s.udp_out, pongs = s.pongs, heartbeats = s.heartbeats);
+            event!(Info, "ts.direct", peers = d, udp_in = s.udp_in, udp_out = s.udp_out, udp6_in = s.udp6_in, unsent = udp_unsent, pongs = s.pongs, heartbeats = s.heartbeats);
             direct = d;
         }
         if (s.handshakes, s.initiations, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.initiations, shown.echo_replies, shown.dropped, shown_web) {
@@ -517,28 +529,50 @@ fn netcheck(net: &Rc<RefCell<Net>>, s: Option<u16>, map: &tsclient::netmap::Derp
 }
 
 /// This node's UDP endpoints for peers to try: each interface's IPv4
-/// address but loopback, and the address STUN saw, with their ports.
-fn endpoints(net: &Rc<RefCell<Net>>, port: u16, seen: Option<([u8; 4], u16)>) -> Vec<([u8; 4], u16)> {
-    let mut e = Vec::new();
+/// address but loopback, the address STUN saw, and each IPv6 address but
+/// loopback and link-local (doc/71 §14.11), with their ports; and whether
+/// one of those is global (a router offers a way out).
+fn endpoints(net: &Rc<RefCell<Net>>, port: u16, seen: Option<([u8; 4], u16)>) -> (Vec<Addr>, bool) {
+    use t5_rt::net::iface;
+    let (mut e, mut v6) = (Vec::new(), Vec::new());
     let n = net.borrow();
     for k in 0..8 {
         match n.if_info(k) {
-            Ok(Some(len)) if len >= 20 && n.slice[14] > 0 => {
+            Ok(Some(len)) if len >= iface::HEADER => {
                 let ip = u32::from_le_bytes(n.slice[16..20].try_into().unwrap()).to_be_bytes();
-                if ip[0] != 127 {
-                    e.push((ip, port));
+                if n.slice[14] > 0 && ip[0] != 127 {
+                    e.push(disco::v4(ip, port));
+                }
+                for j in 0..(n.slice[15] as usize).min(iface::V6_MAX) {
+                    let at = iface::HEADER + j * iface::V6_ENTRY;
+                    let Some(a) = n.slice.get(at..at + 16) else { break };
+                    let a = Ipv6Addr::from(<[u8; 16]>::try_from(a).unwrap());
+                    if !a.is_loopback() && !a.is_unicast_link_local() && !a.is_unspecified() {
+                        v6.push((a.octets(), port));
+                    }
                 }
             }
             Ok(_) => {}
             Err(_) => break,
         }
     }
-    if let Some(s) = seen
-        && !e.contains(&s)
+    if let Some((ip, p)) = seen
+        && !e.contains(&disco::v4(ip, p))
     {
-        e.push(s);
+        e.push(disco::v4(ip, p));
     }
-    e
+    let global = v6.iter().any(|a: &Addr| a.0[0] & 0xE0 == 0x20);
+    e.extend(v6);
+    (e, global)
+}
+
+/// A disco address as a socket address (IPv4 for IPv4-mapped ones).
+fn sock_addr(a: &Addr) -> SocketAddr {
+    let ip = Ipv6Addr::from(a.0);
+    match ip.to_ipv4_mapped() {
+        Some(v4) => SocketAddr::new(IpAddr::V4(v4), a.1),
+        None => SocketAddr::new(IpAddr::V6(ip), a.1),
+    }
 }
 
 /// The status page on the tailnet: `http://<tailnet address>/`, one

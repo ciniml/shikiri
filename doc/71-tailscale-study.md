@@ -431,7 +431,7 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - 制御の接続が切れる件（§13.2）:
   - 前の版では 155 秒で切れた。直の経路の版は 850 秒切れなかった（観察を続ける）。
   - 切れたときの TCP の状態と、最後の map からの時間を `ts.ctl_lost` に出すようにした。
-- まだ: IPv6 の endpoint、NAT の対応表を保つための Ping。
+- まだ: IPv6 の endpoint（→ §14.11）、NAT の対応表を保つための Ping（→ §14.5）。
 
 ### 14.3 その後
 - こちらからも直の経路を探す。DERP で送る相手には、5 秒に 1 回まで（`PROBE_MS`）次の 2 つを送る。
@@ -509,4 +509,24 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
   - その後のつなぎ直しは TCP の段で失敗し続けた（`ts.failed step=tcp`、待ちは 2→4→8→16→30 秒で、以後 30 秒ごと）。SYN の返事を捨てているので当然。
   - `netctl 2` で戻すと、次の試み（約 31 秒後）で `ts.server_key` → `ts.registered` → `ts.map`（peers=10）→ `ts.derp` まで約 6 秒で戻った。ホストからの `tailscale ping` は DERP 経由で届いた。
 - 手順の失敗: 最初の試験では `netctl 4` と `netctl 2` を続けて送ったため、2 つ目が `ctl.failed error=no free slot`（前の netctl がまだ動いていた）で動かず、TCP を捨てる状態が約 10 分続いた。`netctl 4` の規則の数（7 のまま）で気づいて戻した。netctl を続けて送るときは、前の `proc.exit` を待つ。
+
+### 14.11 IPv6 の endpoint（2026-11-13）
+- `Dest::Udp` と直の経路を disco のアドレス（16 バイト、IPv4 は IPv4-mapped）で持つようにした。IPv4 と IPv6 を同じ道で扱う。
+  - 相手の endpoint は `198.51.100.7:41641` と `[2001:db8::7]:41641` の両方を読む（`node::parse_endpoint`）。
+  - Ping を送る相手の IPv6: ULA（fc00::/7）は常に送る（同じリンクにいるかもしれない）。グローバル（2000::/3）は、こちらにもグローバルのアドレスがあるとき（`Node::global_v6`）だけ送る。link-local は送らない（スコープが要る）。
+  - CallMeMaybe で来た endpoint も同じ選び方。Pong の中のアドレスは、Ping の来たアドレスをそのまま入れる。
+- ts:
+  - 自分の endpoint に、各インタフェースの IPv6 アドレス（loopback と link-local を除く）を足した。`ts.endpoints` に `v6`（IPv6 の数）と `global_v6` を出す。
+  - UDP は `udp_recv_ip`・`udp_send_ip` で両方のファミリーを受けて送る。
+  - `ts.direct` に `udp6_in`（IPv6 から来た UDP の数）と `unsent`（`net` が受け取らなかった数）を足した。
+- `svc:ts` の PEER_INFO の記録を 88 バイトにし、直の経路が IPv6 のときのアドレスを 72..88 に入れた。shell の `ts` は `[ADDR]:PORT` で出す。
+- `net` の直し: 経路のない IPv6 あての UDP_SEND は `UNREACHABLE` を返すようにした（`reaches6`。そのリンクのネットワークか、RA からの経路があるときだけ送る）。smoltcp 0.14 は、経路のない（`NoRoute`）データグラムをソケットの送信待ちの先頭に置いたまま、後で送り直そうとし続ける。そのため、後に続くデータグラムは IPv4 のものもすべて止まる。ts が届かないグローバルの IPv6 に Ping を送ると、直の経路が IPv4 も含めて止まるところだった。
+- `cargo test -p tsclient` の 16 が通った（Node の試験に IPv6 の endpoint を足した: ULA に Ping、`global_v6` でグローバルにも、link-local には送らない、ULA からの Pong で経路、ULA からの Ping に ULA へ Pong）。virt・p4emu が通った。
+- 実機（net・ts・shell を入れ直して再起動）:
+  - `ts.endpoints count=5 first=192.168.8.181:41641 v6=3 global_v6=false`。この Wi-Fi のルータの RA は lifetime=0 で、配るのは ULA（fd89:…/64）だけ。
+  - ホストからの ICMP の ping で直の経路になった（`via 192.168.2.129:41641`、IPv4）。`udp6_in=0 unsent=0` で、IPv6 では何も来ていない。
+  - 理由:
+    - ホストが知らせる IPv6 の endpoint はグローバル（2400:…）だけ（ホストの ULA は入っていない）。Tab5 にはそこへの経路がないので、Tab5 からは送らない。
+    - ホストは Tab5 の ULA に Ping を送るはず。しかし守りの規則（doc/24 §4）は IPv6 にもかかり、Wi-Fi から始まる UDP 41641 を捨てる。ホストから Tab5 の ULA への ICMPv6 の ping も返らない（近隣探索は通る）。IPv4 で直の経路ができるのは、Tab5 が先に送って接続の表に載るから。
+  - なので、IPv6 の経路をこの環境で通すには、守りの規則に `pass in on wlan0 proto udp port 41641` が要る。
 
