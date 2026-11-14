@@ -121,3 +121,4 @@
 - `t5_rt::Net::for_ip(ip)`: tailnet のアドレスへは、`ts` が自分のスタックを持つ（形 A）なら `svc:ts`、ほかは `svc:net`。`for_host` の数字のアドレスもこれを使う。`tsget` の TCP と UDP もこれで開く（形 B では `svc:ts` のソケットは `NO_ADDRESS`）。`tsget` の許可に `svc:net/tcp-connect` と `svc:net/udp:any` を足した。
 - 実機は `cfg set ts.form b` 済みなので、動きは §9 の終わりと同じ。
 
+- 実機: ts と tsget を入れ直し、`keys cfg rm ts.form\n` で設定を消して ts を起動し直した。設定なしで `ts.form b=true`、`net.addr_fixed link=ts0`、ホストからの ping は 10 回中 9 回（最初の数回は経路ができるまで遅い）。
