@@ -113,3 +113,4 @@
   3. `ts`: UDP の送信が 1 秒の間 `TimedOut` のままなら、ソケットを作り直す（`ts.udp_rebound`。古い `net` でも先頭が消える）。TLS の読み出しも 15 秒で諦める（`ts.stalled`、`READ_STALL_MS`。止まっていたのはこちらではなかったが、同じ形の永遠の待ち）。
 - 2 と 3 の後（smoltcp の直しの前）: ホストからの ping は 15 回中 8 回返り、`ts.udp_rebound` が出て `ts` は止まらなくなった。ACL は `acl_rules=1`、`filtered=1`（ACL が捨てたものが 1 つ。中身は未確認）。
 
+- 3 つの直しを入れた後（net・ts・matter・shell・ota を入れ直して reboot）: 形 B で `acl_rules=1`。ホストから Tab5 へ 40 回の ping がすべて返り（平均 7 ms、直の経路）、同じ間に Tab5 の端末（`keys ping prometheus\n`）からの 4 回も返った。`ts.udp_rebound` も `ts.stalled` も出なかった。`filtered=1` は ACL が捨てた 1 つ（IPv6 のパケットは規則に照らさず通さないので、その類いと見られる。推測）。
