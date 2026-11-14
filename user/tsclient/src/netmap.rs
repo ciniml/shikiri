@@ -177,6 +177,8 @@ pub struct NetMap {
     pub peers: Vec<Node>,
     pub derp: DerpMap,
     pub dns: DnsConfig,
+    /// Counts the responses that brought `DNSConfig`.
+    pub dns_version: u32,
     /// Counts the responses that changed `peers` (or `node`).
     pub peers_version: u32,
 }
@@ -210,6 +212,7 @@ impl NetMap {
         }
         if let Some(d) = r.dns_config.take() {
             self.dns = d;
+            self.dns_version = self.dns_version.wrapping_add(1);
         }
         Ok(r)
     }
@@ -232,6 +235,42 @@ impl NetMap {
 
     pub fn self_ipv4(&self) -> Option<[u8; 4]> {
         self.node.as_ref()?.ipv4()
+    }
+
+    /// Every name `resolve` answers, with its address, in `resolve`'s
+    /// order (the first of the same name wins): the admin's records and
+    /// the nodes' whole names, each also without a search domain it ends
+    /// in, then the nodes' short names. For `net`, which looks names up in
+    /// this list (form B, doc/72 §4).
+    pub fn names(&self) -> Vec<(String, [u8; 4])> {
+        let mut v: Vec<(String, [u8; 4])> = Vec::new();
+        let add = |n: &str, ip: [u8; 4], v: &mut Vec<(String, [u8; 4])>| {
+            let n = n.trim_end_matches('.');
+            if !n.is_empty() && !v.iter().any(|(m, _)| m.eq_ignore_ascii_case(n)) {
+                v.push((n.to_ascii_lowercase(), ip));
+            }
+        };
+        let nodes = || self.node.iter().chain(self.peers.iter());
+        let records = self.dns.extra_records.iter().filter(|r| matches!(r.kind.as_str(), "" | "A")).filter_map(|r| Some((r.name.as_str(), parse_v4(&r.value)?)));
+        let whole: Vec<(&str, [u8; 4])> = records.chain(nodes().filter_map(|p| Some((p.name.as_str(), p.ipv4()?)))).collect();
+        for &(n, ip) in &whole {
+            add(n, ip, &mut v);
+        }
+        for d in &self.dns.domains {
+            let d = d.trim_end_matches('.');
+            for &(n, ip) in &whole {
+                let n = n.trim_end_matches('.');
+                if n.len() > d.len() + 1 && n[n.len() - d.len()..].eq_ignore_ascii_case(d) && n.as_bytes()[n.len() - d.len() - 1] == b'.' {
+                    add(&n[..n.len() - d.len() - 1], ip, &mut v);
+                }
+            }
+        }
+        for p in nodes() {
+            if let (Some(short), Some(ip)) = (p.name.split('.').next(), p.ipv4()) {
+                add(short, ip, &mut v);
+            }
+        }
+        v
     }
 
     /// `name`'s IPv4 address as MagicDNS gives it (doc/71 §14.16): an
@@ -325,5 +364,14 @@ mod tests {
         // A later response without DNSConfig keeps it.
         nm.apply_json(br#"{"KeepAlive":true}"#).unwrap();
         assert_eq!(nm.resolve("printer"), Some([100, 64, 0, 9]));
+        assert_eq!(nm.dns_version, 1);
+        // The list for `net` answers as `resolve` does.
+        let names = nm.names();
+        for (n, ip) in &names {
+            assert_eq!(nm.resolve(n), Some(*ip), "{n}");
+        }
+        for n in ["laptop", "nas", "printer", "tab5", "laptop.example.ts.net", "printer.corp.example"] {
+            assert!(names.iter().any(|(m, _)| m == n), "{n}");
+        }
     }
 }

@@ -117,6 +117,11 @@ pub struct Node {
     waiting: VecDeque<([u8; 4], Vec<u8>)>,
     /// Sees every IP packet (true: outgoing), for a trace.
     pub tap: Option<fn(bool, &[u8])>,
+    /// Form B (doc/72): no IP stack here. The packets peers send wait in
+    /// `tun.dev.rx` and those for peers are put in `tun.dev.tx` by the
+    /// caller (`net`'s link `ts0`); smoltcp does not run and has no
+    /// address.
+    pub pipe: bool,
 }
 
 impl Node {
@@ -142,6 +147,7 @@ impl Node {
             pings: VecDeque::new(),
             waiting: VecDeque::new(),
             tap: None,
+            pipe: false,
         }
     }
 
@@ -153,7 +159,9 @@ impl Node {
             let peers = self.netmap.peers.iter().filter_map(|p| Some((p.node_key()?, p.ipv4()?)));
             self.wg.set_peers(peers);
         }
-        if let Some(ip) = self.netmap.self_ipv4() {
+        if let Some(ip) = self.netmap.self_ipv4()
+            && !self.pipe
+        {
             self.tun.set_address(ip);
         }
         if let Some(t) = r.control_time.as_deref().and_then(unix_ms) {
@@ -278,9 +286,12 @@ impl Node {
     }
 
     /// Runs smoltcp (the packets received, its timers, what the sockets
-    /// wrote): the messages to send, by peer node key.
+    /// wrote; not in form B) and sends what is in `tun.dev.tx`: the
+    /// messages to send, by peer node key.
     pub fn poll(&mut self, rng: &mut impl CryptoRngCore, now_ms: u64) -> Vec<(Dest, Vec<u8>)> {
-        self.tun.poll(now_ms);
+        if !self.pipe {
+            self.tun.poll(now_ms);
+        }
         while let Some(p) = self.tun.dev.tx.pop_front() {
             let Some(dst) = p.get(16..20) else { continue };
             if let Some(t) = self.tap {
@@ -463,6 +474,39 @@ fn mark(v: &mut Vec<([u8; LEN], u64)>, key: [u8; LEN], now_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Form B (doc/72): no address in smoltcp; a packet put in
+    /// `tun.dev.tx` starts the handshake with the peer it is for.
+    #[test]
+    fn pipe() {
+        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero, 0);
+        n.pipe = true;
+        n.apply_map(br#"{"Node":{"ID":1,"Addresses":["100.64.0.1/32"]},"Peers":[{"ID":2,"Key":"nodekey:0202020202020202020202020202020202020202020202020202020202020202","Addresses":["100.64.0.6/32"]}],"ControlTime":"2026-11-15T00:00:00Z"}"#, 0).unwrap();
+        assert_eq!((n.tun.ip, n.netmap.self_ipv4()), (None, Some([100, 64, 0, 1])));
+        assert!(n.poll(&mut Zero, 0).is_empty());
+        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 6]);
+        let out = n.poll(&mut Zero, 0);
+        // A handshake initiation (148 bytes) to the peer through DERP.
+        assert_eq!((out.len(), out[0].0, out[0].1.len()), (1, Dest::Derp([2; 32]), 148));
+    }
+
+    struct Zero;
+    impl rand_core::RngCore for Zero {
+        fn next_u32(&mut self) -> u32 {
+            0
+        }
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+        fn fill_bytes(&mut self, d: &mut [u8]) {
+            d.fill(0)
+        }
+        fn try_fill_bytes(&mut self, d: &mut [u8]) -> core::result::Result<(), rand_core::Error> {
+            d.fill(0);
+            Ok(())
+        }
+    }
+    impl rand_core::CryptoRng for Zero {}
 
     #[test]
     fn peers_reach_wireguard() {

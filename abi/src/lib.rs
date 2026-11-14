@@ -299,6 +299,79 @@ pub mod netdev {
     }
 }
 
+/// A link of `net` that another process carries (doc/72): `svc:netlink`,
+/// which `net` serves; `ts` connects with the grant `svc:netlink/ts0`
+/// and becomes the far end of `ts0`. `net` grants `SIZE` bytes of shared
+/// memory at once: `netdev::ring`'s layout, with `net` in the process's
+/// place (it receives on RX and sends on TX) and the peer in the
+/// kernel's (`Peer`). The slots hold IP packets (no Ethernet header).
+/// Messages on the channel (the first byte): `KICK` (either way: packets
+/// were added), `ADDR` and `NAMES` (peer to `net`).
+pub mod netlink {
+    use core::sync::atomic::Ordering;
+
+    pub use super::netdev::ring::{Rings, SLOT, SLOTS};
+    use super::netdev::ring::{RX_DATA, RX_HEAD, RX_LEN, RX_TAIL, TX_DATA, TX_HEAD, TX_LEN, TX_TAIL};
+
+    pub const SERVICE: &str = "netlink";
+    /// The names the peer answers (MagicDNS, doc/72 §4), after the rings:
+    /// entries of `[name length][name, lower case, no final dot][IPv4]`.
+    pub const NAMES_AT: usize = super::netdev::ring::SIZE;
+    pub const NAMES_MAX: usize = 4096;
+    pub const SIZE: usize = NAMES_AT + NAMES_MAX;
+    /// Packets were added to the ring the receiver reads.
+    pub const KICK: u8 = 1;
+    /// `[ADDR, prefix, 0, 0, IPv4 (big-endian)]`: the link's address and
+    /// the network on it (the tailnet's 100.64.0.0/10); prefix 0 takes it
+    /// away.
+    pub const ADDR: u8 = 2;
+    pub const ADDR_LEN: usize = 8;
+    /// `[NAMES, 0, length (u16 LE)]`: the peer wrote that many bytes of
+    /// names at `NAMES_AT` (0: none); `net` copies them.
+    pub const NAMES: u8 = 3;
+
+    /// The rings as the peer sees them: it receives what `net` sends.
+    #[derive(Clone, Copy)]
+    pub struct Peer(pub usize);
+
+    impl Peer {
+        fn r(&self) -> Rings {
+            Rings(self.0)
+        }
+
+        /// The oldest packet from `net`, until `rx_pop`.
+        pub fn rx_peek(&self) -> Option<&'static mut [u8]> {
+            let r = self.r();
+            let tail = r.word(TX_TAIL).load(Ordering::Relaxed);
+            if r.word(TX_HEAD).load(Ordering::Acquire) == tail {
+                return None;
+            }
+            let len = (r.word(TX_LEN + (tail % SLOTS) as usize * 4).load(Ordering::Relaxed) as usize).min(SLOT);
+            Some(unsafe { core::slice::from_raw_parts_mut(r.slot(TX_DATA, tail), len) })
+        }
+
+        pub fn rx_pop(&self) {
+            let r = self.r();
+            let tail = r.word(TX_TAIL).load(Ordering::Relaxed);
+            r.word(TX_TAIL).store(tail.wrapping_add(1), Ordering::Release);
+        }
+
+        /// Queues `p` for `net`; false if the ring is full or it is too
+        /// long.
+        pub fn tx(&self, p: &[u8]) -> bool {
+            let r = self.r();
+            let head = r.word(RX_HEAD).load(Ordering::Relaxed);
+            if p.len() > SLOT || head.wrapping_sub(r.word(RX_TAIL).load(Ordering::Acquire)) >= SLOTS {
+                return false;
+            }
+            unsafe { core::ptr::copy_nonoverlapping(p.as_ptr(), r.slot(RX_DATA, head), p.len()) };
+            r.word(RX_LEN + (head % SLOTS) as usize * 4).store(p.len() as u32, Ordering::Relaxed);
+            r.word(RX_HEAD).store(head.wrapping_add(1), Ordering::Release);
+            true
+        }
+    }
+}
+
 /// The Wi-Fi chip's control path (doc/22), for the Wi-Fi service: `read`
 /// takes one message from the chip, `write` sends one. A message is
 /// esp_hosted's serial payload (endpoint and data TLVs around an RPC). The

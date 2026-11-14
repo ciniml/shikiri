@@ -10,7 +10,9 @@
 //! - `Links`: interface 0 (`Medium::Ip`): loopback (127.0.0.0/8) and the
 //!   host link to the PC (`netdev:host`, 10.55.0.2/24).
 //! - `EthNic`: an Ethernet link: the Wi-Fi station (`netdev:wlan0`) or the
-//!   test LAN (`test0`, a pair of rings to a peer inside `net`).
+//!   test LAN (`test0`, a pair of rings to a peer inside `net`), or the
+//!   tailnet (`ts0`, IP packets on rings shared with `ts`, doc/72: framed
+//!   here, its neighbours answered here, `Port::Link`).
 //!
 //! Packets for the Tab5 pass the filter's IN hook here, and packets from
 //! its stack the OUT hook (doc/24).
@@ -20,7 +22,7 @@ use core::cell::Cell;
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 use t5_rt::netdev::ring::Rings;
-use t5_rt::{Error, Handle, event, netdev, sleep_ms, yield_now};
+use t5_rt::{Channel, Error, Handle, Shm, event, netdev, netlink, sleep_ms, yield_now};
 
 use crate::filter::{self, ANY_LINK, Action, IN, OUT};
 use crate::fwd::{self, IFACE0};
@@ -273,6 +275,27 @@ pub fn from_peer() -> &'static mut Ring<TEST_RING> {
     unsafe { &mut *core::ptr::addr_of_mut!(FROM_PEER) }
 }
 
+/// `ts0`'s far end (doc/72): a made-up MAC that every address on the link
+/// has (`Port::Link` answers ARP for it).
+pub const LINK_PEER_MAC: [u8; 6] = [0x02, 0x74, 0x73, 0x00, 0x00, 0x02];
+/// The ARP answers `Port::Link` makes, waiting to be read.
+static mut LINK_LOCAL: Ring<4> = Ring::new();
+
+fn link_local() -> &'static mut Ring<4> {
+    unsafe { &mut *core::ptr::addr_of_mut!(LINK_LOCAL) }
+}
+
+/// The process at the far end of a `Port::Link`.
+pub struct NetLink {
+    pub chan: Channel,
+    pub rings: Rings,
+    pub _shm: Shm,
+    /// The link's own MAC (the frames made here are to it).
+    pub mac: [u8; 6],
+    /// Packets added since the last `KICK`.
+    pub unsent: Cell<bool>,
+}
+
 /// Frames queued on the transmit ring before the kernel is told.
 const KICK_EVERY: u32 = 4;
 
@@ -285,6 +308,9 @@ pub enum Port {
     Ring { h: Handle, rings: Rings, unsent: Cell<u32> },
     /// The test LAN.
     Test,
+    /// A link another process carries (`ts0`, doc/72); None while no
+    /// process is there.
+    Link(Option<NetLink>),
 }
 
 impl Port {
@@ -307,11 +333,59 @@ impl Port {
             // `wait`: always looked at.
             Port::Test => from_peer().pop(out).map(|(_, n)| (n, true)),
             Port::Ring { .. } => None,
+            // Not signalled either: the rings are looked at each poll
+            // (no system call); a `KICK` only ends the `wait`.
+            Port::Link(l) => {
+                if let Some((_, n)) = link_local().pop(out) {
+                    return Some((n, true));
+                }
+                let l = l.as_ref()?;
+                let p = l.rings.rx_peek()?;
+                let n = p.len().min(MTU);
+                let ethertype = match p.first().map(|v| v >> 4) {
+                    Some(6) => ETHERTYPE_IPV6,
+                    _ => ETHERTYPE_IPV4,
+                };
+                out[..6].copy_from_slice(&l.mac);
+                out[6..12].copy_from_slice(&LINK_PEER_MAC);
+                out[12..14].copy_from_slice(&ethertype);
+                out[ETH_HDR..ETH_HDR + n].copy_from_slice(&p[..n]);
+                l.rings.rx_pop();
+                Some((ETH_HDR + n, true))
+            }
         }
+    }
+
+    /// `ts0`'s ARP: every address on the link is the far end
+    /// (`LINK_PEER_MAC`). The answer to request `f` is queued for `read`.
+    fn answer_arp(f: &[u8]) {
+        // An Ethernet ARP request for IPv4 (RFC 826).
+        if f.len() < ETH_HDR + 28 || f[ETH_HDR + 6..ETH_HDR + 8] != [0, 1] || f[38..42] == f[28..32] {
+            return;
+        }
+        let mut a = [0u8; ETH_HDR + 28];
+        a[..6].copy_from_slice(&f[6..12]);
+        a[6..12].copy_from_slice(&LINK_PEER_MAC);
+        a[12..14].copy_from_slice(&ETHERTYPE_ARP);
+        a[14..20].copy_from_slice(&f[14..20]);
+        a[20..22].copy_from_slice(&[0, 2]);
+        a[22..28].copy_from_slice(&LINK_PEER_MAC);
+        a[28..32].copy_from_slice(&f[38..42]);
+        a[32..38].copy_from_slice(&f[22..28]);
+        a[38..42].copy_from_slice(&f[28..32]);
+        link_local().push(0, &a);
     }
 
     fn signalled(&self) -> bool {
         matches!(self, Port::Dev(_))
+    }
+
+    /// The process at the far end of a `Port::Link`.
+    pub fn net_link(&self) -> Option<&NetLink> {
+        match self {
+            Port::Link(l) => l.as_ref(),
+            _ => None,
+        }
     }
 
     /// A free transmit slot of the rings, waiting while they are full.
@@ -366,22 +440,46 @@ impl Port {
                 true
             }
             Port::Test => to_peer().push(0, f),
+            Port::Link(l) => {
+                if f.len() < ETH_HDR {
+                    return false;
+                }
+                let ethertype = [f[12], f[13]];
+                if ethertype == ETHERTYPE_ARP {
+                    Self::answer_arp(f);
+                    return true;
+                }
+                let Some(l) = l.as_ref().filter(|_| ethertype == ETHERTYPE_IPV4 || ethertype == ETHERTYPE_IPV6) else { return false };
+                // The IP packet without the frame; a full ring loses it.
+                let n = f.len() - ETH_HDR;
+                let Some(slot) = l.rings.tx_slot().filter(|_| n <= netlink::SLOT) else { return false };
+                slot[..n].copy_from_slice(&f[ETH_HDR..]);
+                l.rings.tx_push(n);
+                l.unsent.set(true);
+                true
+            }
         }
     }
 
     /// Has the kernel send what was queued on the rings (once per pass,
     /// before `wait`).
     pub fn kick(&self) {
-        if let Port::Ring { h, unsent, .. } = self
-            && unsent.replace(0) > 0
-        {
-            let _ = h.ctl(netdev::KICK, 0);
+        match self {
+            Port::Ring { h, unsent, .. } if unsent.replace(0) > 0 => {
+                let _ = h.ctl(netdev::KICK, 0);
+            }
+            // A full queue already wakes the peer.
+            Port::Link(Some(l)) if l.unsent.replace(false) => {
+                let _ = l.chan.0.write(&[netlink::KICK]);
+            }
+            _ => {}
         }
     }
 
     pub fn handle(&self) -> Option<&Handle> {
         match self {
             Port::Dev(h) | Port::Ring { h, .. } => Some(h),
+            Port::Link(l) => l.as_ref().map(|l| &l.chan.0),
             Port::Test => None,
         }
     }

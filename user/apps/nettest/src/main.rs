@@ -24,13 +24,19 @@
 //! fetches its `/` over IPv6; `mode` 6 sends UDP round trips and 64 KiB of
 //! TCP over ::1; `mode` 7 pings the test LAN's peer (fd50::2).
 //!
-//! Built with `--permit svc:net`. Exit 0 if everything held, otherwise the
+//! `mode` 8 (doc/72 B0) is the far end of `net`'s link `ts0`, as `ts`
+//! will be: over `svc:netlink` it gives the link 100.64.0.1/10 and the
+//! name `tspeer` (100.64.0.2), and answers the pings to every other address
+//! on the link, until killed (`mode` 3 with ARG 100.64.0.2 then pings
+//! through `ts0`; `mode` 9 resolves `tspeer` through `svc:net` and pings it).
+//!
+//! Built with `--permit svc:net` (and `svc:netlink/ts0` for mode 8). Exit 0 if everything held, otherwise the
 //! number of the failed check.
 
 use core::net::{IpAddr, Ipv6Addr};
 
 use t5_rt::net::ipv4;
-use t5_rt::{Net, event, sleep_ms, time_ns};
+use t5_rt::{Channel, Net, chan, event, netlink, sleep_ms, time_ns, wait};
 
 t5_rt::entry!(main);
 
@@ -46,6 +52,8 @@ fn main(mode: usize, arg: usize) -> usize {
         5 => web6(),
         6 => loop6(),
         7 => ping6(IpAddr::V6(Ipv6Addr::new(0xfd50, 0, 0, 0, 0, 0, 0, 2))),
+        8 => link_peer(),
+        9 => resolve_ping("TSPeer."),
         _ => run(),
     };
     match r {
@@ -103,6 +111,104 @@ fn ping(ip: u32) -> Result<(), u32> {
         sleep_ms(200);
     }
     if answered == 0 { Err(50) } else { Ok(()) }
+}
+
+/// Mode 9: `name` through `svc:net`'s RESOLVE (the tailnet's names,
+/// doc/72 §4), then a ping to it.
+fn resolve_ping(name: &str) -> Result<(), u32> {
+    let mut net = connect()?;
+    let ip = net.resolve(name, 3000).map_err(|_| 90u32)?;
+    event!(Info, "nettest.resolved", name = name, ip = ip);
+    ping(ip)
+}
+
+/// `ts0`'s address as mode 8 gives it.
+const LINK_ADDR: [u8; 4] = [100, 64, 0, 1];
+
+/// Mode 8: the far end of `ts0` (doc/72 B0).
+fn link_peer() -> Result<(), u32> {
+    let c = Channel::connect(netlink::SERVICE).map_err(|_| 80u32)?;
+    match wait(&[&c.0], 5_000_000_000) {
+        Ok(ev) if ev.kind == chan::SHM => {}
+        _ => return Err(81),
+    }
+    let shm = c.take_shm().map_err(|_| 82u32)?;
+    let mem = shm.map().map_err(|_| 83u32)?;
+    let peer = netlink::Peer(mem.as_ptr() as usize);
+    let mut m = [0u8; netlink::ADDR_LEN];
+    m[0] = netlink::ADDR;
+    m[1] = 10;
+    m[4..8].copy_from_slice(&LINK_ADDR);
+    c.send(&m).map_err(|_| 84u32)?;
+    // One name: [length][name][IPv4].
+    let names = (mem.as_ptr() as usize + netlink::NAMES_AT) as *mut u8;
+    let entry = [6, b't', b's', b'p', b'e', b'e', b'r', 100, 64, 0, 2];
+    unsafe { core::ptr::copy_nonoverlapping(entry.as_ptr(), names, entry.len()) };
+    c.send(&[netlink::NAMES, 0, entry.len() as u8, 0]).map_err(|_| 86u32)?;
+    event!(Info, "nettest.link_ready");
+    let mut answered = 0u32;
+    let mut buf = [0u8; chan::MSG_MAX];
+    let mut out = [0u8; netlink::SLOT];
+    loop {
+        if let Ok(ev) = wait(&[&c.0], 1_000_000_000)
+            && ev.kind == chan::PEER_CLOSED
+        {
+            return Err(85);
+        }
+        while c.0.read(&mut buf).is_ok() {}
+        let mut sent = false;
+        while let Some(p) = peer.rx_peek() {
+            if let Some(n) = echo_reply(p, &mut out)
+                && peer.tx(&out[..n])
+            {
+                sent = true;
+                answered += 1;
+                if answered == 1 {
+                    event!(Info, "nettest.link_answered", ip = u32::from_be_bytes([out[12], out[13], out[14], out[15]]));
+                }
+            }
+            peer.rx_pop();
+        }
+        if sent {
+            let _ = c.0.write(&[netlink::KICK]);
+        }
+    }
+}
+
+/// The ICMP echo reply to IPv4 packet `p` if it is an echo request to an
+/// address on `ts0` other than the link's own: its length in `out`.
+fn echo_reply(p: &[u8], out: &mut [u8]) -> Option<usize> {
+    let ihl = (*p.first()? as usize & 0xF) * 4;
+    let len = (u16::from_be_bytes([*p.get(2)?, *p.get(3)?]) as usize).min(p.len());
+    if p[0] >> 4 != 4 || ihl < 20 || len < ihl + 8 || p[9] != 1 || p[ihl] != 8 {
+        return None;
+    }
+    let dst = &p[16..20];
+    if dst == LINK_ADDR || dst[0] != 100 || dst[1] & 0xC0 != 64 {
+        return None;
+    }
+    let o = &mut out[..len];
+    o.copy_from_slice(&p[..len]);
+    o[12..16].copy_from_slice(&p[16..20]);
+    o[16..20].copy_from_slice(&p[12..16]);
+    o[8] = 64;
+    o[10..12].fill(0);
+    let c = checksum(&o[..ihl]);
+    o[10..12].copy_from_slice(&c.to_be_bytes());
+    o[ihl] = 0;
+    o[ihl + 2..ihl + 4].fill(0);
+    let c = checksum(&o[ihl..]);
+    o[ihl + 2..ihl + 4].copy_from_slice(&c.to_be_bytes());
+    Some(len)
+}
+
+/// The Internet checksum (RFC 1071) of `d`.
+fn checksum(d: &[u8]) -> u16 {
+    let mut s: u32 = d.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32).sum();
+    while s > 0xFFFF {
+        s = (s & 0xFFFF) + (s >> 16);
+    }
+    !(s as u16)
 }
 
 /// Names that should resolve on any network with a working resolver.

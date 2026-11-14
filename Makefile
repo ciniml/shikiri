@@ -23,9 +23,9 @@ PERMIT_echo   := --permit chan:echo --permit listen:echo --permit svc:echo --per
 PERMIT_paint  := --permit display --permit touch
 PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
-PERMIT_net    := --permit cpu:net --permit shm --permit netdev:eth0 --permit netdev:ap0 --permit listen:net --permit listen:netctl --permit netdev:host --permit netdev:wlan0 --permit random --stack 65536
+PERMIT_net    := --permit cpu:net --permit shm --permit netdev:eth0 --permit netdev:ap0 --permit listen:net --permit listen:netctl --permit listen:netlink --permit netdev:host --permit netdev:wlan0 --permit random --stack 98304
 PERMIT_nettest := --permit svc:net/udp:any --permit svc:net/tcp-listen:any --permit svc:net/tcp-connect \
-                  --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --stack 32768
+                  --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --permit svc:netlink/ts0 --stack 32768
 PERMIT_wifi   := --permit cpu:net --permit wlan:ctl --permit listen:wifi --permit svc:net/link --permit svc:cfg/r:wifi. \
                  --permit svc:cfg/w:wifi. --permit svc:cfg/secret:wifi. --permit ready:bt --stack 24576
 PERMIT_netctl := --permit svc:netctl --permit svc:fs/rw:T5OS/NET.RUL --stack 32768
@@ -54,7 +54,7 @@ PERMIT_spkcheck := --permit audio:out --permit audio:in
 # Tailscale (doc/71): the control server over TLS; its keys and the auth
 # key are secret settings (strong: the system key).
 PERMIT_tsget := --permit svc:ts/info --permit svc:ts/tcp-connect --permit svc:ts/resolve --permit svc:ts/udp:any
-PERMIT_ts := --permit shm --permit listen:ts --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:net/udp:41641 --permit svc:net/info --permit random \
+PERMIT_ts := --permit shm --permit listen:ts --permit svc:netlink/ts0 --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:net/udp:41641 --permit svc:net/info --permit random \
              --permit svc:cfg/r:ts. --permit svc:cfg/w:ts. --permit svc:cfg/secret:ts. --stack 262144
 PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:ts/tcp-connect --permit svc:ts/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
@@ -398,7 +398,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
@@ -996,6 +996,19 @@ p4emu-run-46:
 	grep -q "shell.volume volume=30" $(BUILD)/emu-volume.txt
 	grep -q "shell.volume volume=0" $(BUILD)/emu-volume.txt
 	grep -q "t5emu: ES8388 DAC: control3=0x24 volume=0x46,0x46" $(BUILD)/emu-volume.txt
+
+p4emu-run-47:
+	@# The tailnet's link in `net` (doc/72 B0, B2): nettest 8 carries
+	@# `ts0` over `svc:netlink` (shared rings, the address 100.64.0.1/10,
+	@# the name `tspeer`) and answers pings to the link's other addresses;
+	@# nettest 3 pings 100.64.0.2 through `svc:net`, nettest 9 resolves
+	@# `TSPeer.` through `svc:net` (the names before DNS) and pings it.
+	$(T5EMU) --quiet --max-ms 40000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net" --ctl "wait-ms 1500" --ctl "run nettest 8" --ctl "wait-ms 1500" --ctl "run nettest 3 1681915906" --ctl "wait-ms 6000" \
+	    --ctl "run nettest 9" --ctl "wait-ms 6000" \
+	    --expect-event net.link --expect-event nettest.link_ready --expect-event nettest.link_answered --expect-event nettest.ping \
+	    --expect-event net.ts_names --expect-event nettest.resolved \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

@@ -29,8 +29,10 @@ pub const ETH: usize = 3;
 pub const AP: usize = 4;
 /// The links that may lead out (doc/58 R3): `Stack::uplink`.
 pub const UPLINKS: [usize; 2] = [ETH, WLAN];
-pub const IFACES: usize = 5;
-pub const LINK_NAMES: [&str; IFACES] = ["host", "wlan0", "test0", "eth0", "ap0"];
+/// The tailnet, carried by `ts` (doc/72).
+pub const TS0: usize = 5;
+pub const IFACES: usize = 6;
+pub const LINK_NAMES: [&str; IFACES] = ["host", "wlan0", "test0", "eth0", "ap0", "ts0"];
 
 const INBOX: usize = 8;
 const REJECTS: usize = 4;

@@ -1,6 +1,6 @@
 # 72. tailnet を `net` のリンクに（形 B）の進め方
 
-2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。この文書は案で、まだ作っていない。決めることは §7。
+2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。§7 は利用者が B0〜B2 を選んだ（2026-11-14）。作ったものは §8。
 
 ## 1. 今（形 A）とその困りごと
 - `ts` は自分の中に smoltcp を持つ（`tsclient::tun::Tun`、MTU 1280）。WireGuard で解いた IP パケットはこの smoltcp に入り、ほかのアプリは `svc:ts`（`svc:net` と同じ要求）でソケットを借りる。
@@ -60,3 +60,27 @@
 2. つなぎ方: 案 B-1（`svc:netlink` と共有メモリの環）でよいか。
 3. 名前: 案 N-1（表を `net` に渡す）でよいか。
 4. どこまで: B0〜B2（どのアプリからも tailnet）で止めるか、B3（ACL）、B4（既定を B）、B5（subnet router）まで行くか。
+
+## 8. 作ったもの（B0〜B2、2026-11-15）
+- 利用者の選び: B0〜B2、つなぎ方は案 B-1、名前は案 N-1。
+
+### B0 環と `ts0`
+- `t5_abi::netlink`: `svc:netlink`。共有メモリは `netdev::ring` と同じ配置（`net` がプロセスの側、相手がカーネルの側。相手は `netlink::Peer` で読み書きする）で、その後ろに名前の表（4 KiB）。チャネルの通知は `KICK`（環に足した）、`ADDR`（`[ADDR, prefix, 0, 0, IPv4]`）、`NAMES`。`net::link::TS0`（7）。
+- `net`:
+  - `svc:netlink` で待ち、許可 `svc:netlink/ts0` のある 1 つだけを受ける（ほかは `net.denied op=netlink`）。リンク番号 5（`fwd::TS0`、`IFACES` は 6）。最初の接続でリンクを作り、相手が去っても残す（アドレスを外すだけ。ソケットの持ち主が困らないように）。
+  - リンクは Ethernet の形のまま（`EthLink`、`Port::Link`）にした。フィルタ、転送、リンクごとのソケット、経路の選び方がそのまま使える。`Port::Link` は、smoltcp が出す Ethernet の枠から IP を取り出して環に入れ、環から来た IP に枠を付ける。ARP の問い合わせには、どのアドレスも相手の作り物の MAC（`02:74:73:00:00:02`）と、ここで答える。アドレスは相手の `ADDR` で 100.x/10 にし、100.64.0.0/10 は `ts0` の上（相手がどのアドレスも引き受ける）。
+  - 環は `wait` の合図を待たずに毎回の poll で見る（共有メモリを読むだけ）。`KICK` は `wait` を終わらせるためだけ。
+  - リンクが 1 つ増えて `Stack`（34 KB、`EthLink` は 2.6 KB）が大きくなり、64 KiB のスタックがあふれた。あふれても fault にならず、テスト LAN の転送（p4emu-run-18〜20、23）が黙って止まった。スタックを 96 KiB にした。
+- `nettest 8`: `ts0` の相手の役（100.64.0.1/10、名前 `tspeer`、リンクのほかのアドレスへの ping に答える）。
+- p4emu-run-47: `nettest 8` と `nettest 3 100.64.0.2`（`svc:net` の ping が `ts0` を往復）、`nettest 9`（`svc:net` で `TSPeer.` を引いて ping）。
+
+### B1 `ts` を管に
+- 設定 `ts.form` が `b` なら、`ts` は起動時に `svc:netlink` につなぐ（つなげなければ形 A のまま、`ts.form b=false`）。許可に `svc:netlink/ts0`。
+- `Node::pipe`（tsclient）: smoltcp を回さず、アドレスも付けない。相手から解いたパケットは `tun.dev.rx` に、相手へのパケットは `tun.dev.tx` に置く（形 A と同じ置き場所）。`ts` の `Pipe::step` が、環 → `tun.dev.tx`、`tun.dev.rx` → 環（宛て先が自分の 100.x のものだけ。ほかは数えて捨てる）と移す。netmap の自分のアドレスが変われば `ADDR` を送る。
+- 形 B では `svc:ts` の TCP・UDP・PING は `NO_ADDRESS`（ノードのスタックにアドレスがない）、`IF_INFO` は「ない」。`PEER_INFO`、`LOGIN_INFO`、`RESOLVE` は今どおり。`Net::for_host` は `svc:ts` の `IF_INFO` で形を見分け、形 B なら tailnet の宛て先も `svc:net` へ。
+- `net` が落ちて `svc:netlink` が閉じたら、`ts` はセッションを終え、次は形 A で始める。
+
+### B2 名前
+- `NetMap::names`（tsclient）: `resolve` が答える名前をすべて並べる（管理画面の名前とノードの全体の名前、それぞれから検索ドメインを外したもの、ノードの短い名前。小文字、最後の点なし、先に出たものが勝つ）。試験で、並べた名前がすべて `resolve` と同じ答えになることを確かめる。
+- `ts` は netmap の相手か DNS の設定が変わるたびに、表を共有メモリに書いて `NAMES` を送る。`net` は表を自分の中に写し（`tsnames`）、RESOLVE（IPv4）で DNS より先に見る。見つかればすぐ答える（`Slot::known`）。`ts0` の相手が去れば表を消す。
+

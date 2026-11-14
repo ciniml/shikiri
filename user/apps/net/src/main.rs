@@ -13,7 +13,11 @@
 //!   offers it, the host link to the PC (`netdev:host`, 10.55.0.2/24);
 //! - the Wi-Fi station (`netdev:wlan0`, Ethernet, address by DHCP);
 //! - with `run net 1`, the test LAN (`test0`, 192.168.50.1/24, whose peer
-//!   192.168.50.2 lives in this service too, `testlan`).
+//!   192.168.50.2 lives in this service too, `testlan`);
+//! - the tailnet (`ts0`, doc/72) while a process with `svc:netlink/ts0`
+//!   (`ts`) carries it over `svc:netlink`: IP packets on shared rings, the
+//!   address it says (`netlink::ADDR`), and the names it answers
+//!   (`netlink::NAMES`, looked at before DNS: `tsnames`).
 //!
 //! Packets for other hosts are forwarded between the links (`fwd`); every
 //! packet passes the filter (`filter`), whose rules come over `svc:netctl`
@@ -24,7 +28,7 @@
 //! socket buffers are a static pool.
 //!
 //! Built with `--permit shm --permit listen:net --permit listen:netctl
-//! --permit netdev:host --permit netdev:wlan0`.
+//! --permit netdev:host --permit netdev:wlan0 --permit listen:netlink`.
 
 use core::mem::MaybeUninit;
 
@@ -37,16 +41,17 @@ mod rules;
 mod dhcpd;
 mod dnsrelay;
 mod testlan;
+mod tsnames;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv6Address, Ipv6Cidr};
 use t5_rt::net::{self as proto, iface, op, state, status};
-use t5_rt::{Channel, Error, Grants, Handle, Listener, Shm, chan, event, netdev, rights, sleep_ms, time_ns, wait_raw_at};
+use t5_rt::{Channel, Error, Grants, Handle, Listener, Shm, chan, event, netdev, netlink, rights, sleep_ms, time_ns, wait_raw_at};
 
-use fwd::{AP, ETH, Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, WLAN};
-use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, Port};
+use fwd::{AP, ETH, Forwarder, IFACE0, IFACES, LINK_NAMES, TEST, TS0, WLAN};
+use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, NetLink, Port};
 
 t5_rt::entry!(main);
 
@@ -483,7 +488,8 @@ impl EthLink {
             self.v6_check_at = clock_ns() + 100_000_000;
             self.log_ipv6();
         }
-        if self.dev.own.is_none() && clock_ns() >= self.report_at {
+        // `ts0` has no address while its far end is away: not a wait.
+        if self.dev.own.is_none() && self.dev.link != TS0 && clock_ns() >= self.report_at {
             self.report_at = clock_ns() + 5_000_000_000;
             link::log_counters(name, &self.dev);
         }
@@ -600,6 +606,8 @@ struct Slot {
     query: Option<dns::QueryHandle>,
     /// Dns: an AAAA lookup.
     v6: bool,
+    /// Dns: answered from the tailnet's names (`tsnames`).
+    known: Option<u32>,
 }
 
 /// The echo identifier of client socket `i`.
@@ -918,7 +926,7 @@ impl Stack {
 
     fn new_slot(&mut self, client: usize, kind: Kind) -> Result<usize, u32> {
         let i = self.slots.iter().position(Option::is_none).ok_or(status::NO_SOCKETS)?;
-        self.slots[i] = Some(Slot { kind, owner: Some(client), socks: [None; IFACES], primary: IFACE0, sent_ns: 0, query: None, v6: false });
+        self.slots[i] = Some(Slot { kind, owner: Some(client), socks: [None; IFACES], primary: IFACE0, sent_ns: 0, query: None, v6: false, known: None });
         Ok(i)
     }
 
@@ -1034,6 +1042,7 @@ impl Stack {
             proto::link::TEST0 if present(TEST) => t[TEST] = Some(None),
             proto::link::ETH0 if present(ETH) => t[ETH] = Some(None),
             proto::link::AP0 if present(AP) => t[AP] = Some(None),
+            proto::link::TS0 if present(TS0) => t[TS0] = Some(None),
             _ => return Err(status::NO_ADDRESS),
         }
         Ok(t)
@@ -1305,6 +1314,11 @@ impl Stack {
             op::RESOLVE => {
                 let n = (b as usize).min(proto::NAME_MAX).min(mem.len());
                 let name = core::str::from_utf8(&mem[..n]).map_err(|_| status::BAD_REQUEST)?;
+                if !v6 && let Some(ip) = tsnames::lookup(name) {
+                    let i = self.new_slot(client, Kind::Dns)?;
+                    self.slots[i].as_mut().unwrap().known = Some(ip);
+                    return Ok((i as u32, 0));
+                }
                 let up = self.uplink();
                 let w = self.eth[up - 1].as_mut().ok_or(status::UNREACHABLE)?;
                 let dns = w.dns.ok_or(status::UNREACHABLE)?;
@@ -1327,6 +1341,13 @@ impl Stack {
                 Ok((i as u32, 0))
             }
             op::RESOLVE_RESULT => {
+                if let Some(Some(s)) = self.slots.get(sock as usize)
+                    && s.owner == Some(client)
+                    && s.kind == Kind::Dns
+                    && let Some(ip) = s.known
+                {
+                    return Ok((1, self.reply_with(IpAddress::Ipv4(Ipv4Address::from_bits(ip)))));
+                }
                 let (link, h) = self.primary(client, sock, Kind::Dns)?;
                 let w = self.eth[link - 1].as_mut().ok_or(status::UNREACHABLE)?;
                 let slot = self.slots[sock as usize].as_mut().unwrap();
@@ -1512,6 +1533,71 @@ impl Stack {
 }
 
 /// One `svc:netctl` request.
+/// `ts0`'s own MAC (locally administered; its far end is
+/// `link::LINK_PEER_MAC`).
+const TS0_MAC: [u8; 6] = [0x02, 0x74, 0x73, 0x00, 0x00, 0x01];
+
+/// A process asks to carry `ts0` (doc/72): with the grant
+/// `svc:netlink/ts0` and while no other does, it gets the rings (the link
+/// is made the first time and stays, its sockets with it).
+fn link_accept(stack: &mut Stack, c: Channel) {
+    if !c.peer_grants().has(b"ts0") {
+        let mut name = [0u8; t5_rt::t5a::MAX_NAME];
+        let n = c.peer_name(&mut name);
+        event!(Warn, "net.denied", app = core::str::from_utf8(&name[..n]).unwrap_or("?"), op = "netlink");
+        return;
+    }
+    if stack.eth[TS0 - 1].as_ref().is_some_and(|e| e.dev.port.net_link().is_some()) {
+        return;
+    }
+    let Ok(shm) = Shm::alloc(netlink::SIZE) else { return };
+    let Ok(mem) = shm.map() else { return };
+    if shm.grant(&c, 0, netlink::SIZE).is_err() {
+        return;
+    }
+    let rings = netdev::ring::Rings(mem.as_ptr() as usize);
+    let l = NetLink { chan: c, rings, _shm: shm, mac: TS0_MAC, unsent: core::cell::Cell::new(false) };
+    match &mut stack.eth[TS0 - 1] {
+        Some(e) => e.dev.port = Port::Link(Some(l)),
+        None => stack.eth[TS0 - 1] = Some(EthLink::new(TS0, Port::Link(Some(l)), TS0_MAC, false)),
+    }
+    event!(Info, "net.link", link = "ts0", addr = "peer", mtu = netdev::MTU as u32);
+}
+
+/// `ts0`'s far end sent messages (`netlink::KICK`, `ADDR`) or went away
+/// (`closed`: the link stays without an address until another comes).
+fn link_messages(stack: &mut Stack, closed: bool, msg: &mut [u8]) {
+    let Some(e) = stack.eth[TS0 - 1].as_mut() else { return };
+    if closed {
+        e.dev.port = Port::Link(None);
+        e.clear_addr();
+        tsnames::clear();
+        event!(Info, "net.link_state", link = "ts0", mbps = 0u32, up = false);
+        return;
+    }
+    let Some(l) = e.dev.port.net_link() else { return };
+    let mut addr = None;
+    while let Ok(n) = l.chan.0.read(msg) {
+        if n >= netlink::ADDR_LEN && msg[0] == netlink::ADDR {
+            addr = Some((msg[1], u32::from_be_bytes([msg[4], msg[5], msg[6], msg[7]])));
+        }
+        if n >= 4 && msg[0] == netlink::NAMES {
+            let len = (u16::from_le_bytes([msg[2], msg[3]]) as usize).min(netlink::NAMES_MAX);
+            let at = (l.rings.0 + netlink::NAMES_AT) as *const u8;
+            tsnames::set(unsafe { core::slice::from_raw_parts(at, len) });
+            event!(Info, "net.ts_names", count = tsnames::count());
+        }
+    }
+    match addr {
+        Some((0, _)) => e.clear_addr(),
+        Some((prefix, a)) => {
+            e.set_addr(a, prefix.min(32), None);
+            event!(Info, "net.addr_fixed", link = "ts0", addr = a, prefix = prefix as u32);
+        }
+        None => {}
+    }
+}
+
 fn control(staging: &mut rules::Staging, m: &[u8]) -> [u8; proto::REPLY_SIZE] {
     match m.first().copied() {
         Some(proto::ctl::BEGIN) => {
@@ -1592,6 +1678,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
     let pool = pool_shm.map().map_err(|_| 2u32)?;
     let l = Listener::open(proto::SERVICE).map_err(|_| 3u32)?;
     let ctl_listener = Listener::open(proto::ctl::SERVICE).ok();
+    let link_listener = Listener::open(netlink::SERVICE).ok();
     let mut ctl: Option<Channel> = None;
     let mut staging = rules::Staging::new();
 
@@ -1687,8 +1774,8 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         }
         // The listeners, the links (frames arriving), the control client,
         // the clients.
-        let mut hs = [0u32; 7 + CLIENTS];
-        let mut who = [usize::MAX; 7 + CLIENTS];
+        let mut hs = [0u32; 9 + CLIENTS];
+        let mut who = [usize::MAX; 9 + CLIENTS];
         hs[0] = l.0.raw();
         let mut n = 1;
         let mut ctl_at = (usize::MAX, usize::MAX);
@@ -1700,6 +1787,15 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         if let Some(c) = &ctl {
             hs[n] = c.0.raw();
             ctl_at.1 = n;
+            n += 1;
+        }
+        let mut link_at = (usize::MAX, usize::MAX);
+        if let Some(ll) = &link_listener {
+            (hs[n], link_at.0) = (ll.0.raw(), n);
+            n += 1;
+        }
+        if let Some(h) = stack.eth[TS0 - 1].as_ref().and_then(|e| e.dev.port.handle()) {
+            (hs[n], link_at.1) = (h.raw(), n);
             n += 1;
         }
         let first_link = n;
@@ -1777,6 +1873,16 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
             } else {
                 e.dev.queued = true;
             }
+        }
+        if ev.index == link_at.0 {
+            if let Some(c) = link_listener.as_ref().and_then(|ll| ll.accept().ok()) {
+                link_accept(&mut stack, c);
+            }
+            continue;
+        }
+        if ev.index == link_at.1 {
+            link_messages(&mut stack, ev.kind == chan::PEER_CLOSED, &mut msg);
+            continue;
         }
         if ev.index == ctl_at.0 {
             if let Some(c) = ctl_listener.as_ref().and_then(|cl| cl.accept().ok())

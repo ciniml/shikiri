@@ -14,7 +14,7 @@
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use t5_abi::log::{self, Addr, Level};
-pub use t5_abi::{Error, FOREVER, audio, ble, bt, cfg, cfgflash, chan, display, event, font, fs, kbd, matter, net, netdev, proc, random, ready, rights, sd, shm, spawn, store, svc, sys, t5a, timer, touch, update, i2c, wifi, wlan};
+pub use t5_abi::{Error, FOREVER, audio, ble, bt, cfg, cfgflash, chan, display, event, font, fs, kbd, matter, net, netdev, netlink, proc, random, ready, rights, sd, shm, spawn, store, svc, sys, t5a, timer, touch, update, i2c, wifi, wlan};
 
 core::arch::global_asm!(
     ".section .text._start, \"ax\"",
@@ -938,19 +938,33 @@ impl Net {
     }
 
     /// The service that reaches `host` (an IPv4 address or a name) and
-    /// its address (doc/71 §14.16): `svc:ts` for an address in the
-    /// tailnet's 100.64.0.0/10 or a name `ts` resolves (MagicDNS: whole
-    /// names, search domains, short names; when `ts` runs and the app has
-    /// `svc:ts/resolve`), else `svc:net` and its DNS (waiting up to `ms`).
+    /// its address (doc/71 §14.16): an address in the tailnet's
+    /// 100.64.0.0/10 or a name `ts` resolves (MagicDNS: whole names,
+    /// search domains, short names; when `ts` runs and the app has
+    /// `svc:ts/resolve`) goes through `svc:ts` while `ts` has its own IP
+    /// stack (form A), through `svc:net`'s `ts0` in form B (doc/72); other
+    /// names through `svc:net` and its DNS (waiting up to `ms`).
     pub fn for_host(host: &str, ms: u64) -> Result<(Net, u32), NetError> {
+        // Form A: `svc:ts` has the interface `ts0` up.
+        let own_stack = |ts: &Net| matches!(ts.if_info(0), Ok(Some(_)));
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
             let ip = ip.to_bits();
-            return Ok((Net::connect_to(if is_tailnet(ip) { "ts" } else { net::SERVICE })?, ip));
+            if is_tailnet(ip)
+                && let Ok(ts) = Net::connect_to("ts")
+                && own_stack(&ts)
+            {
+                return Ok((ts, ip));
+            }
+            return Ok((Net::connect()?, ip));
         }
         if let Ok(mut ts) = Net::connect_to("ts")
             && let Ok(ip) = ts.resolve(host, ms)
         {
-            return Ok((ts, ip));
+            if own_stack(&ts) {
+                return Ok((ts, ip));
+            }
+            drop(ts);
+            return Ok((Net::connect()?, ip));
         }
         let mut n = Net::connect()?;
         let ip = n.resolve(host, ms)?;

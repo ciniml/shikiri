@@ -173,6 +173,8 @@ pub mod link {
     pub const ETH0: u8 = 5;
     /// The Wi-Fi chip's soft-AP (doc/58 R4).
     pub const AP0: u8 = 6;
+    /// The tailnet, carried by `ts` (doc/72).
+    pub const TS0: u8 = 7;
 }
 
 /// TCP_STATE values.
