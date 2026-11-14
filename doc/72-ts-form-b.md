@@ -104,3 +104,12 @@
 - `net` のガードの規則（`ts0` は ping だけ受ける）は持ち主の側の守りとして、そのままにした。tailnet から Tab5 に始める TCP・UDP を受けたくなったら、両方（ACL と `pass in on ts0 …`）が要る。
 - 試験: `filter::tests`（規則、TCP の SYN と残り、UDP の返事と期限、ICMP、ほかのプロトコル、IPv6 は通さない、範囲の読み方）、`netmap::tests::filters`（`PacketFilter` と `PacketFilters` の部分と `*`）。tsclient の試験は 22。
 
+### 実機で見つかった固まり（2026-11-15）
+- B3 の `ts` を入れて起動し直すと、`ts` の loop が止まった（ホストからの ping も `tailscale ping` も返らず、shell の `ts` は `svc:ts` に答えがなく「not running」）。プローブで止めた所は `t5_rt::sleep_ms` で、呼び元は `Net::udp_send_ip` の「待ち行列に空きができるまで待つ」loop だった。
+  - 宛て先は相手の ULA の endpoint（Wi-Fi の /64 の中にあるが、近隣探索に答えない）。smoltcp 0.14 は、次の段が分からないデータグラムを待ち行列の先頭に残し続け、後ろのものも出さない。`net` は空きなし（0）を返し続け、`ts` は永遠に待った。doc/71 §14.3 の、再現しなかった固まりもこれだった見込み（推測）。
+- 直し（3 つ）:
+  1. smoltcp（third_party）: UDP の先頭が 3 秒送れなければ捨てる（`UNRESOLVED_DROP`、試験 `test_send_unresolved_dropped`）。
+  2. `t5_rt::Net::udp_send_ip`（と `udp_send`）: 空きを待つのは 100 ms まで（`UDP_SEND_WAIT_MS`）、その後は `TimedOut`。`matter` も同じ関数を使っていた。
+  3. `ts`: UDP の送信が 1 秒の間 `TimedOut` のままなら、ソケットを作り直す（`ts.udp_rebound`。古い `net` でも先頭が消える）。TLS の読み出しも 15 秒で諦める（`ts.stalled`、`READ_STALL_MS`。止まっていたのはこちらではなかったが、同じ形の永遠の待ち）。
+- 2 と 3 の後（smoltcp の直しの前）: ホストからの ping は 15 回中 8 回返り、`ts.udp_rebound` が出て `ts` は止まらなくなった。ACL は `acl_rules=1`、`filtered=1`（ACL が捨てたものが 1 つ。中身は未確認）。
+

@@ -912,6 +912,9 @@ pub struct Received {
     pub ended: bool,
 }
 
+/// How long `Net::udp_send_ip` waits for room in the socket's queue.
+pub const UDP_SEND_WAIT_MS: u64 = 100;
+
 /// Whether `ip` is in the tailnet's range (100.64.0.0/10, doc/71).
 pub fn is_tailnet(ip: u32) -> bool {
     ip >> 22 == (100 << 2 | 1)
@@ -1143,15 +1146,7 @@ impl Net {
 
     /// Sends one datagram, waiting for room in the queue.
     pub fn udp_send(&mut self, s: u16, ip: u32, port: u16, data: &[u8]) -> Result<(), NetError> {
-        let n = data.len().min(0xFFFF).min(self.slice.len());
-        self.slice[..n].copy_from_slice(&data[..n]);
-        loop {
-            let (k, _) = self.call(net::op::UDP_SEND, s, ip, (port as u32) << 16 | n as u32)?;
-            if k > 0 {
-                return Ok(());
-            }
-            sleep_ms(1);
-        }
+        self.udp_send_ip(s, IpAddr::V4(Ipv4Addr::from_bits(ip)), port, data)
     }
 
     /// Sends one echo request to `ip` and waits up to `ms` for the reply;
@@ -1221,13 +1216,21 @@ impl Net {
         self.call_ip(net::op::UDP_JOIN, s, group, 0).map(|_| ())
     }
 
+    /// Sends one datagram, waiting for room up to `UDP_SEND_WAIT_MS`: a
+    /// datagram whose next hop never answers (ARP, neighbour discovery)
+    /// stays at the head of smoltcp's queue, and an endless wait froze
+    /// `ts` (doc/72 §9). `TimedOut` then: closing the socket drops it.
     pub fn udp_send_ip(&mut self, s: u16, ip: IpAddr, port: u16, data: &[u8]) -> Result<(), NetError> {
         let n = data.len().min(0xFFFF).min(self.slice.len());
         self.slice[..n].copy_from_slice(&data[..n]);
+        let end = time_ns() + UDP_SEND_WAIT_MS * 1_000_000;
         loop {
             let (k, ..) = self.call_ip(net::op::UDP_SEND, s, ip, (port as u32) << 16 | n as u32)?;
             if k > 0 {
                 return Ok(());
+            }
+            if time_ns() > end {
+                return Err(NetError::TimedOut);
             }
             sleep_ms(1);
         }

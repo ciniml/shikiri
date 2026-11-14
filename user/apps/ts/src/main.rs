@@ -95,6 +95,13 @@ const RELAY_IDLE_MS: u64 = 60_000;
 /// After failing to reach a region's DERP, not tried again for this long
 /// (connecting stops the loop meanwhile).
 const RELAY_RETRY_MS: u64 = 30_000;
+/// UDP sends finding the queue full this long: the socket is made anew.
+const UDP_STUCK_MS: u64 = 1_000;
+/// A read on a TLS connection that waits this long for bytes fails (the
+/// servers send keep-alives about every minute, but a read starts only
+/// when bytes wait or during a handshake: the rest of a record comes in
+/// moments).
+const READ_STALL_MS: u64 = 15_000;
 /// Form B: tries to reach `svc:netlink` before a session (form A if none
 /// answers).
 const NETLINK_TRIES: usize = 20;
@@ -254,8 +261,23 @@ impl embedded_io::ErrorType for Sock {
 }
 
 impl embedded_io::Read for Sock {
+    /// Waits for bytes, but not past `READ_STALL_MS` (the loop serves
+    /// nothing meanwhile: a read that never ends froze `ts`, doc/71
+    /// §14.3); then an error ends the session.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, SockError> {
-        self.net.borrow_mut().recv(self.s, buf).map_err(|_| SockError)
+        let end = now_ms() + READ_STALL_MS;
+        loop {
+            let r = self.net.borrow_mut().recv_now(self.s, buf).map_err(|_| SockError)?;
+            if r.len > 0 || r.ended {
+                return Ok(r.len);
+            }
+            if now_ms() >= end {
+                let (state, queued) = self.net.borrow().tcp_state(self.s).unwrap_or((99, 0));
+                event!(Warn, "ts.stalled", sock = self.s as u32, state = state, queued = queued);
+                return Err(SockError);
+            }
+            sleep_ms(1);
+        }
     }
 }
 
@@ -411,7 +433,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
         Err(e) => return ("map stream", e),
     }
     // STUN, then disco and WireGuard straight from peers (doc/71 §14).
-    let udp = match net.borrow().udp_bind(UDP_PORT) {
+    let mut udp = match net.borrow().udp_bind(UDP_PORT) {
         Ok(s) => Some(s),
         Err(_) => {
             event!(Warn, "ts.failed", step = "udp bind", error = "io");
@@ -463,6 +485,8 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     let mut direct = 0;
     // Datagrams `net` would not take (no route: an IPv6 address off our links).
     let mut udp_unsent = 0u32;
+    // Since when sends find the UDP queue full.
+    let mut udp_full_since: Option<u64> = None;
     let mut shown_web = 0;
     let started = now_ms();
     let mut relay: Option<Relay> = None;
@@ -594,8 +618,23 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 Dest::Udp(a) => {
                     if let Some(s) = udp {
                         let to = sock_addr(&a);
-                        if net.borrow_mut().udp_send_ip(s, to.ip(), to.port(), &m).is_err() {
+                        let r = net.borrow_mut().udp_send_ip(s, to.ip(), to.port(), &m);
+                        if r.is_err() {
                             udp_unsent += 1;
+                        }
+                        // A full queue that stays full: a datagram whose next
+                        // hop never answers blocks it (doc/72 §9). A new
+                        // socket drops it.
+                        if matches!(r, Err(t5_rt::NetError::TimedOut)) {
+                            let since = *udp_full_since.get_or_insert(now_ms());
+                            if now_ms() - since > UDP_STUCK_MS {
+                                let _ = net.borrow().close(s);
+                                udp = net.borrow().udp_bind(UDP_PORT).ok();
+                                udp_full_since = None;
+                                event!(Warn, "ts.udp_rebound", to = sock_addr(&a).to_string().as_str(), ok = udp.is_some(), unsent = udp_unsent);
+                            }
+                        } else {
+                            udp_full_since = None;
                         }
                     }
                 }

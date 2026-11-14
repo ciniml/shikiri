@@ -120,11 +120,21 @@ pub struct Socket<'a> {
     tx_buffer: PacketBuffer<'a>,
     /// The time-to-live (IPv4) or hop limit (IPv6) value used in outgoing packets.
     hop_limit: Option<u8>,
+    /// tab5-os: since when the oldest datagram could not be sent (its next
+    /// hop unresolved); dropped after `UNRESOLVED_DROP` so it does not
+    /// block the rest for good.
+    unresolved_since: Option<crate::time::Instant>,
     #[cfg(feature = "async")]
     rx_waker: WakerRegistration,
     #[cfg(feature = "async")]
     tx_waker: WakerRegistration,
 }
+
+/// tab5-os: how long a datagram whose next hop does not answer (ARP,
+/// neighbour discovery) waits at the head of the queue before it is
+/// dropped (Linux gives up on an unanswered neighbour in about as long).
+/// Before, one such datagram held every later one forever.
+pub const UNRESOLVED_DROP: crate::time::Duration = crate::time::Duration::from_secs(3);
 
 impl<'a> Socket<'a> {
     /// Create an UDP socket with the given buffers.
@@ -134,6 +144,7 @@ impl<'a> Socket<'a> {
             rx_buffer,
             tx_buffer,
             hop_limit: None,
+            unresolved_since: None,
             #[cfg(feature = "async")]
             rx_waker: WakerRegistration::new(),
             #[cfg(feature = "async")]
@@ -538,6 +549,8 @@ impl<'a> Socket<'a> {
     {
         let endpoint = self.endpoint;
         let hop_limit = self.hop_limit.unwrap_or(64);
+        let now = cx.now();
+        let unresolved_since = &mut self.unresolved_since;
 
         let res = self.tx_buffer.dequeue_with(|packet_meta, payload_buf| {
             let src_addr = if let Some(s) = packet_meta.local_address {
@@ -578,7 +591,23 @@ impl<'a> Socket<'a> {
                 hop_limit,
             );
 
-            emit(cx, packet_meta.meta, (ip_repr, repr, payload_buf))
+            match emit(cx, packet_meta.meta, (ip_repr, repr, payload_buf)) {
+                Ok(()) => {
+                    *unresolved_since = None;
+                    Ok(())
+                }
+                // tab5-os: dropped (dequeued) once it has waited long enough.
+                Err(e) => {
+                    let since = *unresolved_since.get_or_insert(now);
+                    if now - since >= UNRESOLVED_DROP {
+                        net_debug!("udp:{}:{}: next hop unresolved, dropping", endpoint, packet_meta.endpoint);
+                        *unresolved_since = None;
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
         });
         match res {
             Err(Empty) => Ok(()),
@@ -821,6 +850,34 @@ mod test {
             Ok(())
         );
         assert!(socket.can_send());
+    }
+
+    /// tab5-os: a datagram that cannot go out (its next hop unresolved)
+    /// stays for `UNRESOLVED_DROP`, then is dropped and the next one goes.
+    #[rstest]
+    #[case::ip(Medium::Ip)]
+    #[cfg(feature = "medium-ip")]
+    fn test_send_unresolved_dropped(#[case] medium: Medium) {
+        let (mut iface, _, _) = setup(medium);
+        let mut socket = socket(buffer(0), buffer(2));
+        assert_eq!(socket.bind(LOCAL_END), Ok(()));
+        assert_eq!(socket.send_slice(b"abcdef", REMOTE_END), Ok(()));
+        assert_eq!(socket.send_slice(b"ghijkl", REMOTE_END), Ok(()));
+        let cx = iface.context();
+        cx.set_now(crate::time::Instant::from_secs(10));
+        assert_eq!(socket.dispatch(cx, |_, _, _| Err(())), Err(()));
+        cx.set_now(crate::time::Instant::from_secs(12));
+        assert_eq!(socket.dispatch(cx, |_, _, _| Err(())), Err(()));
+        // Past the limit the first goes without being sent.
+        cx.set_now(crate::time::Instant::from_secs(13));
+        assert_eq!(socket.dispatch(cx, |_, _, _| Err(())), Ok(()));
+        assert_eq!(
+            socket.dispatch(cx, |_, _, (_, _, payload)| {
+                assert_eq!(payload, b"ghijkl");
+                Ok::<_, ()>(())
+            }),
+            Ok(())
+        );
     }
 
     #[rstest]
