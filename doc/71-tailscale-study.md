@@ -585,3 +585,4 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - 100.100.100.100 の DNS（Tailscale のノードの中の名前解決）はまだ作っていない。Tab5 のアプリは DNS を自分で送らず RESOLVE の要求で引くので、今は使う側がない。相手のノードからは届かない（各ノードの中だけのアドレス）。
 - `svc:ts` のクライアントの枠は 2 のまま。shell の `ts` と、`for_host` で開いた接続が枠を一時的に使う。
 
+- 実機: shell・ts・ota を入れ直した。Tab5 の端末で `ping prometheus`（短い名前）が tailnet の 100.x へ返り、`ping example.com` は今までどおり `svc:net` の DNS で引けて返った（利用者が確認）。
