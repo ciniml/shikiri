@@ -1538,8 +1538,9 @@ impl Stack {
 const TS0_MAC: [u8; 6] = [0x02, 0x74, 0x73, 0x00, 0x00, 0x01];
 
 /// A process asks to carry `ts0` (doc/72): with the grant
-/// `svc:netlink/ts0` and while no other does, it gets the rings (the link
-/// is made the first time and stays, its sockets with it).
+/// `svc:netlink/ts0` and while no other does, the rings it grants (at
+/// once after connecting) become the link's (made the first time; it
+/// stays, its sockets with it).
 fn link_accept(stack: &mut Stack, c: Channel) {
     if !c.peer_grants().has(b"ts0") {
         let mut name = [0u8; t5_rt::t5a::MAX_NAME];
@@ -1550,9 +1551,17 @@ fn link_accept(stack: &mut Stack, c: Channel) {
     if stack.eth[TS0 - 1].as_ref().is_some_and(|e| e.dev.port.net_link().is_some()) {
         return;
     }
-    let Ok(shm) = Shm::alloc(netlink::SIZE) else { return };
+    // The peer grants once it hears from us (a grant needs both ends).
+    if c.send(&[netlink::KICK]).is_err() {
+        return;
+    }
+    match t5_rt::wait(&[&c.0], 500_000_000) {
+        Ok(ev) if ev.kind == chan::SHM => {}
+        _ => return,
+    }
+    let Ok(shm) = c.take_shm() else { return };
     let Ok(mem) = shm.map() else { return };
-    if shm.grant(&c, 0, netlink::SIZE).is_err() {
+    if mem.len() < netlink::SIZE {
         return;
     }
     let rings = netdev::ring::Rings(mem.as_ptr() as usize);

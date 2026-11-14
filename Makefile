@@ -25,7 +25,7 @@ PERMIT_fs     := --permit sd --permit shm --permit listen:fs --stack 32768
 PERMIT_fstest := --permit svc:fs --stack 16384
 PERMIT_net    := --permit cpu:net --permit shm --permit netdev:eth0 --permit netdev:ap0 --permit listen:net --permit listen:netctl --permit listen:netlink --permit netdev:host --permit netdev:wlan0 --permit random --stack 98304
 PERMIT_nettest := --permit svc:net/udp:any --permit svc:net/tcp-listen:any --permit svc:net/tcp-connect \
-                  --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --permit svc:netlink/ts0 --stack 32768
+                  --permit svc:net/ping --permit svc:net/resolve --permit svc:net/info --permit svc:netlink/ts0 --permit shm --stack 32768
 PERMIT_wifi   := --permit cpu:net --permit wlan:ctl --permit listen:wifi --permit svc:net/link --permit svc:cfg/r:wifi. \
                  --permit svc:cfg/w:wifi. --permit svc:cfg/secret:wifi. --permit ready:bt --stack 24576
 PERMIT_netctl := --permit svc:netctl --permit svc:fs/rw:T5OS/NET.RUL --stack 32768

@@ -79,6 +79,9 @@ pub struct Service {
     listener: Listener,
     pool_shm: Shm,
     pool: &'static mut [u8],
+    /// `net`'s link `ts0` (form B, doc/72) after the clients' slices: one
+    /// window for both (a process maps two; `svc:net`'s is the other).
+    pub link_at: usize,
     clients: [Option<Client>; CLIENTS],
     /// Closed by their clients, finishing in smoltcp: removed once done.
     closing: Vec<SocketHandle>,
@@ -99,10 +102,18 @@ fn reply(st: u32, v0: u32, v1: u32) -> [u8; proto::REPLY_SIZE] {
 
 impl Service {
     pub fn open() -> Option<Service> {
-        let pool_shm = Shm::alloc(CLIENTS * proto::SLICE).ok()?;
+        let link_at = CLIENTS * proto::SLICE;
+        let pool_shm = Shm::alloc(link_at + t5_rt::netlink::SIZE).ok()?;
         let pool = pool_shm.map().ok()?;
         let listener = Listener::open("ts").ok()?;
-        Some(Service { login: Login::Connecting, listener, pool_shm, pool, clients: [const { None }; CLIENTS], closing: Vec::new(), used: 0, next_port: 49152, next_ident: 1 })
+        Some(Service { login: Login::Connecting, listener, pool_shm, pool, link_at, clients: [const { None }; CLIENTS], closing: Vec::new(), used: 0, next_port: 49152, next_ident: 1 })
+    }
+
+    /// Grants `ts0`'s rings to `net` on `c` (`svc:netlink`); their address
+    /// here.
+    pub fn grant_link(&self, c: &Channel) -> Option<usize> {
+        self.pool_shm.grant(c, self.link_at, t5_rt::netlink::SIZE).ok()?;
+        Some(self.pool.as_ptr() as usize + self.link_at)
     }
 
     /// The handles to `wait` on: the listener, then the clients.

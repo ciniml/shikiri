@@ -44,7 +44,7 @@ use embedded_tls::{TlsConfig, TlsContext};
 use linked_list_allocator::LockedHeap;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
-use t5_rt::{Channel, Config, Net, Shm, chan, event, netlink, random_fill, sleep_ms, time_ns, wait};
+use t5_rt::{Channel, Config, Net, chan, event, netlink, random_fill, sleep_ms, time_ns, wait};
 use tsclient::derp::{Derp, Frame};
 use tsclient::netcheck::Netcheck;
 use tsclient::smoltcp::iface::SocketHandle;
@@ -95,6 +95,10 @@ const RELAY_IDLE_MS: u64 = 60_000;
 /// After failing to reach a region's DERP, not tried again for this long
 /// (connecting stops the loop meanwhile).
 const RELAY_RETRY_MS: u64 = 30_000;
+/// Form B: tries to reach `svc:netlink` before a session (form A if none
+/// answers).
+const NETLINK_TRIES: usize = 20;
+const NETLINK_RETRY_MS: u64 = 500;
 
 fn main(mode: usize, _: usize) -> usize {
     unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
@@ -145,12 +149,24 @@ fn main(mode: usize, _: usize) -> usize {
     if svc.is_none() {
         event!(Warn, "ts.failed", step = "svc", error = "io");
     }
-    // Form B: `net`'s link (kept across sessions; form A if `net` has none).
-    let mut pipe = if form_b { Pipe::open() } else { None };
-    event!(Info, "ts.form", b = pipe.is_some());
+    // Form B: `net`'s link, kept across sessions. Tried again before each
+    // session while `net` has none (at boot `ts` may start first); form A
+    // meanwhile.
+    let mut pipe: Option<Pipe> = None;
     let mut retry = RETRY_FIRST_MS;
     loop {
         let start = now_ms();
+        if form_b && pipe.is_none() {
+            // `net` starts within seconds of `ts` at boot.
+            for _ in 0..NETLINK_TRIES {
+                pipe = svc.as_ref().and_then(Pipe::open);
+                if pipe.is_some() {
+                    break;
+                }
+                nap(svc.as_mut(), NETLINK_RETRY_MS);
+            }
+            event!(Info, "ts.form", b = pipe.is_some());
+        }
         let e = run(&mut rng, server, &hostname, &auth, &keys, svc.as_mut(), &mut pipe);
         let (step, error) = e;
         event!(Warn, "ts.failed", step = step, error = describe(error), retry_ms = retry);
@@ -663,7 +679,6 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
 /// `svc:netlink`.
 struct Pipe {
     chan: Channel,
-    _shm: Shm,
     peer: netlink::Peer,
     /// The address `net` was given.
     addr: Option<[u8; 4]>,
@@ -676,18 +691,19 @@ struct Pipe {
 }
 
 impl Pipe {
-    fn open() -> Option<Pipe> {
+    /// Connects and grants the rings (in `svc`'s region).
+    fn open(svc: &svc::Service) -> Option<Pipe> {
         let chan = Channel::connect(netlink::SERVICE).ok()?;
-        match wait(&[&chan.0], 5_000_000_000) {
-            Ok(ev) if ev.kind == chan::SHM => {}
-            _ => {
-                event!(Warn, "ts.failed", step = "netlink", error = "no rings");
-                return None;
-            }
+        // `net`'s `KICK` says it accepted (a grant needs both ends).
+        let mut m = [0u8; chan::MSG_MAX];
+        if !matches!(wait(&[&chan.0], 2_000_000_000), Ok(ev) if ev.kind == chan::READABLE) || chan.0.read(&mut m).is_err() {
+            return None;
         }
-        let shm = chan.take_shm().ok()?;
-        let peer = netlink::Peer(shm.map().ok()?.as_ptr() as usize);
-        Some(Pipe { chan, _shm: shm, peer, addr: None, names_of: None, not_ours: 0, full: 0 })
+        let Some(base) = svc.grant_link(&chan) else {
+            event!(Warn, "ts.failed", step = "netlink", error = "grant");
+            return None;
+        };
+        Some(Pipe { chan, peer: netlink::Peer(base), addr: None, names_of: None, not_ours: 0, full: 0 })
     }
 
     /// Moves packets between the rings and `node` (whose `tun.dev.tx` the

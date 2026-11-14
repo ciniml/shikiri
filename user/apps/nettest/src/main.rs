@@ -36,7 +36,7 @@
 use core::net::{IpAddr, Ipv6Addr};
 
 use t5_rt::net::ipv4;
-use t5_rt::{Channel, Net, chan, event, netlink, sleep_ms, time_ns, wait};
+use t5_rt::{Channel, Net, Shm, chan, event, netlink, sleep_ms, time_ns, wait};
 
 t5_rt::entry!(main);
 
@@ -128,12 +128,16 @@ const LINK_ADDR: [u8; 4] = [100, 64, 0, 1];
 /// Mode 8: the far end of `ts0` (doc/72 B0).
 fn link_peer() -> Result<(), u32> {
     let c = Channel::connect(netlink::SERVICE).map_err(|_| 80u32)?;
+    // `net` accepts with a `KICK`; the rings are the peer's to give then.
     match wait(&[&c.0], 5_000_000_000) {
-        Ok(ev) if ev.kind == chan::SHM => {}
-        _ => return Err(81),
+        Ok(ev) if ev.kind == chan::READABLE => {}
+        _ => return Err(87),
     }
-    let shm = c.take_shm().map_err(|_| 82u32)?;
-    let mem = shm.map().map_err(|_| 83u32)?;
+    let mut hello = [0u8; chan::MSG_MAX];
+    c.0.read(&mut hello).map_err(|_| 87u32)?;
+    let shm = Shm::alloc(netlink::SIZE).map_err(|_| 81u32)?;
+    let mem = shm.map().map_err(|_| 82u32)?;
+    shm.grant(&c, 0, netlink::SIZE).map_err(|_| 83u32)?;
     let peer = netlink::Peer(mem.as_ptr() as usize);
     let mut m = [0u8; netlink::ADDR_LEN];
     m[0] = netlink::ADDR;

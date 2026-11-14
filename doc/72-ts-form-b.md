@@ -65,7 +65,8 @@
 - 利用者の選び: B0〜B2、つなぎ方は案 B-1、名前は案 N-1。
 
 ### B0 環と `ts0`
-- `t5_abi::netlink`: `svc:netlink`。共有メモリは `netdev::ring` と同じ配置（`net` がプロセスの側、相手がカーネルの側。相手は `netlink::Peer` で読み書きする）で、その後ろに名前の表（4 KiB）。チャネルの通知は `KICK`（環に足した）、`ADDR`（`[ADDR, prefix, 0, 0, IPv4]`）、`NAMES`。`net::link::TS0`（7）。
+- `t5_abi::netlink`: `svc:netlink`。共有メモリは相手（`ts`）が用意して渡す。`net` は受け付けると `KICK` を送り、相手はそれを聞いてから渡す（渡すには両端がそろっていないといけない。カーネルは受け付け前の grant を `Off` で断る）。配置は `netdev::ring` と同じ（`net` がプロセスの側、相手がカーネルの側。相手は `netlink::Peer` で読み書きする）で、その後ろに名前の表（4 KiB）。
+  - 最初は `net` が共有メモリを用意して渡す形にしたが、実機で `ts` の `svc:net` への接続が失敗した。1 つのプロセスが写せる共有メモリの窓は 2 つ（`Process::shm_mapped`）で、形 B の `ts` は `svc:ts` の枠、`svc:net` の枠、環の 3 つが要った。`ts` が `svc:ts` の枠の領域の後ろに環を置き（1 つの窓）、そこを `net` に渡す形に改めた。`net` の窓は自分の枠と環の 2 つ。チャネルの通知は `KICK`（環に足した）、`ADDR`（`[ADDR, prefix, 0, 0, IPv4]`）、`NAMES`。`net::link::TS0`（7）。
 - `net`:
   - `svc:netlink` で待ち、許可 `svc:netlink/ts0` のある 1 つだけを受ける（ほかは `net.denied op=netlink`）。リンク番号 5（`fwd::TS0`、`IFACES` は 6）。最初の接続でリンクを作り、相手が去っても残す（アドレスを外すだけ。ソケットの持ち主が困らないように）。
   - リンクは Ethernet の形のまま（`EthLink`、`Port::Link`）にした。フィルタ、転送、リンクごとのソケット、経路の選び方がそのまま使える。`Port::Link` は、smoltcp が出す Ethernet の枠から IP を取り出して環に入れ、環から来た IP に枠を付ける。ARP の問い合わせには、どのアドレスも相手の作り物の MAC（`02:74:73:00:00:02`）と、ここで答える。アドレスは相手の `ADDR` で 100.x/10 にし、100.64.0.0/10 は `ts0` の上（相手がどのアドレスも引き受ける）。
@@ -75,7 +76,7 @@
 - p4emu-run-47: `nettest 8` と `nettest 3 100.64.0.2`（`svc:net` の ping が `ts0` を往復）、`nettest 9`（`svc:net` で `TSPeer.` を引いて ping）。
 
 ### B1 `ts` を管に
-- 設定 `ts.form` が `b` なら、`ts` は起動時に `svc:netlink` につなぐ（つなげなければ形 A のまま、`ts.form b=false`）。許可に `svc:netlink/ts0`。
+- 設定 `ts.form` が `b` なら、`ts` は各セッションの前に `svc:netlink` につなぐ（0.5 秒おきに 20 回。つなげなければそのセッションは形 A、`ts.form b=false`）。起動時は `ts` が `net` より先に動くので、1 回だけでは形 A になった。許可に `svc:netlink/ts0`。
 - `Node::pipe`（tsclient）: smoltcp を回さず、アドレスも付けない。相手から解いたパケットは `tun.dev.rx` に、相手へのパケットは `tun.dev.tx` に置く（形 A と同じ置き場所）。`ts` の `Pipe::step` が、環 → `tun.dev.tx`、`tun.dev.rx` → 環（宛て先が自分の 100.x のものだけ。ほかは数えて捨てる）と移す。netmap の自分のアドレスが変われば `ADDR` を送る。
 - 形 B では `svc:ts` の TCP・UDP・PING は `NO_ADDRESS`（ノードのスタックにアドレスがない）、`IF_INFO` は「ない」。`PEER_INFO`、`LOGIN_INFO`、`RESOLVE` は今どおり。`Net::for_host` は `svc:ts` の `IF_INFO` で形を見分け、形 B なら tailnet の宛て先も `svc:net` へ。
 - `net` が落ちて `svc:netlink` が閉じたら、`ts` はセッションを終え、次は形 A で始める。
@@ -83,4 +84,10 @@
 ### B2 名前
 - `NetMap::names`（tsclient）: `resolve` が答える名前をすべて並べる（管理画面の名前とノードの全体の名前、それぞれから検索ドメインを外したもの、ノードの短い名前。小文字、最後の点なし、先に出たものが勝つ）。試験で、並べた名前がすべて `resolve` と同じ答えになることを確かめる。
 - `ts` は netmap の相手か DNS の設定が変わるたびに、表を共有メモリに書いて `NAMES` を送る。`net` は表を自分の中に写し（`tsnames`）、RESOLVE（IPv4）で DNS より先に見る。見つかればすぐ答える（`Slot::known`）。`ts0` の相手が去れば表を消す。
+
+### 実機（2026-11-15）
+- net・ts・shell・ota・netctl を入れ直し、`cfg set ts.form b` の後に reboot。`ts.netlink addr=…`、`net.addr_fixed link=ts0 prefix=10`、`ts.netlink_names count=22`、`net.ts_names count=22`。
+- 最初はホストから Tab5 への ping が返らなかった（`ts.stats` で packets は増え、packets_out は 0）。ガードの規則（`netctl 2`、`policy in drop`）に `ts0` の規則がなく、`net` が捨てていた。形 A では `ts` の smoltcp が ping に答えていたので、同じところまでとして `pass in on ts0 proto icmp` を足した（`netctl 7` で SD の `T5OS/NET.RUL` を書き直し、`netctl 2` で読み込み。規則は 8）。Tab5 から始めた接続の返事は `pass in state established,related` で通る。tailnet から Tab5 へ始める TCP・UDP はまだ通さない（B3 で決める）。
+- ホストから `ping 100.x`（Tab5）: 5 回中 4 回、往復 5〜8 ms（直の経路）。Tab5 の端末で `ifconfig` に `ts0` が 100.x で出て、`ping prometheus`（`svc:net` の RESOLVE が名前の表で引き、`ts0` を通る）が返った（利用者が確認）。
+- 戻すには `cfg delete ts.form`（またはその値を `a`）で、次の起動から形 A。
 

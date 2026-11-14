@@ -301,10 +301,12 @@ pub mod netdev {
 
 /// A link of `net` that another process carries (doc/72): `svc:netlink`,
 /// which `net` serves; `ts` connects with the grant `svc:netlink/ts0`
-/// and becomes the far end of `ts0`. `net` grants `SIZE` bytes of shared
-/// memory at once: `netdev::ring`'s layout, with `net` in the process's
-/// place (it receives on RX and sends on TX) and the peer in the
-/// kernel's (`Peer`). The slots hold IP packets (no Ethernet header).
+/// and becomes the far end of `ts0`. `net` accepts with a `KICK`; then the
+/// peer grants `SIZE` bytes of its shared memory (a grant needs the
+/// other end there; a process maps two windows at most: `ts` puts these
+/// in the region of its own service's slices):
+/// `netdev::ring`'s layout, with `net` in the process's place (it
+/// receives on RX and sends on TX) and the peer in the kernel's (`Peer`). The slots hold IP packets (no Ethernet header).
 /// Messages on the channel (the first byte): `KICK` (either way: packets
 /// were added), `ADDR` and `NAMES` (peer to `net`).
 pub mod netlink {

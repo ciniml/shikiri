@@ -14,7 +14,8 @@
 //!   the test LAN; the test LAN may start nothing);
 //! - 2: the guard set (only the PC on the host link may start traffic to
 //!   the Tab5, but Matter, mDNS and Tailscale's UDP 41641 from Wi-Fi,
-//!   doc/71 §14.11; nothing is forwarded that the PC did not start);
+//!   doc/71 §14.11, and pings from the tailnet's `ts0`, doc/72; nothing is
+//!   forwarded that the PC did not start);
 //! - 3: no rules (everything passes);
 //! - 4: log each rule's count (`net.rule_hits`);
 //! - 5: the NAT test set (t5emu, doc/25): the test LAN masqueraded behind
@@ -73,6 +74,7 @@ pass in state established,related
 pass in on wlan0 proto udp port 5540
 pass in on wlan0 proto udp port 5353
 pass in on wlan0 proto udp port 41641
+pass in on ts0 proto icmp
 pass forward on host
 pass forward state established,related
 ";
@@ -86,6 +88,7 @@ pass in state established,related
 pass in on wlan0 proto udp port 5540
 pass in on wlan0 proto udp port 5353
 pass in on wlan0 proto udp port 41641
+pass in on ts0 proto icmp
 pass forward on host
 pass forward state established,related
 ";
