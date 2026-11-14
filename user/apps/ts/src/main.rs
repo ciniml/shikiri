@@ -625,6 +625,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
                 pongs = s.pongs,
                 udp_in = s.udp_in,
                 dropped = s.dropped,
+                filtered = s.filtered,
                 last_drop = node.last_drop
             );
             shown = s;
@@ -954,5 +955,5 @@ fn log_map(node: &Node, bytes: usize) {
     // As `svc:net` writes addresses (the first octet in the high byte).
     let ip = node.netmap.self_ipv4().map_or(0, u32::from_be_bytes);
     let (region, derp) = node.netmap.home_derp().map_or((0, ""), |(r, n)| (r.region_id, n.host_name.as_str()));
-    event!(Info, "ts.map", bytes = bytes, ip = ip, peers = node.netmap.peers.len(), regions = node.netmap.derp.regions.len(), home = region as u32, derp = derp, clock = node.clock.is_some());
+    event!(Info, "ts.map", bytes = bytes, ip = ip, peers = node.netmap.peers.len(), regions = node.netmap.derp.regions.len(), home = region as u32, derp = derp, clock = node.clock.is_some(), acl_rules = node.netmap.filter.as_ref().map_or(-1, |f| f.len() as i32));
 }

@@ -1,6 +1,6 @@
 # 72. tailnet を `net` のリンクに（形 B）の進め方
 
-2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。§7 は利用者が B0〜B2 を選んだ（2026-11-14）。作ったものは §8。
+2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。§7 は利用者が B0〜B2 を選んだ（2026-11-14）。作ったものは §8、B3（tailnet の ACL）は §9。
 
 ## 1. 今（形 A）とその困りごと
 - `ts` は自分の中に smoltcp を持つ（`tsclient::tun::Tun`、MTU 1280）。WireGuard で解いた IP パケットはこの smoltcp に入り、ほかのアプリは `svc:ts`（`svc:net` と同じ要求）でソケットを借りる。
@@ -90,4 +90,17 @@
 - 最初はホストから Tab5 への ping が返らなかった（`ts.stats` で packets は増え、packets_out は 0）。ガードの規則（`netctl 2`、`policy in drop`）に `ts0` の規則がなく、`net` が捨てていた。形 A では `ts` の smoltcp が ping に答えていたので、同じところまでとして `pass in on ts0 proto icmp` を足した（`netctl 7` で SD の `T5OS/NET.RUL` を書き直し、`netctl 2` で読み込み。規則は 8）。Tab5 から始めた接続の返事は `pass in state established,related` で通る。tailnet から Tab5 へ始める TCP・UDP はまだ通さない（B3 で決める）。
 - ホストから `ping 100.x`（Tab5）: 5 回中 4 回、往復 5〜8 ms（直の経路）。Tab5 の端末で `ifconfig` に `ts0` が 100.x で出て、`ping prometheus`（`svc:net` の RESOLVE が名前の表で引き、`ts0` を通る）が返った（利用者が確認）。
 - 戻すには `cfg delete ts.form`（またはその値を `a`）で、次の起動から形 A。
+
+## 9. B3 tailnet の ACL（2026-11-15）
+- 利用者が「すすめて」と言い、B3 に進めた。tailnet の ACL（netmap の `PacketFilter`）を `ts` で、相手から来たパケットに照らす。形 A と形 B のどちらにも効く（`Node` が `tun.dev.rx` に置く前に見る）。
+- `tsclient::filter`（Tailscale の `wgengine/filter` と同じ決め方、IPv4 だけ）:
+  - TCP: 接続の最初（SYN で ACK なし）だけを規則に照らし、残りは通す（どちらかが始めた接続のもの）。
+  - UDP: このノードが送った宛て先・ポートからの返事は 2 分の間通す（`note_out` で覚える、64 まで）。ほかは規則に照らす。
+  - ICMP: echo の返事とエラーは通す。ほかは規則に、アドレスだけで（ポートなし）照らす。
+  - ほかのプロトコルは、`IPProto` にそれを挙げた規則が要る。`IPProto` が空の規則は TCP・UDP・ICMP・ICMPv6。
+  - 規則は `SrcIPs`（`*`、アドレス、CIDR、`a-b` の範囲。IPv6 は飛ばす）と `DstPorts`（アドレスとポートの範囲）。`DstPorts` のない規則（`CapGrant` など）は飛ばす。
+  - 制御サーバから規則が来るまでは、何も通さない。
+- netmap: `PacketFilter`（丸ごと）と、新しいサーバの `PacketFilters`（名前ごとの部分。`*` があればそれまでの部分を消す）を読む。今の capver（65）では `PacketFilter` が来る。`ts.map` に `acl_rules`、`ts.stats` に `filtered`（ACL が捨てた数）。
+- `net` のガードの規則（`ts0` は ping だけ受ける）は持ち主の側の守りとして、そのままにした。tailnet から Tab5 に始める TCP・UDP を受けたくなったら、両方（ACL と `pass in on ts0 …`）が要る。
+- 試験: `filter::tests`（規則、TCP の SYN と残り、UDP の返事と期限、ICMP、ほかのプロトコル、IPv6 は通さない、範囲の読み方）、`netmap::tests::filters`（`PacketFilter` と `PacketFilters` の部分と `*`）。tsclient の試験は 22。
 

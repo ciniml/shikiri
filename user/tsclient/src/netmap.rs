@@ -31,6 +31,10 @@ pub struct MapResponse {
     /// Sent when it changes (tailcfg.DNSConfig).
     #[serde(rename = "DNSConfig")]
     pub dns_config: Option<DnsConfig>,
+    /// The ACL for packets in, whole, when it changes (doc/72 B3).
+    pub packet_filter: Option<Vec<crate::filter::FilterRule>>,
+    /// Newer servers: named parts (`*` set: the earlier parts go).
+    pub packet_filters: Option<BTreeMap<String, Option<Vec<crate::filter::FilterRule>>>>,
 }
 
 /// The DNS settings (tailcfg.DNSConfig), the parts used here.
@@ -177,6 +181,12 @@ pub struct NetMap {
     pub peers: Vec<Node>,
     pub derp: DerpMap,
     pub dns: DnsConfig,
+    /// The ACL's rules (`PacketFilter`, or the parts of `PacketFilters`
+    /// joined); None until the control server sends them.
+    pub filter: Option<Vec<crate::filter::FilterRule>>,
+    filter_parts: BTreeMap<String, Vec<crate::filter::FilterRule>>,
+    /// Counts the responses that changed `filter`.
+    pub filter_version: u32,
     /// Counts the responses that brought `DNSConfig`.
     pub dns_version: u32,
     /// Counts the responses that changed `peers` (or `node`).
@@ -213,6 +223,27 @@ impl NetMap {
         if let Some(d) = r.dns_config.take() {
             self.dns = d;
             self.dns_version = self.dns_version.wrapping_add(1);
+        }
+        if let Some(f) = r.packet_filter.take() {
+            self.filter = Some(f);
+            self.filter_version = self.filter_version.wrapping_add(1);
+        }
+        if let Some(parts) = r.packet_filters.take() {
+            if parts.contains_key("*") {
+                self.filter_parts.clear();
+            }
+            for (name, rules) in parts {
+                match rules {
+                    Some(rules) if name != "*" => {
+                        self.filter_parts.insert(name, rules);
+                    }
+                    _ => {
+                        self.filter_parts.remove(&name);
+                    }
+                }
+            }
+            self.filter = Some(self.filter_parts.values().flatten().cloned().collect());
+            self.filter_version = self.filter_version.wrapping_add(1);
         }
         Ok(r)
     }
@@ -336,6 +367,22 @@ mod tests {
         assert!(nm.apply_json(br#"{"KeepAlive":true}"#).unwrap().keep_alive);
         assert_eq!(nm.peers_version, v);
         assert_eq!(nm.peers.len(), 2);
+    }
+
+    /// `PacketFilter` whole; `PacketFilters` by parts, `*` clearing.
+    #[test]
+    fn filters() {
+        let mut nm = NetMap::default();
+        assert!(nm.filter.is_none());
+        nm.apply_json(br#"{"PacketFilter":[{"SrcIPs":["*"],"DstPorts":[{"IP":"*","Ports":{"First":0,"Last":65535}}]}]}"#).unwrap();
+        assert_eq!((nm.filter.as_ref().unwrap().len(), nm.filter_version), (1, 1));
+        nm.apply_json(br#"{"KeepAlive":true}"#).unwrap();
+        assert_eq!(nm.filter_version, 1);
+        let rule = r#"{"SrcIPs":["100.64.0.2"],"DstPorts":[{"IP":"*","Ports":{"First":22,"Last":22}}]}"#;
+        nm.apply_json(alloc::format!(r#"{{"PacketFilters":{{"*":null,"base":[{rule}],"extra":[{rule},{rule}]}}}}"#).as_bytes()).unwrap();
+        assert_eq!(nm.filter.as_ref().unwrap().len(), 3);
+        nm.apply_json(br#"{"PacketFilters":{"extra":null}}"#).unwrap();
+        assert_eq!((nm.filter.as_ref().unwrap().len(), nm.filter_version), (1, 3));
     }
 
     #[test]

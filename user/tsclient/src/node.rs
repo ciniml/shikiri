@@ -77,6 +77,8 @@ pub struct Stats {
     pub udp6_in: u32,
     pub pongs: u32,
     pub heartbeats: u32,
+    /// Packets from peers the ACL turned away (doc/72 B3).
+    pub filtered: u32,
 }
 
 /// Packets that may wait for handshakes, in all.
@@ -122,6 +124,10 @@ pub struct Node {
     /// caller (`net`'s link `ts0`); smoltcp does not run and has no
     /// address.
     pub pipe: bool,
+    /// The tailnet's ACL for packets in (doc/72 B3).
+    pub filter: crate::filter::Filter,
+    /// The netmap's `filter_version` the filter has.
+    filter_of: u32,
 }
 
 impl Node {
@@ -148,6 +154,8 @@ impl Node {
             waiting: VecDeque::new(),
             tap: None,
             pipe: false,
+            filter: crate::filter::Filter::default(),
+            filter_of: 0,
         }
     }
 
@@ -163,6 +171,12 @@ impl Node {
             && !self.pipe
         {
             self.tun.set_address(ip);
+        }
+        if self.netmap.filter_version != self.filter_of {
+            self.filter_of = self.netmap.filter_version;
+            if let Some(rules) = &self.netmap.filter {
+                self.filter.set(rules);
+            }
         }
         if let Some(t) = r.control_time.as_deref().and_then(unix_ms) {
             self.clock = Some((t, now_ms));
@@ -221,6 +235,11 @@ impl Node {
             Received::Packet { packet, peer } => {
                 self.stats.packets_in += 1;
                 mark(&mut self.active, self.wg.peers[peer].key, now_ms);
+                if !self.filter.allows(&packet, now_ms) {
+                    self.stats.filtered += 1;
+                    self.drop("filtered by the ACL");
+                    return;
+                }
                 if let Some(t) = self.tap {
                     t(false, &packet);
                 }
@@ -301,6 +320,7 @@ impl Node {
                 self.drop("no peer for destination");
                 continue;
             };
+            self.filter.note_out(&p, now_ms);
             // An ICMP echo reply (smoltcp answers pings itself).
             if p[9] == 1 && p.get(((p[0] & 0x0F) as usize) * 4) == Some(&0) {
                 self.stats.echo_replies += 1;
