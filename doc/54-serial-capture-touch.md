@@ -99,3 +99,4 @@ tools/target/release/t5log serial --port /dev/ttyACM3 --elf build/t5-kernel-esp3
   - t5emu の `--ctl keys`（キーボードの模型に打つ）と違い、実機でも RTT とシリアルのどちらからでも使える: `t5log rtt … --cmd 'keys ts\n'`。
 - shell は、端末に出した行をそのまま `shell.out text=…` のイベントにも出す（エスケープシーケンスと制御文字は除く。1 行 128 バイトまで、長い行は分ける）。打ち込んだ命令の行（`t5$ ts`）も、画面と同じく出る。
 - 試験: `ctl` の試験（往復と `keys`）、p4emu-run-48（`keys echo hi there\n` で `shell.exec` と `shell.out text=hi there`）。
+- 実機（2026-11-15）: `make kupdate-test-kernels` と `make kupdate T5K=build/kupdate/good.t5k` でカーネルを更新（`kupdate.confirmed`）、shell を入れ直した。`t5log rtt … --cmd 'keys ifconfig\n'` で `shell.out` に host・wlan0・ts0 の行がそのまま返り、`keys ping prometheus\n` で 4 回の往復（5〜6 ms）が返った。
