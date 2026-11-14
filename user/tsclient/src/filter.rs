@@ -78,7 +78,8 @@ pub struct Filter {
     flows: Vec<(u16, u32, u16, u64)>,
 }
 
-fn parse_range(s: &str) -> Option<Range> {
+/// `*`, an IPv4 address, CIDR or `a-b` range as an inclusive range.
+pub(crate) fn parse_range(s: &str) -> Option<Range> {
     let v4 = |s: &str| s.parse::<core::net::Ipv4Addr>().ok().map(u32::from);
     if s == "*" {
         return Some((0, u32::MAX));

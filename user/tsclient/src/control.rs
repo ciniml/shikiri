@@ -168,9 +168,20 @@ pub fn connect<S: embedded_io::Read + embedded_io::Write>(
     H2::start(Conn::new(s, session), host)
 }
 
+/// This node as the requests describe it: its name and the subnets it
+/// offers to route (`RoutableIPs`, CIDRs; doc/72 B5).
+#[derive(Clone, Copy)]
+pub struct Host<'a> {
+    pub name: &'a str,
+    pub routes: &'a [String],
+}
+
 /// The Hostinfo this client sends.
-fn hostinfo(hostname: &str, derp: i32, latency: &[(i32, u32)]) -> serde_json::Value {
-    let mut h = json!({ "OS": "linux", "Hostname": hostname, "GoArch": "riscv", "GoVersion": "tab5-os" });
+fn hostinfo(host: Host, derp: i32, latency: &[(i32, u32)]) -> serde_json::Value {
+    let mut h = json!({ "OS": "linux", "Hostname": host.name, "GoArch": "riscv", "GoVersion": "tab5-os" });
+    if !host.routes.is_empty() {
+        h["RoutableIPs"] = json!(host.routes);
+    }
     if derp > 0 {
         // Seconds by "REGION-v4", as netcheck reports them.
         let l: serde_json::Map<String, serde_json::Value> = latency.iter().map(|&(r, ms)| (alloc::format!("{r}-v4"), json!(ms as f64 / 1000.0))).collect();
@@ -190,14 +201,14 @@ pub struct Registered {
 }
 
 /// Registers the node key (with `auth_key` if not empty).
-pub fn register<S: embedded_io::Read + embedded_io::Write>(h: &mut H2<S>, keys: &Keys, hostname: &str, auth_key: &str) -> Result<Registered> {
+pub fn register<S: embedded_io::Read + embedded_io::Write>(h: &mut H2<S>, keys: &Keys, host: Host, auth_key: &str) -> Result<Registered> {
     let node = keys::to_hex("nodekey:", &keys.node.public);
     let mut req = json!({
         "Version": VERSION,
         "NodeKey": node,
         // As the reference: the same key (no rotation).
         "OldNodeKey": node,
-        "Hostinfo": hostinfo(hostname, 0, &[]),
+        "Hostinfo": hostinfo(host, 0, &[]),
         "Endpoints": [],
     });
     if !auth_key.is_empty() {
@@ -260,7 +271,7 @@ pub struct MapStream {
 pub fn map<S: embedded_io::Read + embedded_io::Write>(
     h: &mut H2<S>,
     keys: &Keys,
-    hostname: &str,
+    host: Host,
     derp: i32,
     endpoints: &[String],
 ) -> Result<MapStream> {
@@ -273,7 +284,7 @@ pub fn map<S: embedded_io::Read + embedded_io::Write>(
         "KeepAlive": true,
         "IncludeIPv6": false,
         "OmitPeers": false,
-        "Hostinfo": hostinfo(hostname, derp, &[]),
+        "Hostinfo": hostinfo(host, derp, &[]),
         "Endpoints": endpoints,
     });
     let body = serde_json::to_vec(&req).map_err(|_| Error::Json)?;
@@ -288,7 +299,7 @@ pub fn map<S: embedded_io::Read + embedded_io::Write>(
 pub fn update<S: embedded_io::Read + embedded_io::Write>(
     h: &mut H2<S>,
     keys: &Keys,
-    hostname: &str,
+    host: Host,
     derp: i32,
     latency: &[(i32, u32)],
     endpoints: &[String],
@@ -300,7 +311,7 @@ pub fn update<S: embedded_io::Read + embedded_io::Write>(
         "Stream": false,
         "OmitPeers": true,
         "Compress": "",
-        "Hostinfo": hostinfo(hostname, derp, latency),
+        "Hostinfo": hostinfo(host, derp, latency),
         "Endpoints": endpoints,
     });
     let body = serde_json::to_vec(&req).map_err(|_| Error::Json)?;

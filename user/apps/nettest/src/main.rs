@@ -29,6 +29,10 @@
 //! name `tspeer` (100.64.0.2), and answers the pings to every other address
 //! on the link, until killed (`mode` 3 with ARG 100.64.0.2 then pings
 //! through `ts0`; `mode` 9 resolves `tspeer` through `svc:net` and pings it).
+//! With ARG an IPv4 address (as a number) it also pings that address
+//! every second from 100.64.0.2, as a tailnet peer reaching a subnet the
+//! Tab5 routes (doc/72 B5), and logs the first reply
+//! (`nettest.link_routed`).
 //!
 //! Built with `--permit svc:net` (and `svc:netlink/ts0` for mode 8). Exit 0 if everything held, otherwise the
 //! number of the failed check.
@@ -52,7 +56,7 @@ fn main(mode: usize, arg: usize) -> usize {
         5 => web6(),
         6 => loop6(),
         7 => ping6(IpAddr::V6(Ipv6Addr::new(0xfd50, 0, 0, 0, 0, 0, 0, 2))),
-        8 => link_peer(),
+        8 => link_peer(arg as u32),
         9 => resolve_ping("TSPeer."),
         _ => run(),
     };
@@ -124,9 +128,11 @@ fn resolve_ping(name: &str) -> Result<(), u32> {
 
 /// `ts0`'s address as mode 8 gives it.
 const LINK_ADDR: [u8; 4] = [100, 64, 0, 1];
+/// The tailnet peer mode 8 plays when it pings a routed subnet.
+const PEER_ADDR: [u8; 4] = [100, 64, 0, 2];
 
 /// Mode 8: the far end of `ts0` (doc/72 B0).
-fn link_peer() -> Result<(), u32> {
+fn link_peer(target: u32) -> Result<(), u32> {
     let c = Channel::connect(netlink::SERVICE).map_err(|_| 80u32)?;
     // `net` accepts with a `KICK`; the rings are the peer's to give then.
     match wait(&[&c.0], 5_000_000_000) {
@@ -153,7 +159,28 @@ fn link_peer() -> Result<(), u32> {
     let mut answered = 0u32;
     let mut buf = [0u8; chan::MSG_MAX];
     let mut out = [0u8; netlink::SLOT];
+    let (mut seq, mut routed) = (0u16, 0u32);
+    let mut next_ping = time_ns();
     loop {
+        // A tailnet peer's ping into a routed subnet.
+        if target != 0 && time_ns() >= next_ping {
+            next_ping = time_ns() + 1_000_000_000;
+            seq = seq.wrapping_add(1);
+            let mut p = [0u8; 28];
+            p[..12].copy_from_slice(&[0x45, 0, 0, 28, 0, 0, 0, 0, 64, 1, 0, 0]);
+            p[12..16].copy_from_slice(&PEER_ADDR);
+            p[16..20].copy_from_slice(&target.to_be_bytes());
+            let sum = checksum(&p[..20]);
+            p[10..12].copy_from_slice(&sum.to_be_bytes());
+            p[20] = 8;
+            p[24..26].copy_from_slice(&0x7473u16.to_be_bytes());
+            p[26..28].copy_from_slice(&seq.to_be_bytes());
+            let sum = checksum(&p[20..]);
+            p[22..24].copy_from_slice(&sum.to_be_bytes());
+            if peer.tx(&p) {
+                let _ = c.0.write(&[netlink::KICK]);
+            }
+        }
         if let Ok(ev) = wait(&[&c.0], 1_000_000_000)
             && ev.kind == chan::PEER_CLOSED
         {
@@ -162,6 +189,13 @@ fn link_peer() -> Result<(), u32> {
         while c.0.read(&mut buf).is_ok() {}
         let mut sent = false;
         while let Some(p) = peer.rx_peek() {
+            // The routed subnet's answer to our ping.
+            if target != 0 && p.len() >= 28 && p[9] == 1 && p[20] == 0 && p[12..16] == target.to_be_bytes() && p[16..20] == PEER_ADDR {
+                routed += 1;
+                if routed == 1 {
+                    event!(Info, "nettest.link_routed", ip = target, seq_num = u16::from_be_bytes([p[26], p[27]]) as u32);
+                }
+            }
             if let Some(n) = echo_reply(p, &mut out)
                 && peer.tx(&out[..n])
             {

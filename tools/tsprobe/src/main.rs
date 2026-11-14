@@ -131,7 +131,7 @@ fn main() {
 
     let mut tries = 0;
     loop {
-        let r = control::register(&mut h, &keys, hostname, &auth).expect("register");
+        let r = control::register(&mut h, &keys, control::Host { name: hostname, routes: &[] }, &auth).expect("register");
         println!("registered: authorized={} login url={} error={:?}", r.authorized, if r.auth_url.is_empty() { "none" } else { "(in .url)" }, r.error);
         if r.authorized {
             break;
@@ -147,7 +147,7 @@ fn main() {
     }
 
     let mut node = Node::new(keys.node.clone(), keys.disco.clone(), &mut OsRng, now_ms());
-    let mut m = control::map(&mut h, &keys, hostname, 0, &[]).expect("map");
+    let mut m = control::map(&mut h, &keys, control::Host { name: hostname, routes: &[] }, 0, &[]).expect("map");
     let json = m.next(&mut h).expect("first map response");
     let len = json.len();
     node.apply_map(json, now_ms()).expect("map json");
@@ -164,7 +164,7 @@ fn main() {
     OsRng.fill_bytes(&mut nonce);
     let mut derp = Derp::connect(t, &host, &keys.node, nonce).expect("derp");
     println!("derp: connected to {host}");
-    control::update(&mut h, &keys, hostname, region, &latency, &[]).expect("update");
+    control::update(&mut h, &keys, control::Host { name: hostname, routes: &[] }, region, &latency, &[]).expect("update");
 
     let mut shown = node.stats;
     while now_ms() < seconds * 1000 {

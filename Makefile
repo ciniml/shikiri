@@ -398,7 +398,7 @@ EMU_FLASH := --flash $(STORE_DIR)/appmeta.bin@410000 --flash $(STORE_DIR)/apps.b
 # them side by side; `test-p4emu` runs them all, P4EMU_JOBS at once,
 # each run's output kept together.
 P4EMU_JOBS ?= 12
-P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48,p4emu-run-$(n))
+P4EMU_RUNS := $(foreach n,01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49,p4emu-run-$(n))
 .PHONY: $(P4EMU_RUNS) p4emu-prep
 p4emu-prep: emu schemas-p4 kupdate-test-kernels kernel-p4evb $(BUILD)/sd-test.img $(BUILD)/store-frag/apps.bin $(BUILD)/sd-ota.img
 
@@ -1020,6 +1020,16 @@ p4emu-run-48:
 	    $(BUILD)/t5-kernel-esp32p4v1.elf > $(BUILD)/emu-keys.txt 2>&1 || { tail -20 $(BUILD)/emu-keys.txt; false; }
 	grep -q "shell.out text=t5\$$ echo hi there" $(BUILD)/emu-keys.txt
 	grep -q "shell.out text=hi there" $(BUILD)/emu-keys.txt
+
+p4emu-run-49:
+	@# A subnet routed for the tailnet (doc/72 B5): with the guard set
+	@# (`pass forward on ts0`), nettest 8 as a tailnet peer (100.64.0.2)
+	@# pings the test LAN's peer (192.168.50.2) through `ts0`; the reply
+	@# comes back as part of the flow.
+	$(T5EMU) --quiet --max-ms 30000 $(EMU_FLASH) $(addprefix --elf ,$(APP_ELFS)) \
+	    --ctl "run net 1" --ctl "wait-ms 1000" --ctl "run netctl 2" --ctl "wait-ms 1000" --ctl "run nettest 8 3232248322" --ctl "wait-ms 6000" \
+	    --expect-event net.rules --expect-event nettest.link_ready --expect-event nettest.link_routed \
+	    $(BUILD)/t5-kernel-esp32p4v1.elf
 
 clean:
 	rm -rf $(BUILD) kernel/target user/target tools/target emu/target

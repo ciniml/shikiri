@@ -268,6 +268,16 @@ impl NetMap {
         self.node.as_ref()?.ipv4()
     }
 
+    /// Whether IPv4 `dst` is this node's to take: its address, or in a
+    /// subnet it routes that the control server approved (its own
+    /// `AllowedIPs`, doc/72 B5).
+    pub fn routes_to(&self, dst: [u8; 4]) -> bool {
+        let d = u32::from_be_bytes(dst);
+        self.node.as_ref().is_some_and(|n| {
+            n.addresses.iter().chain(n.allowed_ips.iter()).filter_map(|a| crate::filter::parse_range(a)).any(|(lo, hi)| (lo..=hi).contains(&d))
+        })
+    }
+
     /// Every name `resolve` answers, with its address, in `resolve`'s
     /// order (the first of the same name wins): the admin's records and
     /// the nodes' whole names, each also without a search domain it ends
@@ -367,6 +377,18 @@ mod tests {
         assert!(nm.apply_json(br#"{"KeepAlive":true}"#).unwrap().keep_alive);
         assert_eq!(nm.peers_version, v);
         assert_eq!(nm.peers.len(), 2);
+    }
+
+    /// The node's address and its approved subnet routes are its to take.
+    #[test]
+    fn routes_to() {
+        let mut nm = NetMap::default();
+        assert!(!nm.routes_to([100, 64, 0, 5]));
+        nm.apply_json(br#"{"Node":{"ID":1,"Addresses":["100.64.0.5/32","fd7a:115c:a1e0::5/128"],"AllowedIPs":["100.64.0.5/32","192.168.50.0/24","fd7a:115c:a1e0::5/128"]}}"#).unwrap();
+        assert!(nm.routes_to([100, 64, 0, 5]));
+        assert!(nm.routes_to([192, 168, 50, 2]));
+        assert!(!nm.routes_to([192, 168, 51, 2]));
+        assert!(!nm.routes_to([100, 64, 0, 6]));
     }
 
     /// `PacketFilter` whole; `PacketFilters` by parts, `*` clearing.

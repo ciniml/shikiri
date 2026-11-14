@@ -22,7 +22,9 @@
 //! `controlplane.tailscale.com`), `ts.form` (default `b`: form B, doc/72:
 //! no IP stack here, the tailnet is `net`'s link `ts0` carried over
 //! `svc:netlink`; `a`, or a `net` without `svc:netlink`: form A, the stack
-//! here and `svc:ts`'s sockets). The machine, node and disco keys are
+//! here and `svc:ts`'s sockets), `ts.routes` (form B: the subnets this node
+//! offers to route for the tailnet, IPv4 CIDRs separated by commas or
+//! spaces; routed once approved in the admin console, doc/72 B5). The machine, node and disco keys are
 //! made on the first start and kept as the secret `ts.keys`.
 //!
 //! `run ts [MODE]`: 0 (as in START.CFG) starts only on a node that has
@@ -130,6 +132,7 @@ fn main(mode: usize, _: usize) -> usize {
     };
     let server: &'static str = Box::leak(text("ts.server", DEFAULT_SERVER).into_boxed_str());
     let hostname = text("ts.hostname", DEFAULT_HOSTNAME);
+    let routes: Vec<String> = text("ts.routes", "").split([',', ' ']).filter(|r| valid_cidr(r)).map(String::from).collect();
     let auth = text("ts.authkey", "");
     let form_b = !text("ts.form", "b").eq_ignore_ascii_case("a");
     let keys = match cfg.get("ts.keys", &mut buf) {
@@ -175,7 +178,12 @@ fn main(mode: usize, _: usize) -> usize {
             }
             event!(Info, "ts.form", b = pipe.is_some());
         }
-        let e = run(&mut rng, server, &hostname, &auth, &keys, svc.as_mut(), &mut pipe);
+        // Routes only where `net` routes for us (form B).
+        let host = control::Host { name: &hostname, routes: if pipe.is_some() { &routes } else { &[] } };
+        if !host.routes.is_empty() {
+            event!(Info, "ts.routes", count = host.routes.len(), first = host.routes[0].as_str());
+        }
+        let e = run(&mut rng, server, host, &auth, &keys, svc.as_mut(), &mut pipe);
         let (step, error) = e;
         event!(Warn, "ts.failed", step = step, error = describe(error), retry_ms = retry);
         if let Some(svc) = svc.as_mut() {
@@ -361,7 +369,8 @@ impl Relay {
 }
 
 /// One session with the control server and DERP, until it fails.
-fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, keys: &Keys, mut svc: Option<&mut svc::Service>, pipe: &mut Option<Pipe>) -> (&'static str, Error) {
+fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, auth: &str, keys: &Keys, mut svc: Option<&mut svc::Service>, pipe: &mut Option<Pipe>) -> (&'static str, Error) {
+    let hostname = host_info.name;
     let Ok(net) = Net::connect() else { return ("net", Error::Io) };
     let net = Rc::new(RefCell::new(net));
     let ip = match net.borrow_mut().resolve(server, RESOLVE_MS) {
@@ -392,7 +401,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     };
     event!(Info, "ts.noise", early = early.map_or(0, |e| e.len()));
     loop {
-        let r = match control::register(&mut h, keys, hostname, auth) {
+        let r = match control::register(&mut h, keys, host_info, auth) {
             Ok(r) => r,
             Err(e) => return ("register", e),
         };
@@ -419,7 +428,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     if TRACE_TCP {
         node.tap = Some(trace);
     }
-    let mut m = match control::map(&mut h, keys, hostname, 0, &[]) {
+    let mut m = match control::map(&mut h, keys, host_info, 0, &[]) {
         Ok(m) => m,
         Err(e) => return ("map", e),
     };
@@ -472,7 +481,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, hostname: &str, auth: &str, 
     let eps: Vec<String> = node.endpoints.iter().map(|a| sock_addr(a).to_string()).collect();
     let v6 = node.endpoints.iter().filter(|a| a.0[..12] != disco::v4([0; 4], 0).0[..12]).count();
     event!(Info, "ts.endpoints", count = eps.len(), first = eps.first().map_or("", |e| e.as_str()), v6 = v6, global_v6 = node.global_v6);
-    if let Err(e) = control::update(&mut h, keys, hostname, region, &latency, &eps) {
+    if let Err(e) = control::update(&mut h, keys, host_info, region, &latency, &eps) {
         return ("update", e);
     }
 
@@ -779,7 +788,9 @@ impl Pipe {
         let mut sent = false;
         while let Some(p) = node.tun.dev.rx.pop_front() {
             moved = true;
-            if own.is_none() || p.get(16..20) != own.as_ref().map(|o| &o[..]) {
+            // This node's address, or a subnet it routes (approved, B5).
+            let ours = p.get(16..20).is_some_and(|d| node.netmap.routes_to([d[0], d[1], d[2], d[3]]));
+            if !ours {
                 self.not_ours += 1;
             } else if self.peer.tx(&p) {
                 sent = true;
@@ -817,6 +828,11 @@ impl Pipe {
             event!(Info, "ts.netlink_names", count = count, bytes = len as u32);
         }
     }
+}
+
+/// An IPv4 CIDR (`a.b.c.d/n`), as `ts.routes` takes them.
+fn valid_cidr(s: &str) -> bool {
+    s.split_once('/').is_some_and(|(a, n)| a.parse::<core::net::Ipv4Addr>().is_ok() && n.parse::<u8>().is_ok_and(|n| n <= 32))
 }
 
 /// STUN to every DERP region from the UDP socket `s`: `NETCHECK_ROUNDS`

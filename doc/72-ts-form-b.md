@@ -1,6 +1,6 @@
 # 72. tailnet を `net` のリンクに（形 B）の進め方
 
-2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。§7 は利用者が B0〜B2 を選んだ（2026-11-14）。作ったものは §8、B3（tailnet の ACL）は §9、B4（既定を形 B）は §10。
+2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。§7 は利用者が B0〜B2 を選んだ（2026-11-14）。作ったものは §8、B3（tailnet の ACL）は §9、B4（既定を形 B）は §10、B5（subnet router）は §11。
 
 ## 1. 今（形 A）とその困りごと
 - `ts` は自分の中に smoltcp を持つ（`tsclient::tun::Tun`、MTU 1280）。WireGuard で解いた IP パケットはこの smoltcp に入り、ほかのアプリは `svc:ts`（`svc:net` と同じ要求）でソケットを借りる。
@@ -122,3 +122,13 @@
 - 実機は `cfg set ts.form b` 済みなので、動きは §9 の終わりと同じ。
 
 - 実機: ts と tsget を入れ直し、`keys cfg rm ts.form\n` で設定を消して ts を起動し直した。設定なしで `ts.form b=true`、`net.addr_fixed link=ts0`、ホストからの ping は 10 回中 9 回（最初の数回は経路ができるまで遅い）。
+
+## 11. B5 subnet router（2026-11-15）
+- 利用者の「B5すすめて」で進めた。Tab5 が tailnet に自分の LAN（などの subnet）を出す。Tailscale の subnet router と同じ形: 広告して、管理画面で承認されたものだけを運ぶ。
+- 設定 `ts.routes`（IPv4 の CIDR、コンマか空白で区切る）。形 B のときだけ、register・map・update の `Hostinfo.RoutableIPs` に入れる（`control::Host`）。`ts.routes count=… first=…` を出す。
+- 管理画面で承認されると、自分の `AllowedIPs` にその subnet が入る。`NetMap::routes_to(dst)`（自分のアドレスか、自分の `AllowedIPs` の中か）で、`ts` の `Pipe` は自分宛てのほかに承認された subnet 宛ても `ts0` に渡す（それ以外は今までどおり捨てて数える）。ACL（B3）は宛て先を含めて照らす。
+- `net`: `ts0` から来た、自分宛てでないパケットは、ほかのリンクと同じく転送（`fwd`）に回る。返りは `ts0` の上の 100.x へ（`ts0` の ARP は `Port::Link` が答える）。
+- ガードの規則（`netctl 2`、7 と 12 も）に `pass forward on ts0` と `masquerade on wlan0 from 100.64.0.0/10` を足した。Wi-Fi の LAN の機器は 100.64.0.0/10 への経路を知らないので、Tab5 のアドレスに見せる（Tailscale の既定 `--snat-subnet-routes` と同じ）。転送されるのは `ts` が渡したもの（広告し、承認され、ACL が許したもの）だけ。
+- 試験: `NetMap::routes_to` の試験（tsclient 23）。`nettest 8 ARG`: `ts0` の相手が tailnet の相手（100.64.0.2）として ARG に毎秒 ping し、返りを `nettest.link_routed` に。p4emu-run-49: テスト LAN（`run net 1`）とガードの規則で、100.64.0.2 から 192.168.50.2 への ping が返る。
+- 実機で端から端まで試すには、管理画面での承認と、経路を受け入れる相手（`--accept-routes`）が要る。ホストの設定は変えない約束なので、利用者と相談する。
+
