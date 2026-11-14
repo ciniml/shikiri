@@ -132,3 +132,4 @@
 - 試験: `NetMap::routes_to` の試験（tsclient 23）。`nettest 8 ARG`: `ts0` の相手が tailnet の相手（100.64.0.2）として ARG に毎秒 ping し、返りを `nettest.link_routed` に。p4emu-run-49: テスト LAN（`run net 1`）とガードの規則で、100.64.0.2 から 192.168.50.2 への ping が返る。
 - 実機で端から端まで試すには、管理画面での承認と、経路を受け入れる相手（`--accept-routes`）が要る。ホストの設定は変えない約束なので、利用者と相談する。
 
+- 実機（広告まで）: ts と netctl を入れ直し、`netctl 7`（SD の `NET.RUL` を書き直し）と `netctl 2`（規則 9）。`keys cfg set ts.routes 192.168.8.0/24\n` の後に ts を起動し直すと `ts.routes count=1 first=192.168.8.0/24`。ホストの `tailscale status` では、承認前なので tab5 の `PrimaryRoutes` は空、`AllowedIPs` は自分のアドレスだけ。承認と、LAN の外の相手からの試験は利用者が行う（ホストは同じ LAN にいるので経路を受け入れない）。
