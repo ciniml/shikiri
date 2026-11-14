@@ -228,7 +228,7 @@ tailscale-rs の crate（a2a56c4 で確認）:
 | **T3** DERP 越しの WireGuard | WireGuard（initiator と responder、REKEY、keepalive）、`ts` の中の smoltcp（形 A）、ICMP の echo と UDP の echo、パケットフィルタ、DERP 越しの disco の pong、`ControlTime` で時刻を合わせる | tailnet の PC から `ping 100.x.y.z` と `tailscale ping` が通る。Tab5 から相手へ UDP が届く | t5emu: ホストの相手に、boringtun（std）か tailscale-rs の WireGuard の部品で相手役を作り、偽の DERP 越しに ping を往復。実機: tailnet の PC から |
 | **T4** アプリから使う | `svc:ts`（TCP、UDP、名前の解決は netmap から）。例: tailnet の HTTP から `ota`（doc/67）、状態のページ。shell の `ts` コマンド（status、peers、ping） | ほかのアプリが tailnet の相手と TCP で話せる | t5emu: `ota app http://<偽の相手の 100.x>/...` が入る（p4emu-run-37 の形）。実機 |
 | **T5** 直の経路 | STUN、disco（ping、pong、CallMeMaybe）、UDP 41641、経路の選択と DERP への戻り | 同じ LAN の相手と直の経路（`tailscale ping` が `via <IP>:41641`） | t5emu: 偽の相手が UDP でも答える。実機: 同じ LAN と別の網 |
-| **T6** 広げる（要るものだけ） | 対話のログイン（`AuthURL` を QR で画面に）、MagicDNS（100.100.100.100）、node key の入れ替え、形 B（`net` のリンク `ts0`、subnet router）、ephemeral の node | 利用者が選んだもの | それぞれ |
+| **T6** 広げる（要るものだけ） | 対話のログイン（`AuthURL` を QR で画面に）、MagicDNS（100.100.100.100）、node key の入れ替え、形 B（`net` のリンク `ts0`、subnet router）、ephemeral の node | 利用者が選んだもの | それぞれ。対話のログインは §14.15、MagicDNS の名前は §14.16、形 B は doc/72（B0〜B4 まで、既定は形 B） |
 
 - t5emu の試験は、外の網を使わずに通る形にする（`make test-p4emu` は決まった結果を出す、doc/11）。偽の制御サーバと偽の DERP はホストの相手の中に置く。本物との相互接続は、ホストで headscale と Tailscale のクライアントを動かす形の別の試験にする（ホストに入れるのは利用者の確認の後）。
 - ホストで先に核を試す: 核を sans-IO の crate（`user/tsport` のような形）にすれば、x86 で tailscale-rs（std）を相手に動かして確かめられる（推測。tailscale-rs の API は読んでいない）。

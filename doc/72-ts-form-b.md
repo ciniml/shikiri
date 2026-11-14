@@ -1,6 +1,6 @@
 # 72. tailnet を `net` のリンクに（形 B）の進め方
 
-2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。§7 は利用者が B0〜B2 を選んだ（2026-11-14）。作ったものは §8、B3（tailnet の ACL）は §9。
+2026-11-14。doc/71 §3 の形 B（T6 の 1 つ）の案。§7 は利用者が B0〜B2 を選んだ（2026-11-14）。作ったものは §8、B3（tailnet の ACL）は §9、B4（既定を形 B）は §10。
 
 ## 1. 今（形 A）とその困りごと
 - `ts` は自分の中に smoltcp を持つ（`tsclient::tun::Tun`、MTU 1280）。WireGuard で解いた IP パケットはこの smoltcp に入り、ほかのアプリは `svc:ts`（`svc:net` と同じ要求）でソケットを借りる。
@@ -114,3 +114,10 @@
 - 2 と 3 の後（smoltcp の直しの前）: ホストからの ping は 15 回中 8 回返り、`ts.udp_rebound` が出て `ts` は止まらなくなった。ACL は `acl_rules=1`、`filtered=1`（ACL が捨てたものが 1 つ。中身は未確認）。
 
 - 3 つの直しを入れた後（net・ts・matter・shell・ota を入れ直して reboot）: 形 B で `acl_rules=1`。ホストから Tab5 へ 40 回の ping がすべて返り（平均 7 ms、直の経路）、同じ間に Tab5 の端末（`keys ping prometheus\n`）からの 4 回も返った。`ts.udp_rebound` も `ts.stalled` も出なかった。`filtered=1` は ACL が捨てた 1 つ（IPv6 のパケットは規則に照らさず通さないので、その類いと見られる。推測）。
+
+## 10. B4 既定を形 B に（2026-11-15）
+- 利用者の「すすめて」で B4 に進めた。`ts.form` の既定を `b` にした。`a` と書いたときと、`net` に `svc:netlink` がないとき（各セッションの前に 10 秒試す）は形 A。
+- 形 A は残した（`svc:ts` のソケット、`ts` の中の smoltcp）。そのため §6 の「ヒープを減らす」はしていない。形 A を外すのは、形 B で困ることがないと分かってから。
+- `t5_rt::Net::for_ip(ip)`: tailnet のアドレスへは、`ts` が自分のスタックを持つ（形 A）なら `svc:ts`、ほかは `svc:net`。`for_host` の数字のアドレスもこれを使う。`tsget` の TCP と UDP もこれで開く（形 B では `svc:ts` のソケットは `NO_ADDRESS`）。`tsget` の許可に `svc:net/tcp-connect` と `svc:net/udp:any` を足した。
+- 実機は `cfg set ts.form b` 済みなので、動きは §9 の終わりと同じ。
+

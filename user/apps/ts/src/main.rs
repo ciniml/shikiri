@@ -19,9 +19,10 @@
 //! one the control server gives a login URL, logged as `ts.login` and
 //! answered to LOGIN_INFO for the shell's `ts`, doc/71 §14.15),
 //! `ts.hostname` (default `tab5`), `ts.server` (default
-//! `controlplane.tailscale.com`), `ts.form` (`b`: form B, doc/72: no IP
-//! stack here, the tailnet is `net`'s link `ts0` carried over
-//! `svc:netlink`; otherwise form A, the stack here and `svc:ts`'s sockets). The machine, node and disco keys are
+//! `controlplane.tailscale.com`), `ts.form` (default `b`: form B, doc/72:
+//! no IP stack here, the tailnet is `net`'s link `ts0` carried over
+//! `svc:netlink`; `a`, or a `net` without `svc:netlink`: form A, the stack
+//! here and `svc:ts`'s sockets). The machine, node and disco keys are
 //! made on the first start and kept as the secret `ts.keys`.
 //!
 //! `run ts [MODE]`: 0 (as in START.CFG) starts only on a node that has
@@ -130,7 +131,7 @@ fn main(mode: usize, _: usize) -> usize {
     let server: &'static str = Box::leak(text("ts.server", DEFAULT_SERVER).into_boxed_str());
     let hostname = text("ts.hostname", DEFAULT_HOSTNAME);
     let auth = text("ts.authkey", "");
-    let form_b = text("ts.form", "a").eq_ignore_ascii_case("b");
+    let form_b = !text("ts.form", "b").eq_ignore_ascii_case("a");
     let keys = match cfg.get("ts.keys", &mut buf) {
         Ok(Some(v)) if v.len == 96 => Keys::from_bytes(buf[..96].try_into().unwrap()),
         _ if mode == 0 && auth.is_empty() => {

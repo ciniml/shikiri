@@ -952,13 +952,7 @@ impl Net {
         let own_stack = |ts: &Net| matches!(ts.if_info(0), Ok(Some(_)));
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
             let ip = ip.to_bits();
-            if is_tailnet(ip)
-                && let Ok(ts) = Net::connect_to("ts")
-                && own_stack(&ts)
-            {
-                return Ok((ts, ip));
-            }
-            return Ok((Net::connect()?, ip));
+            return Ok((Net::for_ip(ip)?, ip));
         }
         if let Ok(mut ts) = Net::connect_to("ts")
             && let Ok(ip) = ts.resolve(host, ms)
@@ -972,6 +966,19 @@ impl Net {
         let mut n = Net::connect()?;
         let ip = n.resolve(host, ms)?;
         Ok((n, ip))
+    }
+
+    /// The service that reaches IPv4 address `ip`: `svc:ts` for the
+    /// tailnet's while `ts` has its own IP stack (form A), else `svc:net`
+    /// (form B's `ts0` among its links, doc/72).
+    pub fn for_ip(ip: u32) -> Result<Net, NetError> {
+        if is_tailnet(ip)
+            && let Ok(ts) = Net::connect_to("ts")
+            && matches!(ts.if_info(0), Ok(Some(_)))
+        {
+            return Ok(ts);
+        }
+        Net::connect()
     }
 
     fn call(&self, op: u8, sock: u16, a: u32, b: u32) -> Result<(u32, u32), NetError> {

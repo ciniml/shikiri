@@ -7,7 +7,7 @@
 #![no_main]
 
 //! `run tsget IP PORT`: one HTTP/1.0 `GET /` to a tailnet peer through
-//! `svc:ts` (doc/71 §13), to try the service: the status line and the
+//! `svc:ts` (form A, doc/71 §13) or `svc:net`'s `ts0` (form B, doc/72): the status line and the
 //! bytes, as `tsget.done`. IP as a number (100.64.0.2 is 1681915906);
 //! PORT 0 is 80. PORT + 0x10000: UDP instead (doc/71 §14.6), `ROUNDS`
 //! datagrams to an echo server there, each waited for with UDP_WAIT, as
@@ -63,7 +63,7 @@ fn peers() -> usize {
 /// The status code, the bytes received and the time taken (ms).
 fn get(ip: u32, port: u16) -> Result<(u32, u32, u32), &'static str> {
     let start = t5_rt::time_ns();
-    let mut net = Net::connect_to("ts").map_err(|_| "connect to svc:ts")?;
+    let mut net = Net::for_ip(ip).map_err(|_| "connect")?;
     let s = net.tcp_connect(ip, port).map_err(|_| "tcp connect")?;
     net.wait_established(s, 15_000).map_err(|_| "establish")?;
     let st0 = net.tcp_state(s).map_or(99, |v| v.0);
@@ -101,7 +101,7 @@ const ECHO_MS: u64 = 2000;
 /// after their round's `ECHO_MS` (taken in a later round or in a last
 /// `ECHO_MS`), and the round trips.
 fn echo(ip: u32, port: u16) -> Result<(), &'static str> {
-    let mut net = Net::connect_to("ts").map_err(|_| "connect to svc:ts")?;
+    let mut net = Net::for_ip(ip).map_err(|_| "connect")?;
     let s = net.udp_bind(0).map_err(|_| "udp bind")?;
     let (mut min_us, mut max_us) = (u32::MAX, 0u32);
     let mut sent_at = [0u64; ROUNDS as usize];
