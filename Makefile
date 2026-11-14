@@ -65,7 +65,7 @@ PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit sv
 PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn/shell --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs/rw: --permit svc:net/tcp-connect --permit svc:net/ping \
-                 --permit svc:net/resolve --permit svc:net/info --permit svc:ts/info --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:mem \
+                 --permit svc:net/resolve --permit svc:net/info --permit svc:ts/info --permit svc:ts/resolve --permit svc:ts/ping --permit svc:ts/tcp-connect --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:mem \
                  --permit proc:kill/own --permit display:focus --permit svc:ota --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
                  --permit svc:cfg/r: --permit svc:cfg/w: --permit audio:volume --stack 32768
 # What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a

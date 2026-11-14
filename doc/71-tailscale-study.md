@@ -44,7 +44,7 @@
 | パケットフィルタ | netmap の `PacketFilter` で、入ってくるパケットを照らす | **要る**（既定は拒否で） | 受けないと tailnet の ACL が効かない。tailscale-esp32 も「フィルタを受けるまでは通さない」としている（確認、`docs/protocol-support.md`） |
 | disco | `TS💬` + disco 公開鍵 + nonce + NaCl box（ping、pong、CallMeMaybe） | **最小の pong だけ**（推測で要る） | DERP 越しの ping に pong を返すだけなら小さい。答えなくても DERP で通るかは未確認（§2.3） |
 | STUN と直の経路 | DERP の STUN（3478）で外のアドレスを知り、disco で穴をあける | **後回し** | DERP だけで通る。速さと遅れは悪くなる |
-| MagicDNS | 100.100.100.100 の DNS | **後回し** | netmap の名前（`host.tailnet.ts.net.`）から自分で引けば足りる |
+| MagicDNS | 100.100.100.100 の DNS | **後回し** → 名前の引き方だけ実装した（§14.16: `svc:ts` の RESOLVE、shell と ota から） | netmap の名前（`host.tailnet.ts.net.`）から自分で引けば足りる |
 | 対話のログイン | `AuthURL` を利用者がブラウザで開く | **後回し** → 実装した（§14.15: shell の `ts` が URL と QR を出す） | auth key なら URL は要らない |
 | そのほか | exit node、subnet router、Taildrop、SSH、serve/funnel、key の自動の入れ替え、Tailnet Lock、ログの送信 | **出さない** | tailscale-rs も多くは未対応（確認、README） |
 
@@ -573,3 +573,15 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
   - t5emu: `qr https://login.tailscale.com/a/…` を打って画面を撮り、画素から読んだ 29 x 29 のモジュールが、qrencode の符号をマスク 4 にしたものとデータの部分ですべて一致し、形式情報もマスク 4 を示すことを確かめた。
 
 - 実機: shell と ts を入れ直し、ts は登録済みのまま tailnet に戻った（`ts.registered authorized=true`、相手 10）。端末の `qr https://github.com/ciniml/shikiri` の QR をスマートフォンのカメラで読めた（利用者が確認）。本物のログイン待ちは、登録を崩さないと作れないので実機では見ていない。
+
+### 14.16 MagicDNS の名前をどのアプリからも（2026-11-14）
+- これまで: `svc:ts` の RESOLVE は netmap の名前（相手の短い名前と、`laptop.example.ts.net` の全体）を引けた。ただし `svc:ts` を自分で開くアプリ（`tsget`、`ota` の `.ts.net`）にしか効かなかった。shell の `ping` と `nc` は `svc:net` だけを使うので、tailnet の名前も 100.x のアドレスも通らなかった。
+- netmap の `DNSConfig`（tailcfg.DNSConfig）を読む: `Domains`（検索ドメイン。先頭が tailnet の `*.ts.net`）と `ExtraRecords`（管理画面で足した名前、`Type` が "" か "A" のもの）。変わったときだけ送られるので、最後のものを持つ。
+- `NetMap::resolve`（tsclient）にまとめた。順は、名前そのもの（`ExtraRecords`、ノードの全体の名前。最後の点はあってもなくても、大文字小文字は問わない）、名前 + 各検索ドメイン、点を含まない名前ならノードの短い名前（最初のラベル）。点を含む名前を最初のラベルに切って比べることはしない。`svc:ts` の RESOLVE はこれを使う。
+- `svc:ts` に PING と PING_RESULT（`svc:net` と同じ形、IPv4）。smoltcp の ICMP のソケット（tsclient の smoltcp に `socket-icmp`）で echo を送り、識別子の合う返事で往復の µs を返す。許可は `ping`。
+- `t5_rt::Net::for_host(HOST, ms)`: HOST を届けるサービスとアドレスを返す。100.64.0.0/10 のアドレスなら `svc:ts`、名前なら先に `svc:ts` の RESOLVE（`ts` が動いていて、アプリに `svc:ts/resolve` があるとき）、引けなければ `svc:net` の DNS。`t5_rt::is_tailnet(ip)` も足した。
+  - shell の `ping` と `nc`、`ota` の `http://HOST/...` はこれを使う。これで `ping laptop`、`nc laptop 80`、`ota app http://laptop:8000/x.t5a` が tailnet を通る。shell の許可に `svc:ts/resolve`、`svc:ts/ping`、`svc:ts/tcp-connect` を足した。
+  - 外の名前（`example.com`）は、`ts` の RESOLVE が `UNREACHABLE` を返した後に `svc:net` で引く。`ts` が動いていなければ、すぐ `svc:net` へ行く。
+- 100.100.100.100 の DNS（Tailscale のノードの中の名前解決）はまだ作っていない。Tab5 のアプリは DNS を自分で送らず RESOLVE の要求で引くので、今は使う側がない。相手のノードからは届かない（各ノードの中だけのアドレス）。
+- `svc:ts` のクライアントの枠は 2 のまま。shell の `ts` と、`for_host` で開いた接続が枠を一時的に使う。
+

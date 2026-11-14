@@ -5,7 +5,8 @@
 
 //! The map responses (tailcfg.MapResponse, the fields the reference's
 //! `tailscale_netmap.c` uses) and the netmap they build up: this node,
-//! the peers, the DERP regions.
+//! the peers, the DERP regions, the DNS settings (MagicDNS, doc/71
+//! §14.16).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -27,6 +28,29 @@ pub struct MapResponse {
     pub keep_alive: bool,
     /// The control server's clock (RFC 3339), for WireGuard's timestamps.
     pub control_time: Option<String>,
+    /// Sent when it changes (tailcfg.DNSConfig).
+    #[serde(rename = "DNSConfig")]
+    pub dns_config: Option<DnsConfig>,
+}
+
+/// The DNS settings (tailcfg.DNSConfig), the parts used here.
+#[derive(Deserialize, Default, Debug, Clone)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct DnsConfig {
+    /// Search domains, the tailnet's own (`example.ts.net`) first.
+    pub domains: Vec<String>,
+    /// Names the admin added (tailcfg.DNSRecord).
+    pub extra_records: Vec<DnsRecord>,
+}
+
+#[derive(Deserialize, Default, Debug, Clone)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct DnsRecord {
+    pub name: String,
+    /// "" or "A" or "AAAA" (by the value).
+    #[serde(rename = "Type")]
+    pub kind: String,
+    pub value: String,
 }
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -152,6 +176,7 @@ pub struct NetMap {
     pub node: Option<Node>,
     pub peers: Vec<Node>,
     pub derp: DerpMap,
+    pub dns: DnsConfig,
     /// Counts the responses that changed `peers` (or `node`).
     pub peers_version: u32,
 }
@@ -183,6 +208,9 @@ impl NetMap {
         if let Some(d) = r.derp_map.take() {
             self.derp = d;
         }
+        if let Some(d) = r.dns_config.take() {
+            self.dns = d;
+        }
         Ok(r)
     }
 
@@ -204,6 +232,40 @@ impl NetMap {
 
     pub fn self_ipv4(&self) -> Option<[u8; 4]> {
         self.node.as_ref()?.ipv4()
+    }
+
+    /// `name`'s IPv4 address as MagicDNS gives it (doc/71 §14.16): an
+    /// admin's record (`ExtraRecords`), a node's whole name (a final dot
+    /// or not, any case), the name with each search domain, or a node's
+    /// short name (a name without dots: the first label).
+    pub fn resolve(&self, name: &str) -> Option<[u8; 4]> {
+        let name = name.trim_end_matches('.');
+        if name.is_empty() {
+            return None;
+        }
+        let same = |a: &str, b: &str| a.trim_end_matches('.').eq_ignore_ascii_case(b);
+        let nodes = || self.node.iter().chain(self.peers.iter());
+        let whole = |n: &str| {
+            let rec = self.dns.extra_records.iter().filter(|r| matches!(r.kind.as_str(), "" | "A")).find(|r| same(&r.name, n)).and_then(|r| parse_v4(&r.value));
+            rec.or_else(|| nodes().find(|p| same(&p.name, n)).and_then(|p| p.ipv4()))
+        };
+        if let Some(ip) = whole(name) {
+            return Some(ip);
+        }
+        for d in &self.dns.domains {
+            let d = d.trim_end_matches('.');
+            let mut fq = String::with_capacity(name.len() + 1 + d.len());
+            fq.push_str(name);
+            fq.push('.');
+            fq.push_str(d);
+            if let Some(ip) = whole(&fq) {
+                return Some(ip);
+            }
+        }
+        if name.contains('.') {
+            return None;
+        }
+        nodes().find(|p| p.name.split('.').next().is_some_and(|s| s.eq_ignore_ascii_case(name))).and_then(|p| p.ipv4())
     }
 }
 
@@ -235,5 +297,33 @@ mod tests {
         assert!(nm.apply_json(br#"{"KeepAlive":true}"#).unwrap().keep_alive);
         assert_eq!(nm.peers_version, v);
         assert_eq!(nm.peers.len(), 2);
+    }
+
+    #[test]
+    fn resolve() {
+        let mut nm = NetMap::default();
+        nm.apply_json(br#"{"Node":{"ID":1,"Name":"tab5.example.ts.net.","Addresses":["100.64.0.5/32"]},
+            "Peers":[{"ID":2,"Name":"Laptop.example.ts.net.","Addresses":["fd7a:115c:a1e0::6/128","100.64.0.6/32"]},
+                     {"ID":3,"Name":"nas.example.ts.net.","Addresses":["100.64.0.7/32"]}],
+            "DNSConfig":{"Resolvers":[{"Addr":"192.0.2.53"}],"Domains":["example.ts.net","corp.example"],"Proxied":true,
+                         "ExtraRecords":[{"Name":"printer.corp.example.","Value":"100.64.0.9"},{"Name":"v6.corp.example","Type":"AAAA","Value":"fd7a::9"},
+                                         {"Name":"nas.example.ts.net","Value":"100.64.0.10"}]}}"#).unwrap();
+        assert_eq!(nm.resolve("laptop"), Some([100, 64, 0, 6]));
+        assert_eq!(nm.resolve("LAPTOP.example.ts.net."), Some([100, 64, 0, 6]));
+        assert_eq!(nm.resolve("tab5.example.ts.net"), Some([100, 64, 0, 5]));
+        // An admin's record before the node's own name.
+        assert_eq!(nm.resolve("nas"), Some([100, 64, 0, 10]));
+        // Through the second search domain.
+        assert_eq!(nm.resolve("printer"), Some([100, 64, 0, 9]));
+        assert_eq!(nm.resolve("printer.corp.example"), Some([100, 64, 0, 9]));
+        assert_eq!(nm.resolve("v6.corp.example"), None);
+        // Dotted names are not cut to their first label.
+        assert_eq!(nm.resolve("laptop.other.example"), None);
+        assert_eq!(nm.resolve("example.com"), None);
+        assert_eq!(nm.resolve(""), None);
+        assert_eq!(nm.resolve("."), None);
+        // A later response without DNSConfig keeps it.
+        nm.apply_json(br#"{"KeepAlive":true}"#).unwrap();
+        assert_eq!(nm.resolve("printer"), Some([100, 64, 0, 9]));
     }
 }

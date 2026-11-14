@@ -806,27 +806,24 @@ fn parse_ip(s: &str) -> Option<u32> {
     (parts == 4).then_some(ip)
 }
 
-/// `host`'s IPv4 address: as written, or from DNS.
-fn lookup(o: &mut Out, net: &mut Net, cmd: &str, host: &str) -> Option<u32> {
-    if let Some(ip) = parse_ip(host) {
-        return Some(ip);
-    }
-    let r = net.resolve(host, 3000).ok();
+/// `host`'s IPv4 address (as written, a tailnet name, or from DNS) and
+/// the service that reaches it: `svc:ts` for the tailnet's (`Net::for_host`,
+/// doc/71 §14.16), else `svc:net`.
+fn lookup(o: &mut Out, cmd: &str, host: &str) -> Option<(Net, u32)> {
+    let r = Net::for_host(host, 3000).ok();
     if r.is_none() {
         o.str(cmd);
-        o.str(": cannot resolve ");
-        o.str(host);
-        o.str("\n");
+        o.str(if parse_ip(host).is_some() { ": no network service\n" } else { ": cannot resolve " });
+        if parse_ip(host).is_none() {
+            o.str(host);
+            o.str("\n");
+        }
     }
     r
 }
 
 fn ping(o: &mut Out, host: &str) {
-    let Ok(mut net) = Net::connect() else {
-        o.str("ping: no network service\n");
-        return;
-    };
-    let Some(ip) = lookup(o, &mut net, "ping", host) else { return };
+    let Some((mut net, ip)) = lookup(o, "ping", host) else { return };
     for _ in 0..4 {
         o.str("ping ");
         o.ip(ip);
@@ -1399,11 +1396,7 @@ fn interfaces(o: &mut Out, net: &Net) {
 /// A TCP connection: what arrives is shown; a line typed is sent with
 /// CRLF when Enter is pressed. Ctrl-C or Ctrl-D ends it.
 fn nc(o: &mut Out, host: &str, port: u16) {
-    let Ok(mut net) = Net::connect() else {
-        o.str("nc: no network service\n");
-        return;
-    };
-    let Some(ip) = lookup(o, &mut net, "nc", host) else { return };
+    let Some((mut net, ip)) = lookup(o, "nc", host) else { return };
     let s = match net.tcp_connect(ip, port).and_then(|s| net.wait_established(s, 5000).map(|_| s)) {
         Ok(s) => s,
         Err(_) => {

@@ -8,8 +8,9 @@
 //! them unchanged. Of its requests: TCP_CONNECT, TCP_LISTEN (on the
 //! tailnet address; the address and link are ignored), TCP_STATE, SEND,
 //! RECV, CLOSE, UDP_BIND (the same; port 0 takes a free one), UDP_SEND,
-//! UDP_RECV, UDP_WAIT (doc/71 §14.6), and RESOLVE / RESOLVE_RESULT for the
-//! netmap's names (a peer's short name or its whole name, IPv4), IF_INFO
+//! UDP_RECV, UDP_WAIT (doc/71 §14.6), PING / PING_RESULT (§14.16), and
+//! RESOLVE / RESOLVE_RESULT for the netmap's names as MagicDNS gives them
+//! (`NetMap::resolve`: whole names, search domains, short names, IPv4), IF_INFO
 //! (one interface, `ts0`: the tailnet address, packets in and out),
 //! PEER_INFO (this node and the peers: name, address, path; doc/71 §14.8),
 //! LOGIN_INFO (whether on the tailnet, the login URL while a person has to
@@ -21,7 +22,7 @@
 //!
 //! Grants (`svc:ts/GRANT`) as `svc:net`'s: `tcp-connect` or
 //! `tcp-connect:PORT`, `tcp-listen:PORT` or `tcp-listen:any`, `udp:PORT`
-//! or `udp:any`, `resolve`, `info` (IF_INFO, PEER_INFO, LOGIN_INFO).
+//! or `udp:any`, `ping`, `resolve`, `info` (IF_INFO, PEER_INFO, LOGIN_INFO).
 //!
 //! The sockets are smoltcp's in the node; a new session with the control
 //! server and DERP (after a failure) starts with none, and the clients'
@@ -31,11 +32,11 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use t5_rt::net::{self as proto, op, state, status};
-use t5_rt::{Channel, Grants, Handle, Listener, Shm, event};
+use t5_rt::{Channel, Grants, Handle, Listener, Shm, event, time_ns};
 use tsclient::node::Node;
 use tsclient::smoltcp::iface::SocketHandle;
-use tsclient::smoltcp::socket::{tcp, udp};
-use tsclient::smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
+use tsclient::smoltcp::socket::{icmp, tcp, udp};
+use tsclient::smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpEndpoint, Ipv4Address};
 
 /// Clients at a time, each with `proto::SLICE` of shared memory.
 pub const CLIENTS: usize = 2;
@@ -44,11 +45,15 @@ const SOCKETS: usize = 8;
 const BUF: usize = 4096;
 /// Datagrams a UDP socket holds each way.
 const DATAGRAMS: usize = 4;
+/// Echo data PING sends at most (as `svc:net`).
+const PING_DATA: usize = 64;
 
 /// A client's socket, or the result of a RESOLVE.
 enum Sock {
     Tcp(SocketHandle),
     Udp(SocketHandle),
+    /// An echo request sent (its identifier, when in ns).
+    Ping(SocketHandle, u16, u64),
     Resolved(Option<[u8; 4]>),
 }
 
@@ -80,6 +85,8 @@ pub struct Service {
     /// TCP sockets in the node, closing ones too.
     used: usize,
     next_port: u16,
+    /// PING's next echo identifier.
+    next_ident: u16,
 }
 
 fn reply(st: u32, v0: u32, v1: u32) -> [u8; proto::REPLY_SIZE] {
@@ -95,7 +102,7 @@ impl Service {
         let pool_shm = Shm::alloc(CLIENTS * proto::SLICE).ok()?;
         let pool = pool_shm.map().ok()?;
         let listener = Listener::open("ts").ok()?;
-        Some(Service { login: Login::Connecting, listener, pool_shm, pool, clients: [const { None }; CLIENTS], closing: Vec::new(), used: 0, next_port: 49152 })
+        Some(Service { login: Login::Connecting, listener, pool_shm, pool, clients: [const { None }; CLIENTS], closing: Vec::new(), used: 0, next_port: 49152, next_ident: 1 })
     }
 
     /// The handles to `wait` on: the listener, then the clients.
@@ -188,7 +195,7 @@ impl Service {
                         node.tun.sockets.get_mut::<tcp::Socket>(h).abort();
                         self.closing.push(h);
                     }
-                    Sock::Udp(h) => {
+                    Sock::Udp(h) | Sock::Ping(h, ..) => {
                         node.tun.sockets.remove(h);
                         self.used -= 1;
                     }
@@ -377,7 +384,7 @@ impl Service {
                     self.closing.push(h);
                     reply(status::OK, 0, 0)
                 }
-                Some(Sock::Udp(h)) => {
+                Some(Sock::Udp(h) | Sock::Ping(h, ..)) => {
                     node.tun.sockets.remove(h);
                     self.used -= 1;
                     reply(status::OK, 0, 0)
@@ -385,10 +392,49 @@ impl Service {
                 Some(Sock::Resolved(_)) => reply(status::OK, 0, 0),
                 None => reply(status::BAD_REQUEST, 0, 0),
             },
+            op::PING => {
+                if node.tun.ip.is_none() {
+                    return reply(status::NO_ADDRESS, 0, 0);
+                }
+                if self.used == SOCKETS {
+                    return reply(status::NO_SOCKETS, 0, 0);
+                }
+                let ident = self.next_ident;
+                self.next_ident = ident.wrapping_add(1);
+                let buf = || icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; 2], vec![0; 256]);
+                let mut s = icmp::Socket::new(buf(), buf());
+                let ip = a.to_be_bytes();
+                let data = &mem[..(b as usize).min(PING_DATA)];
+                let repr = Icmpv4Repr::EchoRequest { ident, seq_no: 0, data };
+                let sent = s.bind(icmp::Endpoint::Ident(ident)).is_ok()
+                    && s.send(repr.buffer_len(), IpAddress::Ipv4(Ipv4Address::new(ip[0], ip[1], ip[2], ip[3])))
+                        .map(|buf| repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &Default::default()))
+                        .is_ok();
+                if !sent {
+                    return reply(status::UNREACHABLE, 0, 0);
+                }
+                let h = node.tun.sockets.add(s);
+                self.used += 1;
+                let c = self.clients[i].as_mut().unwrap();
+                reply(status::OK, add(c, Sock::Ping(h, ident, time_ns())) as u32, 0)
+            }
+            op::PING_RESULT => match c.socks.get((sock as usize).wrapping_sub(1)) {
+                Some(Some(Sock::Ping(h, ident, sent))) => {
+                    let s = node.tun.sockets.get_mut::<icmp::Socket>(*h);
+                    while let Ok((buf, _)) = s.recv() {
+                        // An echo reply (type 0) with the identifier.
+                        if buf.len() >= 8 && buf[0] == 0 && u16::from_be_bytes([buf[4], buf[5]]) == *ident {
+                            return reply(status::OK, 1, ((time_ns() - sent) / 1000) as u32);
+                        }
+                    }
+                    reply(status::OK, 0, 0)
+                }
+                _ => reply(status::BAD_REQUEST, 0, 0),
+            },
             op::RESOLVE => {
                 let n = (b as usize).min(proto::NAME_MAX);
                 let name = core::str::from_utf8(&mem[..n]).unwrap_or("");
-                let ip = resolve(node, name);
+                let ip = node.netmap.resolve(name);
                 reply(status::OK, add(c, Sock::Resolved(ip)) as u32, 0)
             }
             op::RESOLVE_RESULT => match c.socks.get((sock as usize).wrapping_sub(1)) {
@@ -425,6 +471,7 @@ impl Service {
             op::TCP_LISTEN => (port_ok(b"tcp-listen"), "tcp-listen"),
             op::TCP_CONNECT => (g.has(b"tcp-connect") || port_ok(b"tcp-connect"), "tcp-connect"),
             op::RESOLVE | op::RESOLVE_RESULT => (g.has(b"resolve"), "resolve"),
+            op::PING | op::PING_RESULT => (g.has(b"ping"), "ping"),
             op::IF_INFO | op::PEER_INFO | op::LOGIN_INFO => (g.has(b"info"), "info"),
             _ => (true, ""),
         };
@@ -491,13 +538,3 @@ fn peer_info(node: &Node, k: usize, r: &mut [u8]) -> bool {
     true
 }
 
-/// A netmap name's IPv4 address: this node or a peer, by its short name
-/// (`laptop`) or whole name (`laptop.example.ts.net`, a final dot or not).
-fn resolve(node: &Node, name: &str) -> Option<[u8; 4]> {
-    let name = name.trim_end_matches('.');
-    let matches = |n: &str| {
-        let n = n.trim_end_matches('.');
-        !name.is_empty() && (n.eq_ignore_ascii_case(name) || n.split('.').next().is_some_and(|s| s.eq_ignore_ascii_case(name)))
-    };
-    node.netmap.node.iter().chain(node.netmap.peers.iter()).find(|p| matches(&p.name)).and_then(|p| p.ipv4())
-}

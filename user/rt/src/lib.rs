@@ -912,6 +912,11 @@ pub struct Received {
     pub ended: bool,
 }
 
+/// Whether `ip` is in the tailnet's range (100.64.0.0/10, doc/71).
+pub fn is_tailnet(ip: u32) -> bool {
+    ip >> 22 == (100 << 2 | 1)
+}
+
 impl Net {
     pub fn connect() -> Result<Net, NetError> {
         Net::connect_to(net::SERVICE)
@@ -930,6 +935,26 @@ impl Net {
         let shm = chan.take_shm().map_err(NetError::Ipc)?;
         let slice = shm.map().map_err(NetError::Ipc)?;
         Ok(Net { chan, _shm: shm, slice, armed: core::cell::Cell::new(false) })
+    }
+
+    /// The service that reaches `host` (an IPv4 address or a name) and
+    /// its address (doc/71 §14.16): `svc:ts` for an address in the
+    /// tailnet's 100.64.0.0/10 or a name `ts` resolves (MagicDNS: whole
+    /// names, search domains, short names; when `ts` runs and the app has
+    /// `svc:ts/resolve`), else `svc:net` and its DNS (waiting up to `ms`).
+    pub fn for_host(host: &str, ms: u64) -> Result<(Net, u32), NetError> {
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            let ip = ip.to_bits();
+            return Ok((Net::connect_to(if is_tailnet(ip) { "ts" } else { net::SERVICE })?, ip));
+        }
+        if let Ok(mut ts) = Net::connect_to("ts")
+            && let Ok(ip) = ts.resolve(host, ms)
+        {
+            return Ok((ts, ip));
+        }
+        let mut n = Net::connect()?;
+        let ip = n.resolve(host, ms)?;
+        Ok((n, ip))
     }
 
     fn call(&self, op: u8, sock: u16, a: u32, b: u32) -> Result<(u32, u32), NetError> {
