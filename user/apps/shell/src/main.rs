@@ -37,7 +37,7 @@ fn main(_: usize, _: usize) -> usize {
         event!(Error, "shell.no_tty");
         return 1;
     };
-    let mut sh = Shell { out: Out { tty, buf: [0; chan::MSG_MAX], len: 0 }, line: Line::default(), history: History::default(), esc: Esc::None };
+    let mut sh = Shell { out: Out { tty, buf: [0; chan::MSG_MAX], len: 0, log: [0; LOG_LINE], log_len: 0, log_esc: false }, line: Line::default(), history: History::default(), esc: Esc::None };
     sh.out.str("tab5-os shell. Type help for the commands.\n");
     sh.out.str(PROMPT);
     sh.out.flush();
@@ -57,14 +57,49 @@ fn main(_: usize, _: usize) -> usize {
     }
 }
 
+/// A line of output logged as `shell.out` (a log string's limit).
+const LOG_LINE: usize = t5_rt::log::MAX_STR;
+
 /// Output to the terminal, a message at a time; `\n` becomes `\r\n`.
+/// Each line also goes to the log as `shell.out` (escape sequences and
+/// control characters left out), so the host sees what the screen shows
+/// (with the kernel's `keys`, doc/54 §7).
 struct Out {
     tty: Channel,
     buf: [u8; chan::MSG_MAX],
     len: usize,
+    log: [u8; LOG_LINE],
+    log_len: usize,
+    /// Inside an escape sequence (ESC to its final byte).
+    log_esc: bool,
 }
 
 impl Out {
+    fn log_byte(&mut self, b: u8) {
+        if self.log_esc {
+            // CSI's final byte; ESC [ itself goes on.
+            self.log_esc = !(0x40..=0x7E).contains(&b) || b == b'[';
+            return;
+        }
+        match b {
+            0x1B => self.log_esc = true,
+            b'\n' => self.log_line(),
+            0x20.. => {
+                if self.log_len == LOG_LINE {
+                    self.log_line();
+                }
+                self.log[self.log_len] = b;
+                self.log_len += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn log_line(&mut self) {
+        event!(Info, "shell.out", text = core::str::from_utf8(&self.log[..self.log_len]).unwrap_or("?"));
+        self.log_len = 0;
+    }
+
     fn byte(&mut self, b: u8) {
         if b == b'\n' {
             self.raw(b'\r');
@@ -73,6 +108,7 @@ impl Out {
     }
 
     fn raw(&mut self, b: u8) {
+        self.log_byte(b);
         if self.len == self.buf.len() {
             self.flush();
         }

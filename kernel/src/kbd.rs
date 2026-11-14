@@ -6,6 +6,8 @@
 //! `kbd` (doc/39): the keyboard's events, read by the kernel every
 //! service round while a process has it open. While processes hold seats
 //! (doc/60), the events reach the holder only when its seat is in front.
+//! Keys typed from the host (`keys`, doc/54 §7) are fed in as the reader
+//! takes them, each a press and a release.
 
 use t5_abi::{Error, event, kbd};
 
@@ -23,6 +25,43 @@ struct Queue {
 
 static mut Q: Queue = Queue { open: false, pid: 0, events: [[0; kbd::EVENT_SIZE]; kbd::QUEUE], head: 0, count: 0, dropped: 0 };
 
+/// Characters from the host's `keys` not yet in the queue.
+struct Typed {
+    text: [u8; t5_abi::ctl::KEYS_MAX],
+    head: usize,
+    len: usize,
+}
+
+static mut TYPED: Typed = Typed { text: [0; t5_abi::ctl::KEYS_MAX], head: 0, len: 0 };
+
+fn typed() -> &'static mut Typed {
+    // Under the kernel lock.
+    unsafe { &mut *core::ptr::addr_of_mut!(TYPED) }
+}
+
+/// `keys TEXT` (escapes as `ctl::keys_text` reads them) for the process
+/// that reads the keyboard; the characters taken.
+pub fn inject(text: &[u8]) -> Result<u32, &'static str> {
+    if !q().open {
+        return Err("nobody reads the keyboard");
+    }
+    let t = typed();
+    if t.len > 0 {
+        return Err("still typing");
+    }
+    let mut n = 0;
+    for b in t5_abi::ctl::keys_text(text) {
+        if t5_abi::kbd::key_of(b).is_none() {
+            return Err("a character no key types");
+        }
+        t.text[n] = b;
+        n += 1;
+    }
+    (t.head, t.len) = (0, n);
+    event!(Info, "kbd.typed", chars = n as u32);
+    Ok(n as u32)
+}
+
 fn q() -> &'static mut Queue {
     // Under the kernel lock.
     unsafe { &mut *core::ptr::addr_of_mut!(Q) }
@@ -38,6 +77,19 @@ pub fn poll() {
     let q = q();
     if !q.open && crate::screen::taken() < 2 {
         return;
+    }
+    // Typed keys, as room frees (a press and a release each).
+    let t = typed();
+    while q.open && t.len > 0 && q.count + 2 <= kbd::QUEUE {
+        if let Some((modifier, usage)) = kbd::key_of(t.text[t.head]) {
+            push(q, [modifier, usage]);
+            push(q, [0, 0]);
+        }
+        t.head += 1;
+        t.len -= 1;
+    }
+    if !q.open {
+        t.len = 0;
     }
     let _ = Current::kbd_poll(&mut |modifier, usage| {
         if modifier & 0x0F == SWITCH_MODIFIER && usage == SWITCH_USAGE && crate::screen::taken() >= 2 {

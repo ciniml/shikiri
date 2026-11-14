@@ -107,6 +107,8 @@ pub mod cmd {
     pub const FOCUS: u8 = 36;
     /// Logs the audio stream's counters (`audio.stats`, doc/70).
     pub const AUDIO: u8 = 37;
+    /// `u8 len | text`: keys typed to the keyboard's reader (`keys`).
+    pub const KEYS: u8 = 38;
 }
 
 /// `Command::Prof` operations.
@@ -166,7 +168,37 @@ pub enum Command<'a> {
     Partition { pid: u32, partition: u32 },
     Focus { pid: u32 },
     Audio,
+    /// `keys TEXT`: typed to whoever reads the keyboard (the terminal),
+    /// as key presses (`kbd::key_of`), for debugging without hands on the
+    /// keyboard. `TEXT` as written: `\n` is Enter, `\t` Tab, `\e` Escape,
+    /// `\\` a backslash (`keys_text` reads it).
+    Keys { text: &'a [u8] },
 }
+
+/// The characters of a `keys` command's text, its escapes read.
+pub fn keys_text(text: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    let mut i = 0;
+    core::iter::from_fn(move || {
+        let b = *text.get(i)?;
+        i += 1;
+        if b != b'\\' {
+            return Some(b);
+        }
+        let e = text.get(i).copied();
+        i += 1;
+        Some(match e {
+            Some(b'n') => b'\n',
+            Some(b't') => b'\t',
+            Some(b'e') => 0x1B,
+            Some(b'b') => 0x7F,
+            Some(c) => c,
+            None => b'\\',
+        })
+    })
+}
+
+/// The longest `keys` text.
+pub const KEYS_MAX: usize = 200;
 
 impl Command<'_> {
     pub fn name(&self) -> &'static str {
@@ -207,6 +239,7 @@ impl Command<'_> {
             Command::Partition { .. } => "partition",
             Command::Focus { .. } => "focus",
             Command::Audio => "audio",
+            Command::Keys { .. } => "keys",
             Command::TouchInject { .. } => "touch_inject",
         }
     }
@@ -263,6 +296,13 @@ pub fn decode(b: &[u8]) -> Option<(u32, Command<'_>)> {
         cmd::ENTROPY if args.len() == 4 => Command::Entropy { on: u32_at(args, 0)? != 0 },
         cmd::RNG_DUMP if args.len() == 8 => Command::RngDump { raw: u32_at(args, 0)? != 0, us: u32_at(args, 4)? },
         cmd::PROF if args.len() == 12 => Command::Prof { op: u32_at(args, 0)?, a: u32_at(args, 4)?, b: u32_at(args, 8)? },
+        cmd::KEYS => {
+            let n = *args.first()? as usize;
+            if args.len() != 1 + n || n > KEYS_MAX {
+                return None;
+            }
+            Command::Keys { text: &args[1..] }
+        }
         cmd::REMOVE | cmd::ROLLBACK => {
             let n = *args.first()? as usize;
             if args.len() != 1 + n {
@@ -330,6 +370,7 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
         Command::Partition { .. } => put(&[cmd::PARTITION])?,
         Command::Focus { .. } => put(&[cmd::FOCUS])?,
         Command::TouchInject { .. } => put(&[cmd::TOUCH_INJECT])?,
+        Command::Keys { .. } => put(&[cmd::KEYS])?,
     }
     put(&id.to_le_bytes())?;
     match c {
@@ -376,6 +417,13 @@ pub fn encode(id: u32, c: &Command, out: &mut [u8]) -> Option<usize> {
             }
             put(&offset.to_le_bytes())?;
             put(data)?;
+        }
+        Command::Keys { text } => {
+            if text.len() > KEYS_MAX {
+                return None;
+            }
+            put(&[text.len() as u8])?;
+            put(text)?;
         }
         Command::Remove { name } | Command::Rollback { name } => {
             if name.len() > 32 {
@@ -438,6 +486,15 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         Some("rotate") => Command::Rotate { degrees: num(Some(w.next().ok_or("rotate 0|90|180|270")?))? },
         Some("ppabench") => Command::PpaBench,
         Some("capture") => Command::Capture,
+        Some("keys") => {
+            // The rest of the line as written (spaces kept).
+            let rest = line.trim_start().strip_prefix("keys").unwrap_or("");
+            let text = rest.strip_prefix(' ').unwrap_or(rest);
+            if text.is_empty() || text.len() > KEYS_MAX {
+                return Err("keys TEXT (\\n Enter, \\t Tab, \\e Escape)");
+            }
+            return Ok(Command::Keys { text: text.as_bytes() });
+        }
         Some("audio") => Command::Audio,
         Some("tap") => {
             let x = num(Some(w.next().ok_or("tap X Y [MS]")?))?;
@@ -492,7 +549,7 @@ pub fn parse_line(line: &str) -> Result<Command<'_>, &'static str> {
         _ => {
             return Err("commands: list | ps | run NAME [ARG0 [ARG1]] | kill PID | install FILE | remove NAME | rollback NAME | \
                  flashtest | psram | kupdate FILE | kinfo | reboot | clock MHZ | pvt on|off | power | touch SECONDS | i2cscan | display | rotate DEGREES | sdinfo | sdread LBA | sdtest | wlanprobe | prof start PID US | prof stop | prof dump PART | membench [pause] | ppabench | rngdump [raw [US]] | entropy on|off | \
-                 capture | tap X Y [MS] | swipe X0 Y0 X1 Y1 [MS] | partitions on|off | partition PID system|net|apps | focus PID");
+                 capture | tap X Y [MS] | swipe X0 Y0 X1 Y1 [MS] | partitions on|off | partition PID system|net|apps | focus PID | keys TEXT");
         }
     };
     if w.next().is_some() {
@@ -521,7 +578,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "nvserase", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3", "capture", "tap 10 20", "swipe 1 2 3 4 500", "partitions off", "partitions on", "partition 105 net", "focus 108"] {
+        for line in ["list", "ps", "kill 3", "run ticker 1 0x1e", "remove hello", "rollback hello", "flashtest", "nvserase", "reboot", "kinfo", "clock 90", "pvt off", "pvt on", "power", "touch 5", "i2cscan", "display", "rotate 180", "sdinfo", "sdread 0x800", "sdtest", "wlanprobe", "prof start 104 500", "prof stop", "prof dump 3", "capture", "tap 10 20", "swipe 1 2 3 4 500", "partitions off", "partitions on", "partition 105 net", "focus 108", "keys ls -l\\n"] {
             let c = parse_line(line).unwrap();
             let mut b = [0u8; MAX_COMMAND];
             let n = encode(42, &c, &mut b).unwrap();
@@ -533,6 +590,31 @@ mod tests {
         assert!(parse_line("kill").is_err());
         assert!(decode(&[cmd::KILL, 0, 0, 0, 0, 1]).is_none());
         assert!(decode(&[99, 0, 0, 0, 0]).is_none());
+    }
+
+    /// `keys`: the text as written, its escapes read; typable as key
+    /// presses.
+    #[test]
+    fn keys() {
+        let Ok(Command::Keys { text }) = parse_line("keys  echo a\\tb\\\\\\n") else { panic!() };
+        assert_eq!(text, b" echo a\\tb\\\\\\n");
+        let mut typed = [0u8; 16];
+        let mut n = 0;
+        for b in keys_text(text) {
+            typed[n] = b;
+            n += 1;
+        }
+        assert_eq!(&typed[..n], b" echo a\tb\\\n");
+        assert!(typed[..n].iter().all(|&b| crate::kbd::key_of(b).is_some()));
+        assert_eq!(crate::kbd::key_of(b'A'), Some((2, 0x04)));
+        assert_eq!(crate::kbd::key_of(b'0'), Some((0, 0x27)));
+        assert_eq!(crate::kbd::key_of(3), Some((1, 0x06)));
+        assert_eq!(crate::kbd::key_of(b'|'), Some((2, 0x31)));
+        assert_eq!(crate::kbd::key_of(0x80), None);
+        assert!(parse_line("keys").is_err());
+        let mut long = [b'x'; 5 + KEYS_MAX + 1];
+        long[..5].copy_from_slice(b"keys ");
+        assert!(parse_line(core::str::from_utf8(&long).unwrap()).is_err());
     }
 
     #[test]

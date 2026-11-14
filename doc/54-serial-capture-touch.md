@@ -91,3 +91,11 @@ tools/target/release/t5log serial --port /dev/ttyACM3 --elf build/t5-kernel-esp3
 - `paint`:
   - `swipe 200 200 1000 600 800` の後のキャプチャに、始点から終点まで四角の線が描かれていた（16 ms ごとの読みで約 50 点）。
 - 終わりに、シリアルから `run term` を送って画面を戻した。
+
+## 7. キーの打ち込みと shell の出力（2026-11-15）
+- 形 B の実機試験（doc/72 §8）で、Tab5 の端末に打つのも画面を読むのも利用者頼みだった。ホストから打ち込み、結果をログで受け取れるようにした。
+- コンソールの命令 `keys TEXT`（`ctl::Command::Keys`、`cmd::KEYS` = 38）: TEXT を、キーボードを読んでいるプロセス（term）にキーの押下と解放として届ける。`\n` は Enter、`\t` は Tab、`\e` は Escape、`\b` は Backspace、`\\` はバックスラッシュ（`ctl::keys_text`）。文字からキーへは `kbd::key_of`（US 配列、大文字と記号は Shift、制御文字は Ctrl と英字）。長さは 200 字まで。
+  - カーネルは文字をためておき（`kbd::inject`）、キーの待ち行列（32）に空きができるたびに 1 字ずつ（押下と解放の 2 つ）入れる。打ち終わる前の次の `keys` は「still typing」で断る。キーボードを読むプロセスがなければ断る。`kbd.typed chars=N` を出す。
+  - t5emu の `--ctl keys`（キーボードの模型に打つ）と違い、実機でも RTT とシリアルのどちらからでも使える: `t5log rtt … --cmd 'keys ts\n'`。
+- shell は、端末に出した行をそのまま `shell.out text=…` のイベントにも出す（エスケープシーケンスと制御文字は除く。1 行 128 バイトまで、長い行は分ける）。打ち込んだ命令の行（`t5$ ts`）も、画面と同じく出る。
+- 試験: `ctl` の試験（往復と `keys`）、p4emu-run-48（`keys echo hi there\n` で `shell.exec` と `shell.out text=hi there`）。

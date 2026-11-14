@@ -971,6 +971,37 @@ pub mod kbd {
     pub const QUEUE: usize = 32;
     /// `wait` event: events wait (value = how many).
     pub const READABLE: usize = 1;
+
+    const SHIFT: u8 = 1 << 1;
+    const CTRL: u8 = 1 << 0;
+
+    /// The key press (modifier, usage) that types ASCII `b` on a US
+    /// layout, for keys typed from the host (`ctl::Command::Keys`): `\n`
+    /// and `\r` Enter, `\t` Tab, 0x7F Backspace, 0x1B Escape, other
+    /// control characters Ctrl and a letter. None for the rest.
+    pub fn key_of(b: u8) -> Option<(u8, u8)> {
+        const SYMBOLS: &[(u8, u8, u8)] = &[
+            (b' ', 0x2C, 0), (b'-', 0x2D, 0), (b'_', 0x2D, SHIFT), (b'=', 0x2E, 0), (b'+', 0x2E, SHIFT),
+            (b'[', 0x2F, 0), (b'{', 0x2F, SHIFT), (b']', 0x30, 0), (b'}', 0x30, SHIFT), (b'\\', 0x31, 0),
+            (b'|', 0x31, SHIFT), (b';', 0x33, 0), (b':', 0x33, SHIFT), (b'\'', 0x34, 0), (b'"', 0x34, SHIFT),
+            (b'`', 0x35, 0), (b'~', 0x35, SHIFT), (b',', 0x36, 0), (b'<', 0x36, SHIFT), (b'.', 0x37, 0),
+            (b'>', 0x37, SHIFT), (b'/', 0x38, 0), (b'?', 0x38, SHIFT), (b'!', 0x1E, SHIFT), (b'@', 0x1F, SHIFT),
+            (b'#', 0x20, SHIFT), (b'$', 0x21, SHIFT), (b'%', 0x22, SHIFT), (b'^', 0x23, SHIFT), (b'&', 0x24, SHIFT),
+            (b'*', 0x25, SHIFT), (b'(', 0x26, SHIFT), (b')', 0x27, SHIFT),
+        ];
+        Some(match b {
+            b'a'..=b'z' => (0, 0x04 + b - b'a'),
+            b'A'..=b'Z' => (SHIFT, 0x04 + b - b'A'),
+            b'1'..=b'9' => (0, 0x1E + b - b'1'),
+            b'0' => (0, 0x27),
+            b'\n' | b'\r' => (0, 0x28),
+            b'\t' => (0, 0x2B),
+            0x7F => (0, 0x2A),
+            0x1B => (0, 0x29),
+            0x01..=0x1A => (CTRL, 0x04 + b - 1),
+            _ => return SYMBOLS.iter().find(|s| s.0 == b).map(|s| (s.2, s.1)),
+        })
+    }
 }
 
 /// Error codes. A syscall returns `-(code as isize)` in a0 on failure.

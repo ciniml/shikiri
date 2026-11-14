@@ -689,6 +689,7 @@ fn handle(s: &mut sched::Scheduler, store: &mut store::Store, kup: &mut kupdate:
         Command::Capture => capture::start(),
         Command::Audio => Current::audio_stats(),
         Command::TouchInject { x0, y0, x1, y1, ms } => screen::inject(x0, y0, x1, y1, ms),
+        Command::Keys { text } => kbd::inject(text),
         Command::SdInfo => Current::sd_info(),
         Command::SdRead { lba } => Current::sd_dump(lba),
         Command::SdTest => Current::sd_test(),
