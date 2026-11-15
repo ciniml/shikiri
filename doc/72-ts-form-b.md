@@ -154,3 +154,12 @@
 - 本家に寄せた: 確かめの途切れた経路も `PATH_KEEP_MS`（10 分）覚えておく（本家の bestAddr が trustUDPAddrDuration を過ぎても残るのと同じ）。その間に送る WireGuard のメッセージ（データ、ハンドシェイク、keepalive）は、その経路への UDP と DERP の両方に送り、その経路へ disco の ping を出す（`HEARTBEAT_MS` に 1 回まで）。Pong が来れば、また UDP だけに戻る。統計 `kept_sends`。
 - 試験: `node::tests::peers_reach_wireguard` に、`DIRECT_MS` の後はハンドシェイクが UDP と DERP の両方に出ること、`PATH_KEEP_MS` の後は DERP だけになることを足した。tsclient 25、emu、virt が通った。
 - 実機: 90 秒あけた後の 1 パケット目は、直す前が 1,615 ms と 37 ms、直した後が 40 ms、400 ms、35 ms（数が少ないので目安）。`kept_sends=1`。ホストが直の経路で送ってくれば、Tab5 はその受け取りで経路を確かめ直すので、覚えた経路を使うのはホストが DERP で送ってきたときだけ。残る数百 ms は、ts の外（Wi-Fi の省電力など）の可能性があり、まだ調べていない。
+
+## 14. tailnet から Tab5 への TCP（状態のページ）（2026-11-16）
+- 形 B では tailnet から Tab5 に始める TCP が届かなかった。ガードの規則で `ts0` から入れるのは ICMP だけで、状態のページ（doc/71 §12、`http://<tailnet のアドレス>/`）は `ts` の中の smoltcp（形 A）に置いていた。B4 で形 B を既定にしたときに見落とした。
+- 案 1（`pass in on ts0` で全部、ACL に一本化）と案 2（ポートを決めて足す）のうち、利用者が案 2 を選んだ。
+- ガードの規則（`netctl 2`、7 と 12 も）に `pass in on ts0 proto tcp port 80` を足した（規則 10）。
+- `ts` の状態のページ: 形 B では `svc:net` の `tcp_listen_at(0, link::TS0, 80)` で `ts0` だけで待ち受ける（`Web::step_net`）。Wi-Fi の LAN からは、ガードの規則とソケットの両方で届かない。答えた後は相手が閉じるのを待ってから閉じる（`WEB_LINGER_MS` 5 秒まで）。こちらから閉じると TIME_WAIT の間（約 10 秒）`net` のソケットが 1 つ埋まり、次の待ち受けが取れなかった。待ち受けに失敗したら `WEB_RETRY_MS`（0.5 秒）後にやり直す（`ts.web_listen` は失敗の続く間に 1 回）。許可に `svc:net/tcp-listen:80`。
+- `net` のクライアントのソケットを 8 から 12 にした。待ち受けを足すと 8 個がすべて埋まり（`ts` 4、`matter` 3、待ち受け 1）、ほかのアプリ（nettest の ping）がソケットを取れなくなった。足りないときは `net.no_sockets`（どちらが尽きたか、使用数。最初と 64 回に 1 回）。バッファのプール（12、1 つ約 81 KB）はそのまま。`net` は PSRAM の枠 2048 KB のうち 1806 KB を使っていて、プールを足せるのは 2 つまで。
+- 試験: p4emu、virt、emu が通った。
+- 実機: netctl を入れて `netctl 7`・`netctl 2`（規則 10）、ts と net を入れ直して再起動。起動で `net.ready sockets=12`、`net.rules rules=10`。ホストから tailnet で状態のページを続けて 4 回取れた（2 回目から約 25 ms。ts の起動後の 1 回目は約 7 秒で、SYN の再送の形。まだ調べていない）。LAN のアドレスの 80 番は届かない。nettest の ping も通った。

@@ -56,8 +56,9 @@ use link::{EthNic, HOST_ADDR, HOST_PREFIX, Links, NetLink, Port};
 t5_rt::entry!(main);
 
 const CLIENTS: usize = 4;
-/// Client sockets.
-const SOCKETS: usize = 8;
+/// Client sockets. 8 ran out once `ts` listened for its status page on
+/// `ts0` (doc/72 §14): `ts` holds 4, `matter` 3.
+const SOCKETS: usize = 12;
 /// smoltcp sockets with buffers: a client socket that listens on every
 /// link takes one per interface.
 const POOL: usize = 12;
@@ -624,6 +625,9 @@ pub struct Stack {
     peer: Option<testlan::Peer>,
     slots: [Option<Slot>; SOCKETS],
     pool_used: [bool; POOL],
+    /// Requests refused for want of a client socket or a pooled one (logged
+    /// the first time and then one in 64).
+    no_sockets: u32,
     next_port: u16,
     pub fwd: Forwarder,
     pub v6: fwd6::Fwd6,
@@ -888,9 +892,23 @@ impl Stack {
         }
     }
 
+    /// `net.no_sockets` for a refused request: which ran out, and how full
+    /// both are.
+    fn out_of_sockets(&mut self, which: &str) {
+        self.no_sockets += 1;
+        if self.no_sockets % 64 == 1 {
+            let clients = self.slots.iter().flatten().count();
+            let pooled = self.pool_used.iter().filter(|u| **u).count();
+            event!(Warn, "net.no_sockets", which = which, clients = clients, pooled = pooled, count = self.no_sockets);
+        }
+    }
+
     /// A new smoltcp socket of `kind` on interface `iface`.
     fn new_sock(&mut self, iface: usize, kind: Kind) -> Result<Sock, u32> {
-        let pool = self.pool_used.iter().position(|u| !u).ok_or(status::NO_SOCKETS)?;
+        let Some(pool) = self.pool_used.iter().position(|u| !u) else {
+            self.out_of_sockets("pool");
+            return Err(status::NO_SOCKETS);
+        };
         let set = self.set(iface).ok_or(status::NO_ADDRESS)?;
         let handle = match kind {
             Kind::Tcp => set.add(tcp_socket(pool)),
@@ -925,7 +943,10 @@ impl Stack {
     }
 
     fn new_slot(&mut self, client: usize, kind: Kind) -> Result<usize, u32> {
-        let i = self.slots.iter().position(Option::is_none).ok_or(status::NO_SOCKETS)?;
+        let Some(i) = self.slots.iter().position(Option::is_none) else {
+            self.out_of_sockets("client");
+            return Err(status::NO_SOCKETS);
+        };
         self.slots[i] = Some(Slot { kind, owner: Some(client), socks: [None; IFACES], primary: IFACE0, sent_ns: 0, query: None, v6: false, known: None });
         Ok(i)
     }
@@ -1702,6 +1723,7 @@ fn run(flags: u32, static_addr: u32, static_router: u32) -> Result<(), u32> {
         peer: None,
         slots: [None; SOCKETS],
         pool_used: [false; POOL],
+        no_sockets: 0,
         next_port: 49152,
         fwd: Forwarder::new(),
         v6: fwd6::Fwd6::new(),

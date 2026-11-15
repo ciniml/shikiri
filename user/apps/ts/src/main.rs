@@ -224,6 +224,16 @@ fn nap(mut svc: Option<&mut svc::Service>, ms: u64) {
     }
 }
 
+/// A `svc:net` error as a number for the log: the status, or 1000 for an
+/// IPC error, 1001 for a timeout.
+fn net_status(e: t5_rt::NetError) -> u32 {
+    match e {
+        t5_rt::NetError::Status(s) => s,
+        t5_rt::NetError::Ipc(_) => 1000,
+        t5_rt::NetError::TimedOut => 1001,
+    }
+}
+
 fn describe(e: Error) -> &'static str {
     match e {
         Error::Io => "io",
@@ -569,7 +579,11 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
             event!(Warn, "ts.silent", since_map_ms = (now - last_map) as u32, since_derp_ms = (now - last_derp) as u32, up_s = ((now - started) / 1000) as u32);
             return ("silent", Error::Io);
         }
-        web.step(&mut node, |n| status(n, hostname, region, &host, started));
+        if pipe.is_some() {
+            web.step_net(&net, &node, |n| status(n, hostname, region, &host, started));
+        } else {
+            web.step(&mut node, |n| status(n, hostname, region, &host, started));
+        }
         if let Some(svc) = svc.as_deref_mut() {
             busy |= svc.serve(Some(&mut node));
         }
@@ -914,14 +928,28 @@ fn sock_addr(a: &Addr) -> SocketAddr {
 }
 
 /// The status page on the tailnet: `http://<tailnet address>/`, one
-/// connection at a time (doc/71 §12).
+/// connection at a time (doc/71 §12). Form A: on our smoltcp; form B: on
+/// `svc:net`, listening on `ts0` only (doc/72 §14).
 struct Web {
     socket: SocketHandle,
+    /// Form B: the `svc:net` socket, listening or connected.
+    net_socket: Option<u16>,
+    /// Form B: when listening last failed (`ts0` not up yet, or no free
+    /// socket in `net`).
+    net_failed: Option<u64>,
+    /// Form B: when the answer went out; the client closes first (so the
+    /// TIME_WAIT, which holds one of `net`'s few sockets, is its own).
+    answered: Option<u64>,
     request: Vec<u8>,
     served: u32,
 }
 
 const WEB_PORT: u16 = 80;
+/// Form B: listening on `ts0` is tried again after this.
+const WEB_RETRY_MS: u64 = 500;
+/// Form B: a client that has not closed this long after the answer is
+/// closed on.
+const WEB_LINGER_MS: u64 = 5_000;
 /// More of a request than this is not read.
 const REQUEST_MAX: usize = 2048;
 
@@ -929,7 +957,61 @@ impl Web {
     fn new(node: &mut Node) -> Web {
         let s = tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 1024]), tcp::SocketBuffer::new(vec![0; 4096]));
         let socket = node.tun.sockets.add(s);
-        Web { socket, request: Vec::new(), served: 0 }
+        Web { socket, net_socket: None, net_failed: None, answered: None, request: Vec::new(), served: 0 }
+    }
+
+    /// `step` in form B: the same on a `svc:net` socket.
+    fn step_net(&mut self, net: &Rc<RefCell<Net>>, node: &Node, body: impl FnOnce(&Node) -> String) {
+        let mut n = net.borrow_mut();
+        let Some(s) = self.net_socket else {
+            if self.net_failed.is_some_and(|at| now_ms() - at < WEB_RETRY_MS) {
+                return;
+            }
+            self.request.clear();
+            match n.tcp_listen_at(0, t5_rt::net::link::TS0, WEB_PORT) {
+                Ok(s) => {
+                    self.net_socket = Some(s);
+                    self.net_failed = None;
+                }
+                Err(e) => {
+                    // Once per run of failures.
+                    if self.net_failed.is_none() {
+                        event!(Debug, "ts.web_listen", status = net_status(e));
+                    }
+                    self.net_failed = Some(now_ms());
+                }
+            }
+            return;
+        };
+        let state = n.tcp_state(s).map_or(t5_rt::net::state::CLOSED, |st| st.0);
+        let late = self.answered.is_some_and(|at| now_ms() - at > WEB_LINGER_MS);
+        if state == t5_rt::net::state::CLOSED || state == t5_rt::net::state::CLOSING || late {
+            let _ = n.close(s);
+            self.net_socket = None;
+            self.answered = None;
+            return;
+        }
+        if self.answered.is_some() {
+            return;
+        }
+        if state != t5_rt::net::state::ESTABLISHED {
+            return;
+        }
+        let mut buf = [0u8; 512];
+        let room = REQUEST_MAX - self.request.len();
+        if let Ok(r) = n.recv_now(s, &mut buf[..room.min(512)]) {
+            self.request.extend_from_slice(&buf[..r.len]);
+        }
+        let whole = self.request.windows(4).any(|w| w == b"\r\n\r\n") || self.request.len() == REQUEST_MAX;
+        if !whole {
+            return;
+        }
+        let body = body(node);
+        let head = alloc::format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        let _ = n.send_all(s, head.as_bytes()).and_then(|_| n.send_all(s, body.as_bytes()));
+        self.request.clear();
+        self.served += 1;
+        self.answered = Some(now_ms());
     }
 
     /// Listens again once the last connection is gone; answers a whole

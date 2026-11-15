@@ -77,6 +77,7 @@ pass in on wlan0 proto udp port 5540
 pass in on wlan0 proto udp port 5353
 pass in on wlan0 proto udp port 41641
 pass in on ts0 proto icmp
+pass in on ts0 proto tcp port 80
 pass forward on host
 pass forward on ts0
 pass forward state established,related
@@ -93,6 +94,7 @@ pass in on wlan0 proto udp port 5540
 pass in on wlan0 proto udp port 5353
 pass in on wlan0 proto udp port 41641
 pass in on ts0 proto icmp
+pass in on ts0 proto tcp port 80
 pass forward on host
 pass forward on ts0
 pass forward state established,related
