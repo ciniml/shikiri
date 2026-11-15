@@ -133,3 +133,5 @@
 - 実機で端から端まで試すには、管理画面での承認と、経路を受け入れる相手（`--accept-routes`）が要る。ホストの設定は変えない約束なので、利用者と相談する。
 
 - 実機（広告まで）: ts と netctl を入れ直し、`netctl 7`（SD の `NET.RUL` を書き直し）と `netctl 2`（規則 9）。`keys cfg set ts.routes 192.168.8.0/24\n` の後に ts を起動し直すと `ts.routes count=1 first=192.168.8.0/24`。ホストの `tailscale status` では、承認前なので tab5 の `PrimaryRoutes` は空、`AllowedIPs` は自分のアドレスだけ。承認と、LAN の外の相手からの試験は利用者が行う（ホストは同じ LAN にいるので経路を受け入れない）。
+
+- 実機（端から端まで、2026-11-16）: 管理画面で承認しても、はじめは他の端末に経路が配られなかった。tailnet の ACL が grants で、宛て先に 192.168.8.0/24 を含む許可がなかったため（grants では、許可のない subnet route は承認済みでも配られない）。利用者が `autogroup:member` → 192.168.8.0/24 の grant（と autoApprovers）を足すと、LAN の外の端末から Tab5 を経て LAN の機器へつながった。Tab5 側の変更は要らなかった。ホストから見た tab5 の `PrimaryRoutes` は空のまま（ホストが grant の対象外かは未確認）。
