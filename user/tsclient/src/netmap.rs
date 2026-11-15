@@ -80,6 +80,10 @@ pub struct Node {
     #[serde(rename = "HomeDERP")]
     pub home_derp: i32,
     pub online: Option<bool>,
+    /// When the node key expires (RFC 3339); the zero time
+    /// (`0001-01-01T00:00:00Z`) if it never does.
+    pub key_expiry: String,
+    pub expired: bool,
 }
 
 impl Node {
@@ -94,6 +98,11 @@ impl Node {
     /// The first IPv4 address (`a.b.c.d`, no prefix length).
     pub fn ipv4(&self) -> Option<[u8; 4]> {
         self.addresses.iter().find_map(|a| parse_v4(a.split('/').next()?))
+    }
+
+    /// When the node key expires (Unix ms); None if it never does.
+    pub fn key_expiry_ms(&self) -> Option<u64> {
+        unix_ms(&self.key_expiry)
     }
 
     /// The home DERP region, 0 if none.
@@ -123,6 +132,9 @@ pub fn unix_ms(s: &str) -> Option<u64> {
     }
     let n = |r: core::ops::Range<usize>| s.get(r)?.parse::<u64>().ok();
     let (y, mo, d, h, mi, sec) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    if y < 1970 {
+        return None;
+    }
     let mut ms = 0;
     if b[19] == b'.' {
         let frac = &s[20..s.len() - 1];

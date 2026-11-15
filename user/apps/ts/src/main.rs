@@ -1051,7 +1051,7 @@ fn status(node: &Node, hostname: &str, region: i32, derp: &str, started: u64) ->
     let ip = node.netmap.self_ipv4().unwrap_or_default();
     let s = node.stats;
     let mut t = alloc::format!(
-        "tab5-os ts\nhostname {hostname}\naddress {}.{}.{}.{}\nderp {region} {derp}\nup {} s\npeers {}\nhandshakes {}\npackets in {} out {}\necho replies {}\ndropped {} ({})\n\n",
+        "tab5-os ts\nhostname {hostname}\naddress {}.{}.{}.{}\nderp {region} {derp}\nup {} s\npeers {}\nhandshakes {}\npackets in {} out {}\necho replies {}\ndropped {} ({})\n",
         ip[0], ip[1], ip[2], ip[3],
         (now_ms() - started) / 1000,
         node.netmap.peers.len(),
@@ -1062,6 +1062,10 @@ fn status(node: &Node, hostname: &str, region: i32, derp: &str, started: u64) ->
         s.dropped,
         node.last_drop
     );
+    t += &match node.key_days(now_ms()) {
+        Some(d) => alloc::format!("key expires in {d} days\n\n"),
+        None => "key never expires\n\n".into(),
+    };
     for p in &node.netmap.peers {
         let name = p.name.split('.').next().unwrap_or("");
         let online = match p.online {
@@ -1104,4 +1108,15 @@ fn log_map(node: &Node, bytes: usize) {
     let ip = node.netmap.self_ipv4().map_or(0, u32::from_be_bytes);
     let (region, derp) = node.netmap.home_derp().map_or((0, ""), |(r, n)| (r.region_id, n.host_name.as_str()));
     event!(Info, "ts.map", bytes = bytes, ip = ip, peers = node.netmap.peers.len(), regions = node.netmap.derp.regions.len(), home = region as u32, derp = derp, clock = node.clock.is_some(), acl_rules = node.netmap.filter.as_ref().map_or(-1, |f| f.len() as i32));
+    if let Some(days) = node.key_days(now_ms()) {
+        // Past expiry the control server asks for a login again (`ts.login`).
+        if days < KEY_WARN_DAYS {
+            event!(Warn, "ts.key_expiry", days = days as i32);
+        } else {
+            event!(Info, "ts.key_expiry", days = days as i32);
+        }
+    }
 }
+
+/// Warn when the node key has fewer days than this left.
+const KEY_WARN_DAYS: i64 = 14;

@@ -586,3 +586,13 @@ T4 を 2 つに分けた。T4a は `ts` の中に IP スタックを置き（§3
 - `svc:ts` のクライアントの枠は 2 のまま。shell の `ts` と、`for_host` で開いた接続が枠を一時的に使う。
 
 - 実機: shell・ts・ota を入れ直した。Tab5 の端末で `ping prometheus`（短い名前）が tailnet の 100.x へ返り、`ping example.com` は今までどおり `svc:net` の DNS で引けて返った（利用者が確認）。
+
+### 14.17 node key の期限（2026-11-16）
+- Tailscale の node key には期限がある（既定 180 日）。ホストの `tailscale status --json` で見ると、Tab5 の node の `KeyExpiry` は 2027-05-09。期限を過ぎると相手とつながらなくなり、次の登録でログインを求められる。
+- Go のクライアントは、期限切れと対話のログインのときに node key を作り直す（`OldNodeKey` に古い鍵）。Tailnet Lock のある tailnet では、新しい鍵にも `tailscale lock sign` が要る。署名なしで入れ替えるには Tailnet Lock の鍵（`NLKey`）と入れ替えの署名（`SigRotation`）が要り、ts はまだ持っていない。
+- ts は鍵を作り直さない（`OldNodeKey` も今の鍵、§14.15 のログインはそのまま使う）。期限切れの後に同じ鍵でログインし直して通るかは、まだ確かめていない。
+- 足したもの:
+  - netmap の自分のノードの `KeyExpiry` と `Expired`（tsclient `netmap::Node`）。期限なしはゼロの時刻（`0001-01-01T00:00:00Z`）で、`unix_ms` は 1970 年より前を None にする。
+  - `Node::key_days`: 残りの日数を制御サーバの時計で（期限なしや時計がまだなら None）。試験 `key_days`。tsclient の試験は 26。
+  - `ts` は最初の map の後に `ts.key_expiry days`（残りが 14 日を切れば Warn）。状態のページに `key expires in N days` か `key never expires`。
+- 期限で止まらないようにするには、管理画面でこの node の「Disable key expiry」を選ぶのが手っ取り早い（ほかの常に動く機器と同じ扱い）。利用者が決める。

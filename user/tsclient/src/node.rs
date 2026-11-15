@@ -204,6 +204,14 @@ impl Node {
         Ok(r)
     }
 
+    /// Days until this node's key expires (negative once it has), by the
+    /// control server's clock; None if it never expires or no clock yet.
+    pub fn key_days(&self, now_ms: u64) -> Option<i64> {
+        let expiry = self.netmap.node.as_ref()?.key_expiry_ms()? as i64;
+        let (unix, at) = self.clock?;
+        Some((expiry - (unix + now_ms.saturating_sub(at)) as i64).div_euclid(86_400_000))
+    }
+
     /// Now as TAI64N (WireGuard's timestamp), from the control server's
     /// clock.
     pub fn tai64n(&self, now_ms: u64) -> Option<[u8; 12]> {
@@ -564,6 +572,20 @@ mod tests {
         let out = n.poll(&mut Zero, 0);
         // A handshake initiation (148 bytes) to the peer through DERP.
         assert_eq!((out.len(), out[0].0, out[0].1.len()), (1, Dest::Derp([2; 32]), 148));
+    }
+
+    /// Days left on the node key, by the control server's clock; none
+    /// for the zero time (expiry disabled).
+    #[test]
+    fn key_days() {
+        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero, 0);
+        n.apply_map(br#"{"Node":{"ID":1,"KeyExpiry":"2026-11-25T12:00:00Z"}}"#, 0).unwrap();
+        assert_eq!(n.key_days(0), None);
+        n.apply_map(br#"{"ControlTime":"2026-11-15T00:00:00Z"}"#, 1000).unwrap();
+        assert_eq!(n.key_days(1000), Some(10));
+        assert_eq!(n.key_days(1000 + 11 * 86_400_000), Some(-1));
+        n.apply_map(br#"{"Node":{"ID":1,"KeyExpiry":"0001-01-01T00:00:00Z"}}"#, 0).unwrap();
+        assert_eq!(n.key_days(1000), None);
     }
 
     struct Zero;
