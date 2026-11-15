@@ -67,3 +67,5 @@ Shikiri は [Boost Software License 1.0](LICENSE) で公開する。各ソース
 
 `third_party/` の中は、それぞれ元のライセンスのまま（smoltcp は 0BSD、embedded-tls は Apache-2.0、embedded-sdmmc は MIT または Apache-2.0、フォントの Noto Sans JP と Terminus は SIL Open Font License 1.1）。各ディレクトリのライセンスの文書と [third_party/README.md](third_party/README.md) を見ること。
 
+ESP32-P4 のドライバ（`kernel/src/platform/esp32p4v1.rs` と `kernel/src/platform/esp32p4v1/`）は、ESP-IDF 6.0（Espressif Systems、Apache-2.0）のヘッダとソースを読んで、レジスタのアドレス、初期化の手順と値を Rust で書いた。C のコードは写していない。`psram.rs` の `TEST_DATA`（DQS の調整に使う試験パターン）だけは ESP-IDF の `mspi_timing_by_dqs.c` から写した。表記は [NOTICE](NOTICE)、Apache-2.0 の全文は [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt) にある。
+

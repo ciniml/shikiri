@@ -1,0 +1,24 @@
+Shikiri
+Copyright (c) 2026 Kenta IDA
+Distributed under the Boost Software License, Version 1.0 (LICENSE).
+
+This product includes material derived from ESP-IDF
+(https://github.com/espressif/esp-idf), Copyright Espressif Systems
+(Shanghai) CO LTD, licensed under the Apache License, Version 2.0
+(LICENSES/Apache-2.0.txt).
+
+- The ESP32-P4 drivers under kernel/src/platform/esp32p4v1.rs and
+  kernel/src/platform/esp32p4v1/ were written in Rust by reading
+  ESP-IDF 6.0's headers and sources: register addresses and fields,
+  initialisation sequences and values (clock and PVT, PSRAM, I2C, entropy,
+  SD, MIPI DSI, EMAC, PPA/DMA2D, cache and start-up). Each file names the
+  ESP-IDF files it follows. No C code was copied.
+- kernel/src/platform/esp32p4v1/psram.rs: TEST_DATA (the DQS tuning
+  pattern) is copied from components/esp_hw_support/mspi_timing_by_dqs.c
+  (s_test_data), SPDX-FileCopyrightText: 2023-2024 Espressif Systems
+  (Shanghai) CO LTD, SPDX-License-Identifier: Apache-2.0.
+
+The second-stage bootloader that boot/ configures is built from ESP-IDF
+and is not part of this repository.
+
+Code under third_party/ keeps its own licence; see third_party/README.md.

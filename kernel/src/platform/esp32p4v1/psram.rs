@@ -429,6 +429,9 @@ fn axi_init() {
 
 // ---- DQS timing tuning (mspi_timing_tuning.c, mspi_timing_by_dqs.c) -------
 const TEST_ADDR: u32 = 0x80;
+// Copied from ESP-IDF esp_hw_support/mspi_timing_by_dqs.c (s_test_data).
+// SPDX-FileCopyrightText: 2023-2024 Espressif Systems (Shanghai) CO LTD
+// SPDX-License-Identifier: Apache-2.0 (see NOTICE)
 const TEST_DATA: [u32; 32] = [
     0x7f786655, 0xa5ff005a, 0x3f3c33aa, 0xa5ff5a00, 0x1f1e9955, 0xa5005aff, 0x0f0fccaa, 0xa55a00ff, 0x07876655, 0xffa55a00,
     0x03c333aa, 0xff00a55a, 0x01e19955, 0xff005aa5, 0x00f0ccaa, 0xff5a00a5, 0x80786655, 0x00a5ff5a, 0xc03c33aa, 0x00a55aff,
