@@ -135,3 +135,15 @@
 - 実機（広告まで）: ts と netctl を入れ直し、`netctl 7`（SD の `NET.RUL` を書き直し）と `netctl 2`（規則 9）。`keys cfg set ts.routes 192.168.8.0/24\n` の後に ts を起動し直すと `ts.routes count=1 first=192.168.8.0/24`。ホストの `tailscale status` では、承認前なので tab5 の `PrimaryRoutes` は空、`AllowedIPs` は自分のアドレスだけ。承認と、LAN の外の相手からの試験は利用者が行う（ホストは同じ LAN にいるので経路を受け入れない）。
 
 - 実機（端から端まで、2026-11-16）: 管理画面で承認しても、はじめは他の端末に経路が配られなかった。tailnet の ACL が grants で、宛て先に 192.168.8.0/24 を含む許可がなかったため（grants では、許可のない subnet route は承認済みでも配られない）。利用者が `autogroup:member` → 192.168.8.0/24 の grant（と autoApprovers）を足すと、LAN の外の端末から Tab5 を経て LAN の機器へつながった。Tab5 側の変更は要らなかった。ホストから見た tab5 の `PrimaryRoutes` は空のまま（ホストが grant の対象外かは未確認）。
+
+## 12. 直の経路の確認と、15 秒ごとのハンドシェイク（2026-11-16）
+- 利用者の「1からすすめて」（直の経路が使われていないように見えた件）で調べた。
+- 直の経路は壊れていなかった。shell の `ts` の `derp` は、通信のない相手の直の経路を 15 秒で手放した後の表示（§14.1 の 15 秒）。ホストの `tailscale ping` は、続けて打つと直の経路（Tab5 の手前のルータの外側の IPv4、または Tab5 の ULA）になり、往復は約 20 ms。ICMP の ping の最短は約 5 ms。通信のない間の後の 1 パケット目は、経路ができるまで遅い（200〜400 ms）。
+- 見つけたこと: `filtered`（ACL が捨てた数）とハンドシェイクが、15 秒ごとに 1 つずつ増え続けていた（約 1 時間で 251）。
+  - 捨てたパケットを 1 行で出すようにした（`filter::describe`、イベント `ts.filtered`。始めの 8 つと、その後は 64 に 1 つ）。中身は、利用者のスマホからの IP プロトコル 99（TSMP）、53 バイト、種類 `'a'`（disco key の広告、IP ヘッダ 20 + 種類 1 + 鍵 32）。
+  - 原因: WireGuard の受け手が返す keepalive（KEEPALIVE_TIMEOUT、whitepaper §6.5）がなかった。相手はハンドシェイクの後に TSMP を送り、Tab5 は返すものがないので何も送らない。相手は 15 秒（KEEPALIVE + REKEY_TIMEOUT）返事がないのでハンドシェイクをやり直し、また TSMP を送る、を繰り返していた。
+- 直したもの:
+  - `wg::Device`: 認証の通ったデータを受けて、何も送らないまま `KEEPALIVE_MS`（10 秒）経てば `keepalive_due`。`Node::poll` が空のメッセージを送る（統計 `keepalives`）。送れば消える。
+  - `Node`: IP プロトコル 99（TSMP）は ACL の前で取り、数えるだけ（統計 `tsmp`）。本家は TSMP の ping に pong を返し、disco key の広告で相手の disco key を更新するが、今は netmap の disco key で足りている。
+  - 試験: `wg::tests::passive_keepalive`、`filter::tests::describe`（tsclient 25）。
+- 実機: ts を入れ直して約 130 秒で、ハンドシェイク 3（前は 15 秒に 1）、`tsmp=2`、`keepalives=1`、`filtered=0`。ホストからの ping は 10 回が 2 回とも全部返った。B3 の `filtered=1` もこれだった（IPv6 ではなかった）。

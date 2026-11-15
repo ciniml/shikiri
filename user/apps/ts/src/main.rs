@@ -100,6 +100,9 @@ const RELAY_IDLE_MS: u64 = 60_000;
 const RELAY_RETRY_MS: u64 = 30_000;
 /// UDP sends finding the queue full this long: the socket is made anew.
 const UDP_STUCK_MS: u64 = 1_000;
+/// `ts.filtered` for each of the first this many packets the ACL turns
+/// away, then for one in 64.
+const FILTERED_SHOWN: u32 = 8;
 /// A read on a TLS connection that waits this long for bytes fails (the
 /// servers send keep-alives about every minute, but a read starts only
 /// when bytes wait or during a handshake: the rest of a record comes in
@@ -657,6 +660,10 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
             direct = d;
         }
         if (s.handshakes, s.initiations, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.initiations, shown.echo_replies, shown.dropped, shown_web) {
+            // What the ACL turned away: the first few, then one in 64.
+            if s.filtered != shown.filtered && (s.filtered <= FILTERED_SHOWN || s.filtered % 64 == 0) {
+                event!(Info, "ts.filtered", count = s.filtered, packet = node.last_filtered.as_str());
+            }
             if node.last_drop == "unknown peer" {
                 let k = tsclient::keys::to_hex("", &node.wg.unknown);
                 event!(Warn, "ts.unknown_peer", key = &k[..16], wg_peers = node.wg.peers.len(), map_peers = node.netmap.peers.len());
@@ -675,6 +682,8 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                 udp_in = s.udp_in,
                 dropped = s.dropped,
                 filtered = s.filtered,
+                tsmp = s.tsmp,
+                keepalives = s.keepalives,
                 last_drop = node.last_drop
             );
             shown = s;

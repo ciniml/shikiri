@@ -23,6 +23,7 @@
 //! NATs on the way keep the mapping, through gaps in the traffic.
 
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec::Vec;
 use rand_core::CryptoRngCore;
 
@@ -79,7 +80,14 @@ pub struct Stats {
     pub heartbeats: u32,
     /// Packets from peers the ACL turned away (doc/72 B3).
     pub filtered: u32,
+    /// TSMP messages from peers (IP protocol 99), taken before the ACL.
+    pub tsmp: u32,
+    /// Empty WireGuard messages sent back to data nothing else answered.
+    pub keepalives: u32,
 }
+
+/// IP protocol of Tailscale's messages between nodes (TSMP).
+const TSMP: u8 = 99;
 
 /// Packets that may wait for handshakes, in all.
 const WAITING_MAX: usize = 16;
@@ -91,6 +99,8 @@ pub struct Node {
     pub stats: Stats,
     /// Why the last packet was dropped.
     pub last_drop: &'static str,
+    /// The last packet the ACL turned away, in a line (`filter::describe`).
+    pub last_filtered: String,
     /// The control server's clock: (Unix ms, our ms then).
     pub clock: Option<(u64, u64)>,
     /// To send: (where, message).
@@ -140,6 +150,7 @@ impl Node {
             tun,
             stats: Stats::default(),
             last_drop: "",
+            last_filtered: String::new(),
             clock: None,
             out: Vec::new(),
             disco,
@@ -235,8 +246,16 @@ impl Node {
             Received::Packet { packet, peer } => {
                 self.stats.packets_in += 1;
                 mark(&mut self.active, self.wg.peers[peer].key, now_ms);
+                // Tailscale's own messages (TSMP), not the ACL's: a peer
+                // tells its disco key after each handshake ('a'). Nothing
+                // here needs them yet.
+                if packet.get(9) == Some(&TSMP) {
+                    self.stats.tsmp += 1;
+                    return;
+                }
                 if !self.filter.allows(&packet, now_ms) {
                     self.stats.filtered += 1;
+                    self.last_filtered = crate::filter::describe(&packet);
                     self.drop("filtered by the ACL");
                     return;
                 }
@@ -328,6 +347,14 @@ impl Node {
             self.send(peer, &p, rng, now_ms);
         }
         self.heartbeat(rng, now_ms);
+        for peer in 0..self.wg.peers.len() {
+            if self.wg.keepalive_due(peer, now_ms) {
+                if let Some(m) = self.wg.encrypt(peer, &[], now_ms) {
+                    self.stats.keepalives += 1;
+                    self.out.push((self.dest(peer, now_ms), m));
+                }
+            }
+        }
         let out = core::mem::take(&mut self.out);
         self.stats.udp_out += out.iter().filter(|(d, _)| matches!(d, Dest::Udp(..))).count() as u32;
         out

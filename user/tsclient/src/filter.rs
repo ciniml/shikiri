@@ -19,6 +19,8 @@
 //! one of `DstPorts` (address and port range). Without a filter from the
 //! control server nothing passes.
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use serde::Deserialize;
 
@@ -136,6 +138,37 @@ fn parse(p: &[u8]) -> Option<Packet> {
     Some(pk)
 }
 
+/// Packet `p` in a line, for the log of what the ACL turned away:
+/// `tcp 100.64.0.2:40000 > 100.64.0.1:22 syn`, `udp …`, `icmp … type 8`,
+/// `v6 next=58 len=64` (IPv6: the header's next protocol only).
+pub fn describe(p: &[u8]) -> String {
+    if p.first().is_some_and(|b| b >> 4 == 6) && p.len() >= 40 {
+        return format!("v6 next={} len={}", p[6], p.len());
+    }
+    let Some(pk) = parse(p) else { return format!("? len={}", p.len()) };
+    let ip = |a: u32| {
+        let b = a.to_be_bytes();
+        format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
+    };
+    match pk.proto {
+        TCP | UDP => {
+            let name = if pk.proto == TCP { "tcp" } else { "udp" };
+            let syn = if pk.first { " syn" } else { "" };
+            format!("{} {}:{} > {}:{}{}", name, ip(pk.src), pk.src_port, ip(pk.dst), pk.dst_port, syn)
+        }
+        ICMP => {
+            let ihl = (p[0] as usize & 0xF) * 4;
+            format!("icmp {} > {} type {}", ip(pk.src), ip(pk.dst), p.get(ihl).copied().unwrap_or(0))
+        }
+        n => {
+            // The first bytes after the header (TSMP, proto 99: its type).
+            let ihl = (p[0] as usize & 0xF) * 4;
+            let head: String = p.get(ihl..).unwrap_or(&[]).iter().take(4).map(|b| format!("{:02x}", b)).collect();
+            format!("proto {} {} > {} len={} head={}", n, ip(pk.src), ip(pk.dst), p.len(), head)
+        }
+    }
+}
+
 impl Filter {
     /// Takes the control server's rules (a whole `PacketFilter`).
     pub fn set(&mut self, rules: &[FilterRule]) {
@@ -224,6 +257,16 @@ mod tests {
     const ME: [u8; 4] = [100, 64, 0, 1];
     const LAPTOP: [u8; 4] = [100, 64, 0, 2];
     const OTHER: [u8; 4] = [100, 64, 0, 3];
+
+    #[test]
+    fn describe() {
+        assert_eq!(super::describe(&tcp(LAPTOP, ME, 22, 0x02)), "tcp 100.64.0.2:40000 > 100.64.0.1:22 syn");
+        assert_eq!(super::describe(&udp(LAPTOP, 5000, ME, 53)), "udp 100.64.0.2:5000 > 100.64.0.1:53");
+        assert_eq!(super::describe(&ip(ICMP, LAPTOP, ME, &[8, 0, 0, 0])), "icmp 100.64.0.2 > 100.64.0.1 type 8");
+        let mut v6 = alloc::vec![0x60u8; 48];
+        v6[6] = 58;
+        assert_eq!(super::describe(&v6), "v6 next=58 len=48");
+    }
 
     #[test]
     fn acl() {

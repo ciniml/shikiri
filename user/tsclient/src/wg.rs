@@ -43,6 +43,10 @@ const REKEY_AFTER_MS: u64 = 120_000;
 /// An initiation unanswered this long is sent again (REKEY_TIMEOUT).
 const REKEY_TIMEOUT_MS: u64 = 5_000;
 const WINDOW: u64 = 64;
+/// Data received and nothing sent back this long: an empty message goes
+/// back (KEEPALIVE_TIMEOUT, passive keep-alive). Without it the sender,
+/// hearing nothing for KEEPALIVE + REKEY_TIMEOUT, starts a new handshake.
+const KEEPALIVE_MS: u64 = 10_000;
 
 fn hash(parts: &[&[u8]]) -> [u8; 32] {
     let mut d = Blake2s256::new();
@@ -138,6 +142,8 @@ pub struct Peer {
     current: Option<Session>,
     previous: Option<Session>,
     pending: Option<Pending>,
+    /// When data came in that nothing sent has answered yet.
+    unanswered: Option<u64>,
 }
 
 /// What `Device::receive` made of a message.
@@ -189,7 +195,7 @@ impl Device {
                     p.ip = ip;
                     self.peers.push(p);
                 }
-                None => self.peers.push(Peer { key, ip, last_timestamp: [0; 12], next: None, current: None, previous: None, pending: None }),
+                None => self.peers.push(Peer { key, ip, last_timestamp: [0; 12], next: None, current: None, previous: None, pending: None, unanswered: None }),
             }
         }
     }
@@ -354,6 +360,12 @@ impl Device {
         Received::Established { peer: pi }
     }
 
+    /// Peer `peer` sent data `KEEPALIVE_MS` ago that nothing has answered:
+    /// send it an empty message (`encrypt` of nothing).
+    pub fn keepalive_due(&self, peer: usize, now_ms: u64) -> bool {
+        self.peers.get(peer).and_then(|p| p.unanswered).is_some_and(|at| now_ms.saturating_sub(at) >= KEEPALIVE_MS)
+    }
+
     /// Peer `peer` has a session to send on now.
     pub fn can_send(&self, peer: usize, now_ms: u64) -> bool {
         self.peers.get(peer).and_then(|p| p.current.as_ref()).is_some_and(|s| now_ms.saturating_sub(s.at_ms) <= REJECT_AFTER_MS)
@@ -399,6 +411,7 @@ impl Device {
             if pt.is_empty() {
                 return Received::Nothing("keep-alive");
             }
+            p.unanswered.get_or_insert(now_ms);
             // The packet's own length (padding dropped), from a source the
             // peer may use.
             let Some(len) = ipv4_len(&pt) else { return Received::Nothing("not ipv4") };
@@ -414,7 +427,9 @@ impl Device {
     /// The transport message carrying `packet` to peer `peer`, if a
     /// session is up.
     pub fn encrypt(&mut self, peer: usize, packet: &[u8], now_ms: u64) -> Option<Vec<u8>> {
-        let s = self.peers.get_mut(peer)?.current.as_mut()?;
+        let p = self.peers.get_mut(peer)?;
+        p.unanswered = None;
+        let s = p.current.as_mut()?;
         if now_ms.saturating_sub(s.at_ms) > REJECT_AFTER_MS {
             return None;
         }
@@ -571,6 +586,35 @@ mod tests {
         // Ours is replaced after REKEY_AFTER_TIME.
         assert!(a.wants_handshake(0, 121_000));
         assert!(!b.wants_handshake(0, 121_000));
+    }
+
+    /// Data nothing answers gets an empty message back after
+    /// KEEPALIVE_TIMEOUT; a keep-alive itself does not.
+    #[test]
+    fn passive_keepalive() {
+        let mut rng = Counter(11);
+        let (ka, kb) = (KeyPair::from_private([6; 32]), KeyPair::from_private([7; 32]));
+        let mut a = Device::new(ka.clone(), &mut rng);
+        let mut b = Device::new(kb.clone(), &mut rng);
+        a.set_peers([(kb.public, [100, 64, 0, 2])].into_iter());
+        b.set_peers([(ka.public, [100, 64, 0, 1])].into_iter());
+        let m = a.initiate(0, [0, 0, 0, 0, 0x40, 0, 0, 1, 0, 0, 0, 0], &mut rng, 0).unwrap();
+        let Received::Reply(r) = b.receive(Some(&ka.public), &m, &mut rng, 0) else { panic!() };
+        a.receive(Some(&kb.public), &r, &mut rng, 0);
+        let ip = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 99, 0, 0, 100, 64, 0, 1, 100, 64, 0, 2];
+        let t = a.encrypt(0, &ip, 1_000).unwrap();
+        assert!(matches!(b.receive(Some(&ka.public), &t, &mut rng, 1_000), Received::Packet { .. }));
+        assert!(!b.keepalive_due(0, 10_999));
+        assert!(b.keepalive_due(0, 11_000));
+        let k = b.encrypt(0, &[], 11_000).unwrap();
+        assert!(!b.keepalive_due(0, 30_000));
+        assert_eq!(a.receive(Some(&kb.public), &k, &mut rng, 11_000), Received::Nothing("keep-alive"));
+        assert!(!a.keepalive_due(0, 30_000));
+        // An answer within the time: nothing more to send.
+        let t = a.encrypt(0, &ip, 31_000).unwrap();
+        b.receive(Some(&ka.public), &t, &mut rng, 31_000);
+        b.encrypt(0, &ip, 32_000).unwrap();
+        assert!(!b.keepalive_due(0, 50_000));
     }
 
     #[test]
