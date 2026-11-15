@@ -93,6 +93,9 @@ pub struct Stats {
     pub keepalives: u32,
     /// Messages also sent to a direct path kept from before (`PATH_KEEP_MS`).
     pub kept_sends: u32,
+    /// Handshakes begun for a peer sending on a session this node does not
+    /// have (from before it started).
+    pub unknown_sessions: u32,
 }
 
 /// IP protocol of Tailscale's messages between nodes (TSMP).
@@ -286,11 +289,37 @@ impl Node {
                 let ip = self.wg.peers[peer].ip;
                 let (now, later): (VecDeque<_>, VecDeque<_>) = core::mem::take(&mut self.waiting).into_iter().partition(|(d, _)| *d == ip);
                 self.waiting = later;
+                if now.is_empty() {
+                    // The peer takes the session once something comes on
+                    // it (as wireguard-go after a response).
+                    if let Some(m) = self.wg.encrypt(peer, &[], now_ms) {
+                        self.stats.keepalives += 1;
+                        self.push(peer, m, rng, now_ms);
+                    }
+                }
                 for (_, p) in now {
                     self.send(peer, &p, rng, now_ms);
                 }
             }
             Received::Nothing("keep-alive") => {}
+            Received::Nothing("no session") => {
+                self.drop("no session");
+                // The peer still sends on a session from before this node
+                // started: a handshake now spares it waiting out
+                // REKEY_TIMEOUT (its first TCP took 7 s or more).
+                if let Some(peer) = self.peer_at(from)
+                    && self.wg.wants_handshake(peer, now_ms)
+                {
+                    match self.tai64n(now_ms).and_then(|t| self.wg.initiate(peer, t, rng, now_ms)) {
+                        Some(m) => {
+                            self.stats.initiations += 1;
+                            self.stats.unknown_sessions += 1;
+                            self.push(peer, m, rng, now_ms);
+                        }
+                        None => self.drop("no clock to initiate"),
+                    }
+                }
+            }
             Received::Nothing(why) => self.drop(why),
         }
     }
@@ -427,6 +456,19 @@ impl Node {
         let ula = ip[0] & 0xFE == 0xFC;
         let global = ip[0] & 0xE0 == 0x20;
         ula || global && self.global_v6
+    }
+
+    /// The WireGuard peer that sends from `from`: the DERP node key, or a
+    /// direct path or endpoint of its.
+    fn peer_at(&self, from: Dest) -> Option<usize> {
+        let key = match from {
+            Dest::Derp(k) => k,
+            Dest::Udp(a) => match self.direct.iter().find(|d| d.1 == a) {
+                Some(d) => d.0,
+                None => self.netmap.peers.iter().find(|p| p.endpoints.iter().any(|e| parse_endpoint(e) == Some(a)))?.node_key()?,
+            },
+        };
+        self.wg.peers.iter().position(|p| p.key == key)
     }
 
     /// The last direct path to the peer with node key `key`, in use now or
@@ -572,6 +614,34 @@ mod tests {
         let out = n.poll(&mut Zero, 0);
         // A handshake initiation (148 bytes) to the peer through DERP.
         assert_eq!((out.len(), out[0].0, out[0].1.len()), (1, Dest::Derp([2; 32]), 148));
+    }
+
+    /// A peer still on a session from before this node started: its
+    /// message gets a handshake back at once, and the response a
+    /// keep-alive the peer takes the new session on.
+    #[test]
+    fn unknown_session() {
+        let peer = KeyPair::from_private([2; 32]);
+        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero, 0);
+        let json = alloc::format!(r#"{{"Node":{{"ID":1,"Addresses":["100.64.0.1/32"]}},"Peers":[{{"ID":2,"Key":"nodekey:{}","Addresses":["100.64.0.6/32"]}}],"ControlTime":"2026-11-15T00:00:00Z"}}"#, crate::keys::to_hex("", &peer.public));
+        n.apply_map(json.as_bytes(), 0).unwrap();
+        let mut stale = alloc::vec![0u8; 32];
+        stale[0] = 4;
+        stale[4] = 0x77;
+        n.from_derp(&peer.public, &stale, &mut Zero, 10);
+        let out = n.poll(&mut Zero, 10);
+        assert_eq!((n.stats.unknown_sessions, out.len(), out[0].0, out[0].1.len()), (1, 1, Dest::Derp(peer.public), 148));
+        // Not again while that initiation is out.
+        n.from_derp(&peer.public, &stale, &mut Zero, 20);
+        assert!(n.poll(&mut Zero, 20).is_empty());
+        let mut p = crate::wg::Device::new(peer.clone(), &mut Zero);
+        p.set_peers([(KeyPair::from_private([1; 32]).public, [100, 64, 0, 1])].into_iter());
+        let Received::Reply(r) = p.receive(Some(&KeyPair::from_private([1; 32]).public), &out[0].1, &mut Zero, 30) else { panic!() };
+        n.from_derp(&peer.public, &r, &mut Zero, 40);
+        let out = n.poll(&mut Zero, 40);
+        assert_eq!((out.len(), n.stats.keepalives), (1, 1));
+        assert_eq!(p.receive(Some(&KeyPair::from_private([1; 32]).public), &out[0].1, &mut Zero, 50), Received::Nothing("keep-alive"));
+        assert!(p.can_send(0, 50));
     }
 
     /// Days left on the node key, by the control server's clock; none

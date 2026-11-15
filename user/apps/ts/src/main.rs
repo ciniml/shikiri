@@ -699,6 +699,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                 tsmp = s.tsmp,
                 keepalives = s.keepalives,
                 kept_sends = s.kept_sends,
+                unknown_sessions = s.unknown_sessions,
                 last_drop = node.last_drop
             );
             shown = s;

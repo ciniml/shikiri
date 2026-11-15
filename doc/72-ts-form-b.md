@@ -163,3 +163,12 @@
 - `net` のクライアントのソケットを 8 から 12 にした。待ち受けを足すと 8 個がすべて埋まり（`ts` 4、`matter` 3、待ち受け 1）、ほかのアプリ（nettest の ping）がソケットを取れなくなった。足りないときは `net.no_sockets`（どちらが尽きたか、使用数。最初と 64 回に 1 回）。バッファのプール（12、1 つ約 81 KB）はそのまま。`net` は PSRAM の枠 2048 KB のうち 1806 KB を使っていて、プールを足せるのは 2 つまで。
 - 試験: p4emu、virt、emu が通った。
 - 実機: netctl を入れて `netctl 7`・`netctl 2`（規則 10）、ts と net を入れ直して再起動。起動で `net.ready sockets=12`、`net.rules rules=10`。ホストから tailnet で状態のページを続けて 4 回取れた（2 回目から約 25 ms。ts の起動後の 1 回目は約 7 秒で、SYN の再送の形。まだ調べていない）。LAN のアドレスの 80 番は届かない。nettest の ping も通った。
+
+## 15. ts を起動し直した後の最初の TCP（2026-11-16）
+- §14 の残り: ts を起動し直した後、1 回目のページ取得だけが 7〜19 秒かかった。`ts.stats` では、ハンドシェイクの前に `no session` の捨てが 13 個あった。相手（ホスト）は、起動し直す前の ts と結んだセッションのまま送り続け、新しい ts はそのセッションを知らないので捨てていた。相手は返事がないので、KEEPALIVE + REKEY_TIMEOUT（15 秒）の後にハンドシェイクをやり直し、そこでやっと通っていた。
+  - 前のセッションを相手が始めていた（相手が initiator）ときは、相手が送る前に自分からハンドシェイクをし直すことがあり、遅れは出なかった。遅れが出るのは、前のセッションを Tab5 が始めていたとき。
+- 直し（tsclient `Node::received`）:
+  - 知らないセッションの transport が来て、送り主の相手が分かれば（DERP の node key、UDP なら直の経路か netmap の endpoint）、すぐこちらから initiation を送る。initiation がまだ出ている間（REKEY_TIMEOUT）は送らない。統計 `unknown_sessions`。
+  - 自分の initiation に返事が来て、待たせたパケットがなければ keepalive（空の transport）を送る。相手（responder）は、新しいセッションで何か届くまでそれで送らない（wireguard-go も返事の後に keepalive を送る）。
+- 試験: `node::tests::unknown_session`（initiation がすぐ出る、出ている間は繰り返さない、返事に keepalive、相手はそれで新しいセッションで送れる）。tsclient の試験は 27。emu、virt、p4emu が通った。
+- 実機: ts を入れ直し、前のセッションを Tab5 から始めた状態で ts を起動し直した。`no session` 1 つで initiation を出し（`unknown_sessions=1`）、28 ms でつながった。1 回目のページ取得は 1.03 秒（前は 8.1〜19.4 秒）。残りの 1 秒は、捨てた SYN をホストの TCP が再送するまでの時間（最初の再送が 1 秒）。捨てたパケットは解けないので、ここは縮まらない。
