@@ -20,7 +20,9 @@
 //! makes its source the peer's path. While packets go to or come from a
 //! peer on a direct path (`ACTIVE_MS`), a ping goes there every
 //! `HEARTBEAT_MS` (Tailscale's heartbeat): its pong keeps the path, and the
-//! NATs on the way keep the mapping, through gaps in the traffic.
+//! NATs on the way keep the mapping, through gaps in the traffic. A path
+//! that lapsed is kept for `PATH_KEEP_MS`: messages go to it as well as
+//! through DERP, with a ping that confirms it again.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -37,6 +39,11 @@ use crate::wg::{Device, Received};
 /// A peer is sent to over UDP while its messages came that way this
 /// recently.
 const DIRECT_MS: u64 = 15_000;
+/// A direct path no longer confirmed is kept this long: messages go both
+/// to it and through DERP, and a ping there confirms it again (as
+/// Tailscale keeps its bestAddr past trustUDPAddrDuration). The first
+/// packet after a quiet spell then needs no new path.
+const PATH_KEEP_MS: u64 = 600_000;
 /// Trying for a direct path to a peer, at most this often.
 const PROBE_MS: u64 = 5_000;
 /// A peer with packets this recently is active: its direct path is kept
@@ -84,6 +91,8 @@ pub struct Stats {
     pub tsmp: u32,
     /// Empty WireGuard messages sent back to data nothing else answered.
     pub keepalives: u32,
+    /// Messages also sent to a direct path kept from before (`PATH_KEEP_MS`).
+    pub kept_sends: u32,
 }
 
 /// IP protocol of Tailscale's messages between nodes (TSMP).
@@ -351,7 +360,7 @@ impl Node {
             if self.wg.keepalive_due(peer, now_ms) {
                 if let Some(m) = self.wg.encrypt(peer, &[], now_ms) {
                     self.stats.keepalives += 1;
-                    self.out.push((self.dest(peer, now_ms), m));
+                    self.push(peer, m, rng, now_ms);
                 }
             }
         }
@@ -367,6 +376,26 @@ impl Node {
             Some(&(_, a, at)) if now_ms.saturating_sub(at) < DIRECT_MS => Dest::Udp(a),
             _ => Dest::Derp(key),
         }
+    }
+
+    /// Queues WireGuard message `m` for peer `peer`: over UDP on a
+    /// confirmed direct path, else through DERP, and also to a direct path
+    /// kept from before (`PATH_KEEP_MS`), which a ping confirms again.
+    fn push(&mut self, peer: usize, m: Vec<u8>, rng: &mut impl CryptoRngCore, now_ms: u64) {
+        let key = self.wg.peers[peer].key;
+        let dest = self.dest(peer, now_ms);
+        let kept = self.direct.iter().find(|d| d.0 == key && now_ms.saturating_sub(d.2) < PATH_KEEP_MS).map(|d| d.1);
+        if let (Dest::Derp(_), Some(a)) = (&dest, kept) {
+            self.stats.kept_sends += 1;
+            self.out.push((Dest::Udp(a), m.clone()));
+            let since = self.pinged.iter().find(|e| e.0 == key).map(|e| now_ms.saturating_sub(e.1));
+            if since.is_none_or(|t| t >= HEARTBEAT_MS) {
+                if let Some(their_disco) = self.netmap.peers.iter().find(|p| p.node_key() == Some(key)).and_then(|p| p.disco_key()) {
+                    self.ping(key, &their_disco, a, rng, now_ms);
+                }
+            }
+        }
+        self.out.push((dest, m));
     }
 
     /// Peers sent to over UDP now.
@@ -416,7 +445,7 @@ impl Node {
             match self.tai64n(now_ms).and_then(|t| self.wg.initiate(peer, t, rng, now_ms)) {
                 Some(m) => {
                     self.stats.initiations += 1;
-                    self.out.push((self.dest(peer, now_ms), m));
+                    self.push(peer, m, rng, now_ms);
                 }
                 None => self.drop("no clock to initiate"),
             }
@@ -427,7 +456,7 @@ impl Node {
         if self.wg.can_send(peer, now_ms) {
             if let Some(m) = self.wg.encrypt(peer, packet, now_ms) {
                 self.stats.packets_out += 1;
-                self.out.push((self.dest(peer, now_ms), m));
+                self.push(peer, m, rng, now_ms);
             }
             return;
         }
@@ -663,6 +692,7 @@ mod tests {
         let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [8; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });
         n.from_udp(ula, &pong, &mut Zero, t);
         assert_eq!(n.direct_path(&[5; 32], t), Some(ula));
+        let path_at = t;
         let ping = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [6; 24], &Message::Ping { tx: [9; 12], node_key: None });
         n.from_udp(ula, &ping, &mut Zero, t);
         let out = n.poll(&mut Zero, t);
@@ -673,6 +703,24 @@ mod tests {
         let t = n.tai64n(3000).unwrap();
         assert_eq!(u64::from_be_bytes(t[..8].try_into().unwrap()), (1 << 62) + 10 + 1_794_375_111);
         assert_eq!(u32::from_be_bytes(t[8..].try_into().unwrap()), 250_000_000);
+
+        // Past DIRECT_MS the path is no longer confirmed but kept
+        // (PATH_KEEP_MS): an initiation goes both there and through DERP.
+        let at = path_at + DIRECT_MS + 1_000;
+        assert_eq!(n.direct_path(&[5; 32], at), None);
+        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        let out = n.poll(&mut Zero, at);
+        let init = |d: Dest| out.iter().find(|o| o.0 == d && o.1.len() == crate::wg::INITIATION_LEN).map(|o| o.1.clone());
+        assert!(init(Dest::Udp(ula)).is_some());
+        assert_eq!(init(Dest::Udp(ula)), init(Dest::Derp([5; 32])));
+        assert_eq!(n.stats.kept_sends, 1);
+        // Past PATH_KEEP_MS: through DERP alone.
+        let at = path_at + PATH_KEEP_MS + 1_000;
+        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        let out = n.poll(&mut Zero, at);
+        assert!(out.iter().any(|o| o.0 == Dest::Derp([5; 32]) && o.1.len() == crate::wg::INITIATION_LEN));
+        assert!(!out.iter().any(|o| matches!(o.0, Dest::Udp(_)) && o.1.len() == crate::wg::INITIATION_LEN));
+        assert_eq!(n.stats.kept_sends, 1);
     }
 }
 

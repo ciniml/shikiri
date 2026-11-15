@@ -147,3 +147,10 @@
   - `Node`: IP プロトコル 99（TSMP）は ACL の前で取り、数えるだけ（統計 `tsmp`）。本家は TSMP の ping に pong を返し、disco key の広告で相手の disco key を更新するが、今は netmap の disco key で足りている。
   - 試験: `wg::tests::passive_keepalive`、`filter::tests::describe`（tsclient 25）。
 - 実機: ts を入れ直して約 130 秒で、ハンドシェイク 3（前は 15 秒に 1）、`tsmp=2`、`keepalives=1`、`filtered=0`。ホストからの ping は 10 回が 2 回とも全部返った。B3 の `filtered=1` もこれだった（IPv6 ではなかった）。
+
+## 13. 直の経路を長く持つ（2026-11-16）
+- 利用者の「directの経路の保持時間を長くしてください」で進めた。
+- 今まで: 通信のある間（`ACTIVE_MS` 45 秒）は `HEARTBEAT_MS`（3 秒）ごとの disco の ping で経路を確かめ直し、確かめが `DIRECT_MS`（15 秒）途切れると経路を忘れて DERP だけに送っていた。通信のない間が 1 分を超えると、次の 1 パケット目からは経路を探し直すことになる。
+- 本家に寄せた: 確かめの途切れた経路も `PATH_KEEP_MS`（10 分）覚えておく（本家の bestAddr が trustUDPAddrDuration を過ぎても残るのと同じ）。その間に送る WireGuard のメッセージ（データ、ハンドシェイク、keepalive）は、その経路への UDP と DERP の両方に送り、その経路へ disco の ping を出す（`HEARTBEAT_MS` に 1 回まで）。Pong が来れば、また UDP だけに戻る。統計 `kept_sends`。
+- 試験: `node::tests::peers_reach_wireguard` に、`DIRECT_MS` の後はハンドシェイクが UDP と DERP の両方に出ること、`PATH_KEEP_MS` の後は DERP だけになることを足した。tsclient 25、emu、virt が通った。
+- 実機: 90 秒あけた後の 1 パケット目は、直す前が 1,615 ms と 37 ms、直した後が 40 ms、400 ms、35 ms（数が少ないので目安）。`kept_sends=1`。ホストが直の経路で送ってくれば、Tab5 はその受け取りで経路を確かめ直すので、覚えた経路を使うのはホストが DERP で送ってきたときだけ。残る数百 ms は、ts の外（Wi-Fi の省電力など）の可能性があり、まだ調べていない。

@@ -684,6 +684,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                 filtered = s.filtered,
                 tsmp = s.tsmp,
                 keepalives = s.keepalives,
+                kept_sends = s.kept_sends,
                 last_drop = node.last_drop
             );
             shown = s;
