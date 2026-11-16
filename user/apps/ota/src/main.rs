@@ -94,7 +94,7 @@ fn confirm_network() {
     let mut tries = 0u32;
     loop {
         tries += 1;
-        if let Ok(net) = Net::connect_to(if t5_rt::is_tailnet(ip) { "ts" } else { "net" })
+        if let Ok(net) = Net::connect()
             && let Ok(s) = net.tcp_connect(ip, port)
         {
             let ok = net.wait_established(s, 5000).is_ok();

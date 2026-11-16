@@ -843,8 +843,7 @@ fn parse_ip(s: &str) -> Option<u32> {
 }
 
 /// `host`'s IPv4 address (as written, a tailnet name, or from DNS) and
-/// the service that reaches it: `svc:ts` for the tailnet's (`Net::for_host`,
-/// doc/71 §14.16), else `svc:net`.
+/// `svc:net`, which reaches it (`Net::for_host`, doc/71 §14.16).
 fn lookup(o: &mut Out, cmd: &str, host: &str) -> Option<(Net, u32)> {
     let r = Net::for_host(host, 3000).ok();
     if r.is_none() {
@@ -1240,10 +1239,6 @@ fn ifconfig(o: &mut Out) {
         return;
     };
     interfaces(o, &net);
-    // The tailnet's, when `ts` runs (doc/71 §14).
-    if let Ok(ts) = Net::connect_to("ts") {
-        interfaces(o, &ts);
-    }
     event!(Info, "shell.listed", what = "ifconfig", count = 0u32);
 }
 

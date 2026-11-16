@@ -4,10 +4,10 @@
 // SPDX-License-Identifier: BSL-1.0
 
 //! A tailnet node without I/O: the netmap, WireGuard for its peers, and
-//! the IP inside (`tun`, smoltcp). Packets through DERP or UDP go to
-//! WireGuard and what they carry to smoltcp; `poll` runs smoltcp and gives
-//! what to send where (handshake responses, initiations, transport
-//! messages, disco). A packet to a peer without a session waits for the
+//! the IP packets in and out (`tun`, carried by the caller to `net`'s link
+//! `ts0`, doc/72). Packets through DERP or UDP go to WireGuard and what
+//! they carry to `tun.rx`; `poll` takes `tun.tx` and gives what to send
+//! where (handshake responses, initiations, transport messages, disco). A packet to a peer without a session waits for the
 //! handshake it starts. The caller runs the connections and the sockets.
 //!
 //! Paths (doc/71 §14): disco pings are answered by the way they came. A
@@ -141,11 +141,6 @@ pub struct Node {
     waiting: VecDeque<([u8; 4], Vec<u8>)>,
     /// Sees every IP packet (true: outgoing), for a trace.
     pub tap: Option<fn(bool, &[u8])>,
-    /// Form B (doc/72): no IP stack here. The packets peers send wait in
-    /// `tun.dev.rx` and those for peers are put in `tun.dev.tx` by the
-    /// caller (`net`'s link `ts0`); smoltcp does not run and has no
-    /// address.
-    pub pipe: bool,
     /// The tailnet's ACL for packets in (doc/72 B3).
     pub filter: crate::filter::Filter,
     /// The netmap's `filter_version` the filter has.
@@ -153,13 +148,12 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(node_key: KeyPair, disco: KeyPair, rng: &mut impl CryptoRngCore, now_ms: u64) -> Node {
+    pub fn new(node_key: KeyPair, disco: KeyPair, rng: &mut impl CryptoRngCore) -> Node {
         let wg = Device::new(node_key, rng);
-        let tun = Tun::new(rng.next_u64(), now_ms);
         Node {
             netmap: NetMap::default(),
             wg,
-            tun,
+            tun: Tun::default(),
             stats: Stats::default(),
             last_drop: "",
             last_filtered: String::new(),
@@ -176,7 +170,6 @@ impl Node {
             pings: VecDeque::new(),
             waiting: VecDeque::new(),
             tap: None,
-            pipe: false,
             filter: crate::filter::Filter::default(),
             filter_of: 0,
         }
@@ -189,11 +182,6 @@ impl Node {
         if self.netmap.peers_version != before {
             let peers = self.netmap.peers.iter().filter_map(|p| Some((p.node_key()?, p.ipv4()?)));
             self.wg.set_peers(peers);
-        }
-        if let Some(ip) = self.netmap.self_ipv4()
-            && !self.pipe
-        {
-            self.tun.set_address(ip);
         }
         if self.netmap.filter_version != self.filter_of {
             self.filter_of = self.netmap.filter_version;
@@ -227,7 +215,7 @@ impl Node {
     }
 
     /// A packet from node key `src` through DERP. A handshake response
-    /// goes out with the next `poll`; a packet inside goes to smoltcp.
+    /// goes out with the next `poll`; a packet inside goes to `tun.rx`.
     pub fn from_derp(&mut self, src: &[u8; LEN], data: &[u8], rng: &mut impl CryptoRngCore, now_ms: u64) {
         if data.starts_with(disco::MAGIC) {
             self.disco(Dest::Derp(*src), data, rng, now_ms);
@@ -282,7 +270,7 @@ impl Node {
                 if let Some(t) = self.tap {
                     t(false, &packet);
                 }
-                self.tun.dev.rx.push_back(packet);
+                self.tun.rx.push_back(packet);
             }
             Received::Established { peer } => {
                 self.stats.handshakes += 1;
@@ -369,14 +357,10 @@ impl Node {
         }
     }
 
-    /// Runs smoltcp (the packets received, its timers, what the sockets
-    /// wrote; not in form B) and sends what is in `tun.dev.tx`: the
-    /// messages to send, by peer node key.
+    /// Sends what is in `tun.tx`, and the heartbeats and keep-alives due:
+    /// the messages to send, by peer node key.
     pub fn poll(&mut self, rng: &mut impl CryptoRngCore, now_ms: u64) -> Vec<(Dest, Vec<u8>)> {
-        if !self.pipe {
-            self.tun.poll(now_ms);
-        }
-        while let Some(p) = self.tun.dev.tx.pop_front() {
+        while let Some(p) = self.tun.tx.pop_front() {
             let Some(dst) = p.get(16..20) else { continue };
             if let Some(t) = self.tap {
                 t(true, &p);
@@ -386,7 +370,7 @@ impl Node {
                 continue;
             };
             self.filter.note_out(&p, now_ms);
-            // An ICMP echo reply (smoltcp answers pings itself).
+            // An ICMP echo reply (`net` answers pings on `ts0`).
             if p[9] == 1 && p.get(((p[0] & 0x0F) as usize) * 4) == Some(&0) {
                 self.stats.echo_replies += 1;
             }
@@ -606,16 +590,15 @@ fn mark(v: &mut Vec<([u8; LEN], u64)>, key: [u8; LEN], now_ms: u64) {
 mod tests {
     use super::*;
 
-    /// Form B (doc/72): no address in smoltcp; a packet put in
-    /// `tun.dev.tx` starts the handshake with the peer it is for.
+    /// A packet put in `tun.tx` starts the handshake with the peer it is
+    /// for.
     #[test]
     fn pipe() {
-        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero, 0);
-        n.pipe = true;
+        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero);
         n.apply_map(br#"{"Node":{"ID":1,"Addresses":["100.64.0.1/32"]},"Peers":[{"ID":2,"Key":"nodekey:0202020202020202020202020202020202020202020202020202020202020202","Addresses":["100.64.0.6/32"]}],"ControlTime":"2026-11-15T00:00:00Z"}"#, 0).unwrap();
-        assert_eq!((n.tun.ip, n.netmap.self_ipv4()), (None, Some([100, 64, 0, 1])));
+        assert_eq!(n.netmap.self_ipv4(), Some([100, 64, 0, 1]));
         assert!(n.poll(&mut Zero, 0).is_empty());
-        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 6]);
+        n.tun.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 6]);
         let out = n.poll(&mut Zero, 0);
         // A handshake initiation (148 bytes) to the peer through DERP.
         assert_eq!((out.len(), out[0].0, out[0].1.len()), (1, Dest::Derp([2; 32]), 148));
@@ -627,7 +610,7 @@ mod tests {
     #[test]
     fn unknown_session() {
         let peer = KeyPair::from_private([2; 32]);
-        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero, 0);
+        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero);
         let json = alloc::format!(r#"{{"Node":{{"ID":1,"Addresses":["100.64.0.1/32"]}},"Peers":[{{"ID":2,"Key":"nodekey:{}","Addresses":["100.64.0.6/32"]}}],"ControlTime":"2026-11-15T00:00:00Z"}}"#, crate::keys::to_hex("", &peer.public));
         n.apply_map(json.as_bytes(), 0).unwrap();
         let mut stale = alloc::vec![0u8; 32];
@@ -653,7 +636,7 @@ mod tests {
     /// for the zero time (expiry disabled).
     #[test]
     fn key_days() {
-        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero, 0);
+        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero);
         n.apply_map(br#"{"Node":{"ID":1,"KeyExpiry":"2026-11-25T12:00:00Z"}}"#, 0).unwrap();
         assert_eq!(n.key_days(0), None);
         n.apply_map(br#"{"ControlTime":"2026-11-15T00:00:00Z"}"#, 1000).unwrap();
@@ -700,7 +683,7 @@ mod tests {
             }
         }
         impl rand_core::CryptoRng for Zero {}
-        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero, 0);
+        let mut n = Node::new(KeyPair::from_private([1; 32]), KeyPair::from_private([3; 32]), &mut Zero);
         n.apply_map(br#"{"Peers":[{"ID":2,"Key":"nodekey:0202020202020202020202020202020202020202020202020202020202020202","Addresses":["100.64.0.6/32"]}]}"#, 0).unwrap();
         assert_eq!(n.wg.peers.len(), 1);
         assert_eq!(n.wg.peers[0].ip, [100, 64, 0, 6]);
@@ -726,7 +709,7 @@ mod tests {
         let json = alloc::format!(r#"{{"PeersChanged":[{{"ID":5,"Key":"nodekey:{}","DiscoKey":"discokey:{}","Addresses":["100.64.0.7/32"],"Endpoints":["198.51.100.7:41641"]}}]}}"#, "05".repeat(32), crate::keys::to_hex("", &peer_disco.public));
         n.apply_map(json.as_bytes(), 20_000).unwrap();
         n.endpoints = alloc::vec![disco::v4([192, 0, 2, 1], 41641)];
-        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        n.tun.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         let out = n.poll(&mut Zero, 20_000);
         let ping = out.iter().find(|o| o.0 == Dest::Udp(disco::v4([198, 51, 100, 7], 41641))).unwrap();
         let Message::Ping { tx, .. } = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &ping.1).unwrap() else { panic!() };
@@ -737,7 +720,7 @@ mod tests {
         n.from_udp(disco::v4([198, 51, 100, 7], 41641), &pong, &mut Zero, 20_010);
         assert_eq!(n.direct_peers(20_010), 1);
         // Not tried again within PROBE_MS.
-        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        n.tun.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         assert!(n.poll(&mut Zero, 20_020).iter().all(|o| !matches!(o.0, Dest::Derp(_))));
         // While packets went to the peer, a heartbeat ping on its path
         // every HEARTBEAT_MS; its pong keeps the path past DIRECT_MS.
@@ -775,12 +758,12 @@ mod tests {
         let global = parse_endpoint("[2001:db8::7]:41641").unwrap();
         let json = alloc::format!(r#"{{"PeersChanged":[{{"ID":5,"Key":"nodekey:{}","DiscoKey":"discokey:{}","Addresses":["100.64.0.7/32"],"Endpoints":["[fd00::7]:41641","[2001:db8::7]:41641","[fe80::7]:41641"]}}]}}"#, "05".repeat(32), crate::keys::to_hex("", &peer_disco.public));
         n.apply_map(json.as_bytes(), t).unwrap();
-        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        n.tun.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         let pings: Vec<Dest> = n.poll(&mut Zero, t).into_iter().map(|o| o.0).filter(|d| matches!(d, Dest::Udp(_))).collect();
         assert_eq!(pings, alloc::vec![Dest::Udp(ula)]);
         n.global_v6 = true;
         t += PROBE_MS;
-        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        n.tun.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         let out = n.poll(&mut Zero, t);
         let pings: Vec<Dest> = out.iter().map(|o| o.0).filter(|d| matches!(d, Dest::Udp(_))).collect();
         assert_eq!(pings, alloc::vec![Dest::Udp(ula), Dest::Udp(global)]);
@@ -805,7 +788,7 @@ mod tests {
         // (PATH_KEEP_MS): an initiation goes both there and through DERP.
         let at = path_at + DIRECT_MS + 1_000;
         assert_eq!(n.direct_path(&[5; 32], at), None);
-        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        n.tun.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         let out = n.poll(&mut Zero, at);
         let init = |d: Dest| out.iter().find(|o| o.0 == d && o.1.len() == crate::wg::INITIATION_LEN).map(|o| o.1.clone());
         assert!(init(Dest::Udp(ula)).is_some());
@@ -813,7 +796,7 @@ mod tests {
         assert_eq!(n.stats.kept_sends, 1);
         // Past PATH_KEEP_MS: through DERP alone.
         let at = path_at + PATH_KEEP_MS + 1_000;
-        n.tun.dev.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
+        n.tun.tx.push_back(alloc::vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 100, 64, 0, 1, 100, 64, 0, 7]);
         let out = n.poll(&mut Zero, at);
         assert!(out.iter().any(|o| o.0 == Dest::Derp([5; 32]) && o.1.len() == crate::wg::INITIATION_LEN));
         assert!(!out.iter().any(|o| matches!(o.0, Dest::Udp(_)) && o.1.len() == crate::wg::INITIATION_LEN));

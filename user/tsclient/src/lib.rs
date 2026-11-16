@@ -32,8 +32,6 @@ pub mod tls;
 pub mod tun;
 pub mod wg;
 
-pub use smoltcp;
-
 /// A stream that can tell whether bytes it read are still waiting.
 pub trait Ready {
     fn buffered(&self) -> bool;

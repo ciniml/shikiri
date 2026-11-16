@@ -146,7 +146,7 @@ fn main() {
         std::thread::sleep(Duration::from_secs(10));
     }
 
-    let mut node = Node::new(keys.node.clone(), keys.disco.clone(), &mut OsRng, now_ms());
+    let mut node = Node::new(keys.node.clone(), keys.disco.clone(), &mut OsRng);
     let mut m = control::map(&mut h, &keys, control::Host { name: hostname, routes: &[] }, 0, &[]).expect("map");
     let json = m.next(&mut h).expect("first map response");
     let len = json.len();

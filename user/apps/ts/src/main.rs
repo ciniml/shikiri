@@ -9,8 +9,9 @@
 //! A Tailscale client (doc/71), stages T1 to T4a: registers this node with
 //! the control server and follows its map, keeps a connection to the home
 //! DERP server (the nearest region by STUN), and talks IP with the peers
-//! over WireGuard through DERP (smoltcp: pings, and a status page on TCP
-//! port 80; other apps' TCP through `svc:ts`, `svc.rs`). The protocols
+//! over WireGuard, carrying the packets to and from `net`'s link `ts0` over
+//! `svc:netlink` (doc/72; a status page on `ts0`'s TCP port 80; names and
+//! peers for other apps through `svc:ts`, `svc.rs`). The protocols
 //! are in `tsclient`; here are the
 //! TCP (`svc:net`), TLS (embedded-tls), the settings, the keys and the
 //! loop that serves both connections (each read only when bytes wait).
@@ -19,10 +20,7 @@
 //! one the control server gives a login URL, logged as `ts.login` and
 //! answered to LOGIN_INFO for the shell's `ts`, doc/71 §14.15),
 //! `ts.hostname` (default `tab5`), `ts.server` (default
-//! `controlplane.tailscale.com`), `ts.form` (default `b`: form B, doc/72:
-//! no IP stack here, the tailnet is `net`'s link `ts0` carried over
-//! `svc:netlink`; `a`, or a `net` without `svc:netlink`: form A, the stack
-//! here and `svc:ts`'s sockets), `ts.routes` (form B: the subnets this node
+//! `controlplane.tailscale.com`), `ts.routes` (the subnets this node
 //! offers to route for the tailnet, IPv4 CIDRs separated by commas or
 //! spaces; routed once approved in the admin console, doc/72 B5). The machine, node and disco keys are
 //! made on the first start and kept as the secret `ts.keys`.
@@ -40,7 +38,9 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::alloc::{GlobalAlloc, Layout};
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::net::{IpAddr, Ipv6Addr, SocketAddr};
 use embedded_tls::blocking::TlsConnection;
 use embedded_tls::{TlsConfig, TlsContext};
@@ -50,8 +50,6 @@ use rand_core::{RngCore, SeedableRng};
 use t5_rt::{Channel, Config, Net, chan, event, netlink, random_fill, sleep_ms, time_ns, wait};
 use tsclient::derp::{Derp, Frame};
 use tsclient::netcheck::Netcheck;
-use tsclient::smoltcp::iface::SocketHandle;
-use tsclient::smoltcp::socket::tcp;
 use tsclient::node::{Dest, Node};
 use tsclient::stream::Buffered;
 use tsclient::disco::{self, Addr};
@@ -64,12 +62,35 @@ t5_rt::entry!(main);
 /// The map responses' JSON and the TLS buffers. A process has 2 MiB in
 /// all (text, data, the 256 KiB stack too: embedded-tls's handshake and
 /// the RSA checks overran 64 KiB into the heap); the first map response of
-/// an 11-peer tailnet was 33 KB (doc/71 §9.2).
-const HEAP_BYTES: usize = 1 << 20;
+/// an 11-peer tailnet was 33 KB (doc/71 §9.2). With a 22-name tailnet the
+/// heap held 240 KB at most (doc/72 §17); 1 MiB while form A's sockets
+/// were here.
+const HEAP_BYTES: usize = 512 << 10;
 static mut ARENA: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
 #[global_allocator]
-static HEAP: LockedHeap = LockedHeap::empty();
+static HEAP: Peak = Peak(LockedHeap::empty());
+
+/// The heap, keeping the most it held (`ts.stats`'s `heap_peak`, to size
+/// `HEAP_BYTES` by).
+struct Peak(LockedHeap);
+
+static HEAP_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Peak {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let p = unsafe { self.0.alloc(layout) };
+        let used = self.0.lock().used();
+        if used > HEAP_PEAK.load(Ordering::Relaxed) {
+            HEAP_PEAK.store(used, Ordering::Relaxed);
+        }
+        p
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { self.0.dealloc(ptr, layout) }
+    }
+}
 
 const DEFAULT_SERVER: &str = "controlplane.tailscale.com";
 const DEFAULT_HOSTNAME: &str = "tab5";
@@ -110,13 +131,13 @@ const FILTERED_SHOWN: u32 = 8;
 /// when bytes wait or during a handshake: the rest of a record comes in
 /// moments).
 const READ_STALL_MS: u64 = 15_000;
-/// Form B: tries to reach `svc:netlink` before a session (form A if none
-/// answers).
+/// Tries to reach `svc:netlink` before a session (none answering is a
+/// failure, retried as others).
 const NETLINK_TRIES: usize = 20;
 const NETLINK_RETRY_MS: u64 = 500;
 
 fn main(mode: usize, _: usize) -> usize {
-    unsafe { HEAP.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
+    unsafe { HEAP.0.lock().init(core::ptr::addr_of_mut!(ARENA) as *mut u8, HEAP_BYTES) };
     // A health test's failure: no keys from a generator we cannot trust.
     let mut raw = [0u8; tsclient::keys::RAW_SEED];
     if random_fill(&mut raw).is_err() {
@@ -139,7 +160,6 @@ fn main(mode: usize, _: usize) -> usize {
     let hostname = text("ts.hostname", DEFAULT_HOSTNAME);
     let routes: Vec<String> = text("ts.routes", "").split([',', ' ']).filter(|r| valid_cidr(r)).map(String::from).collect();
     let auth = text("ts.authkey", "");
-    let form_b = !text("ts.form", "b").eq_ignore_ascii_case("a");
     let keys = match cfg.get("ts.keys", &mut buf) {
         Ok(Some(v)) if v.len == 96 => Keys::from_bytes(buf[..96].try_into().unwrap()),
         _ if mode == 0 && auth.is_empty() => {
@@ -160,19 +180,19 @@ fn main(mode: usize, _: usize) -> usize {
     // The node key (public) is what `tailscale lock sign` takes.
     let node = tsclient::keys::to_hex("nodekey:", &keys.node.public);
     event!(Info, "ts.start", server = server, hostname = hostname.as_str(), auth_key = !auth.is_empty(), node = node.as_str());
-    // Other apps' TCP on the tailnet (doc/71 §13).
+    // Names and peers for other apps (doc/71 §13), and the memory `ts0`'s
+    // rings are in.
     let mut svc = svc::Service::open();
     if svc.is_none() {
         event!(Warn, "ts.failed", step = "svc", error = "io");
     }
-    // Form B: `net`'s link, kept across sessions. Tried again before each
-    // session while `net` has none (at boot `ts` may start first); form A
-    // meanwhile.
+    // `net`'s link, kept across sessions. Tried again before each session
+    // while `net` has none (at boot `ts` may start first).
     let mut pipe: Option<Pipe> = None;
     let mut retry = RETRY_FIRST_MS;
     loop {
         let start = now_ms();
-        if form_b && pipe.is_none() {
+        if pipe.is_none() {
             // `net` starts within seconds of `ts` at boot.
             for _ in 0..NETLINK_TRIES {
                 pipe = svc.as_ref().and_then(Pipe::open);
@@ -181,15 +201,19 @@ fn main(mode: usize, _: usize) -> usize {
                 }
                 nap(svc.as_mut(), NETLINK_RETRY_MS);
             }
-            event!(Info, "ts.form", b = pipe.is_some());
+            event!(Info, "ts.netlink_open", ok = pipe.is_some());
         }
-        // Routes only where `net` routes for us (form B).
-        let host = control::Host { name: &hostname, routes: if pipe.is_some() { &routes } else { &[] } };
+        let host = control::Host { name: &hostname, routes: &routes };
         if !host.routes.is_empty() {
             event!(Info, "ts.routes", count = host.routes.len(), first = host.routes[0].as_str());
         }
-        let e = run(&mut rng, server, host, &auth, &keys, svc.as_mut(), &mut pipe);
-        let (step, error) = e;
+        let (step, error) = match pipe.as_mut() {
+            Some(p) => run(&mut rng, server, host, &auth, &keys, svc.as_mut(), p),
+            None => ("netlink", Error::Io),
+        };
+        if step == "netlink" {
+            pipe = None;
+        }
         event!(Warn, "ts.failed", step = step, error = describe(error), retry_ms = retry);
         if let Some(svc) = svc.as_mut() {
             svc.login = svc::Login::Connecting;
@@ -221,7 +245,7 @@ fn nap(mut svc: Option<&mut svc::Service>, ms: u64) {
         if let Some(ev) = ev
             && ev.kind == t5_rt::chan::PEER_CLOSED
         {
-            svc.closed(ev.index, None);
+            svc.closed(ev.index);
         }
     }
 }
@@ -384,7 +408,7 @@ impl Relay {
 }
 
 /// One session with the control server and DERP, until it fails.
-fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, auth: &str, keys: &Keys, mut svc: Option<&mut svc::Service>, pipe: &mut Option<Pipe>) -> (&'static str, Error) {
+fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, auth: &str, keys: &Keys, mut svc: Option<&mut svc::Service>, pipe: &mut Pipe) -> (&'static str, Error) {
     let hostname = host_info.name;
     let Ok(net) = Net::connect() else { return ("net", Error::Io) };
     let net = Rc::new(RefCell::new(net));
@@ -434,10 +458,8 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
     }
 
     // The first map response: the DERP map to pick home from.
-    let mut node = Node::new(keys.node.clone(), keys.disco.clone(), rng, now_ms());
-    node.pipe = pipe.is_some();
+    let mut node = Node::new(keys.node.clone(), keys.disco.clone(), rng);
     if let Some(svc) = svc.as_deref_mut() {
-        svc.reset();
         svc.login = svc::Login::Joined;
     }
     if TRACE_TCP {
@@ -502,7 +524,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
 
     let mut shown = node.stats;
     let mut idle_ms = 1;
-    let mut web = Web::new(&mut node);
+    let mut web = Web::new();
     let mut udp_buf = vec![0u8; 1500];
     let mut last_map = now_ms();
     let mut last_derp = now_ms();
@@ -581,13 +603,9 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
             event!(Warn, "ts.silent", since_map_ms = (now - last_map) as u32, since_derp_ms = (now - last_derp) as u32, up_s = ((now - started) / 1000) as u32);
             return ("silent", Error::Io);
         }
-        if pipe.is_some() {
-            web.step_net(&net, &node, |n| status(n, hostname, region, &host, started));
-        } else {
-            web.step(&mut node, |n| status(n, hostname, region, &host, started));
-        }
+        web.step(&net, &node, |n| status(n, hostname, region, &host, started));
         if let Some(svc) = svc.as_deref_mut() {
-            busy |= svc.serve(Some(&mut node));
+            busy |= svc.serve(Some(&node));
         }
         // Read only after traffic or when `net` woke the nap for a
         // datagram (UDP_WAIT): not one call per round while idle.
@@ -606,9 +624,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                 handshake_timed(&mut node, "udp", |node| node.from_udp(from, &udp_buf[..n], rng, now_ms()));
             }
         }
-        if let Some(p) = pipe.as_mut() {
-            busy |= p.step(&mut node);
-        }
+        busy |= pipe.step(&mut node);
         for (dest, m) in node.poll(rng, now_ms()) {
             busy = true;
             match dest {
@@ -702,6 +718,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                 keepalives = s.keepalives,
                 kept_sends = s.kept_sends,
                 unknown_sessions = s.unknown_sessions,
+                heap_peak = HEAP_PEAK.load(Ordering::Relaxed) as u32,
                 last_drop = node.last_drop
             );
             shown = s;
@@ -721,29 +738,21 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
             }
             // `net` added packets to `ts0`'s ring.
             let pipe_at = hs.len();
-            if let Some(p) = pipe.as_ref() {
-                hs.push(&p.chan.0);
-            }
-            let ev = if hs.is_empty() {
-                sleep_ms(idle_ms);
-                None
-            } else {
-                wait(&hs, idle_ms * 1_000_000).ok()
-            };
+            hs.push(&pipe.chan.0);
+            let ev = wait(&hs, idle_ms * 1_000_000).ok();
             drop(hs);
             drop(n);
             match ev {
                 Some(ev) if armed && ev.index == net_at => udp_check = true,
-                Some(ev) if pipe.is_some() && ev.index == pipe_at => {
+                Some(ev) if ev.index == pipe_at => {
                     if ev.kind == chan::PEER_CLOSED {
                         event!(Warn, "ts.failed", step = "netlink", error = "closed");
-                        *pipe = None;
                         return ("netlink", Error::Io);
                     }
                 }
                 Some(ev) if ev.kind == t5_rt::chan::PEER_CLOSED => {
                     if let Some(svc) = svc.as_deref_mut() {
-                        svc.closed(ev.index, Some(&mut node));
+                        svc.closed(ev.index);
                     }
                 }
                 _ => {}
@@ -753,7 +762,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
     }
 }
 
-/// `net`'s link `ts0` (form B, doc/72): IP packets on rings shared over
+/// `net`'s link `ts0` (doc/72): IP packets on rings shared over
 /// `svc:netlink`.
 struct Pipe {
     chan: Channel,
@@ -762,8 +771,8 @@ struct Pipe {
     addr: Option<[u8; 4]>,
     /// The netmap's versions (peers, DNS) the names `net` has came from.
     names_of: Option<(u32, u32)>,
-    /// Packets from peers to another address (not routed: form B carries
-    /// only this node's).
+    /// Packets from peers to another address (not this node's, nor a
+    /// subnet it routes).
     pub not_ours: u32,
     pub full: u32,
 }
@@ -784,7 +793,7 @@ impl Pipe {
         Some(Pipe { chan, peer: netlink::Peer(base), addr: None, names_of: None, not_ours: 0, full: 0 })
     }
 
-    /// Moves packets between the rings and `node` (whose `tun.dev.tx` the
+    /// Moves packets between the rings and `node` (whose `tun.tx` the
     /// next `poll` sends); gives `net` the node's address when it changes.
     /// Whether anything moved.
     fn step(&mut self, node: &mut Node) -> bool {
@@ -809,12 +818,12 @@ impl Pipe {
         while self.chan.0.read(&mut buf).is_ok() {}
         let mut moved = false;
         while let Some(p) = self.peer.rx_peek() {
-            node.tun.dev.tx.push_back(p.to_vec());
+            node.tun.tx.push_back(p.to_vec());
             self.peer.rx_pop();
             moved = true;
         }
         let mut sent = false;
-        while let Some(p) = node.tun.dev.rx.pop_front() {
+        while let Some(p) = node.tun.rx.pop_front() {
             moved = true;
             // This node's address, or a subnet it routes (approved, B5).
             let ours = p.get(16..20).is_some_and(|d| node.netmap.routes_to([d[0], d[1], d[2], d[3]]));
@@ -932,16 +941,15 @@ fn sock_addr(a: &Addr) -> SocketAddr {
 }
 
 /// The status page on the tailnet: `http://<tailnet address>/`, one
-/// connection at a time (doc/71 §12). Form A: on our smoltcp; form B: on
-/// `svc:net`, listening on `ts0` only (doc/72 §14).
+/// connection at a time (doc/71 §12), on `svc:net`, listening on `ts0`
+/// only (doc/72 §14).
 struct Web {
-    socket: SocketHandle,
-    /// Form B: the `svc:net` socket, listening or connected.
+    /// The `svc:net` socket, listening or connected.
     net_socket: Option<u16>,
-    /// Form B: when listening last failed (`ts0` not up yet, or no free
-    /// socket in `net`).
+    /// When listening last failed (`ts0` not up yet, or no free socket in
+    /// `net`).
     net_failed: Option<u64>,
-    /// Form B: when the answer went out; the client closes first (so the
+    /// When the answer went out; the client closes first (so the
     /// TIME_WAIT, which holds one of `net`'s few sockets, is its own).
     answered: Option<u64>,
     request: Vec<u8>,
@@ -949,23 +957,22 @@ struct Web {
 }
 
 const WEB_PORT: u16 = 80;
-/// Form B: listening on `ts0` is tried again after this.
+/// Listening on `ts0` is tried again after this.
 const WEB_RETRY_MS: u64 = 500;
-/// Form B: a client that has not closed this long after the answer is
+/// A client that has not closed this long after the answer is
 /// closed on.
 const WEB_LINGER_MS: u64 = 5_000;
 /// More of a request than this is not read.
 const REQUEST_MAX: usize = 2048;
 
 impl Web {
-    fn new(node: &mut Node) -> Web {
-        let s = tcp::Socket::new(tcp::SocketBuffer::new(vec![0; 1024]), tcp::SocketBuffer::new(vec![0; 4096]));
-        let socket = node.tun.sockets.add(s);
-        Web { socket, net_socket: None, net_failed: None, answered: None, request: Vec::new(), served: 0 }
+    fn new() -> Web {
+        Web { net_socket: None, net_failed: None, answered: None, request: Vec::new(), served: 0 }
     }
 
-    /// `step` in form B: the same on a `svc:net` socket.
-    fn step_net(&mut self, net: &Rc<RefCell<Net>>, node: &Node, body: impl FnOnce(&Node) -> String) {
+    /// Listens again once the last connection is gone; answers a whole
+    /// request head with `body`, and closes once the client has.
+    fn step(&mut self, net: &Rc<RefCell<Net>>, node: &Node, body: impl FnOnce(&Node) -> String) {
         let mut n = net.borrow_mut();
         let Some(s) = self.net_socket else {
             if self.net_failed.is_some_and(|at| now_ms() - at < WEB_RETRY_MS) {
@@ -1016,37 +1023,6 @@ impl Web {
         self.request.clear();
         self.served += 1;
         self.answered = Some(now_ms());
-    }
-
-    /// Listens again once the last connection is gone; answers a whole
-    /// request head with `body` and closes.
-    fn step(&mut self, node: &mut Node, body: impl FnOnce(&Node) -> String) {
-        let s = node.tun.sockets.get_mut::<tcp::Socket>(self.socket);
-        if !s.is_open() {
-            self.request.clear();
-            let _ = s.listen(WEB_PORT);
-            return;
-        }
-        if s.can_recv() {
-            let room = REQUEST_MAX - self.request.len();
-            let _ = s.recv(|b| {
-                let n = b.len().min(room);
-                self.request.extend_from_slice(&b[..n]);
-                (b.len(), ())
-            });
-        }
-        let whole = self.request.windows(4).any(|w| w == b"\r\n\r\n") || self.request.len() == REQUEST_MAX;
-        if !whole || !s.can_send() {
-            return;
-        }
-        let body = body(node);
-        let s = node.tun.sockets.get_mut::<tcp::Socket>(self.socket);
-        let head = alloc::format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-        let _ = s.send_slice(head.as_bytes());
-        let _ = s.send_slice(body.as_bytes());
-        s.close();
-        self.request.clear();
-        self.served += 1;
     }
 }
 

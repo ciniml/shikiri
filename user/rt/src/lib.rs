@@ -915,11 +915,6 @@ pub struct Received {
 /// How long `Net::udp_send_ip` waits for room in the socket's queue.
 pub const UDP_SEND_WAIT_MS: u64 = 100;
 
-/// Whether `ip` is in the tailnet's range (100.64.0.0/10, doc/71).
-pub fn is_tailnet(ip: u32) -> bool {
-    ip >> 22 == (100 << 2 | 1)
-}
-
 impl Net {
     pub fn connect() -> Result<Net, NetError> {
         Net::connect_to(net::SERVICE)
@@ -940,45 +935,24 @@ impl Net {
         Ok(Net { chan, _shm: shm, slice, armed: core::cell::Cell::new(false) })
     }
 
-    /// The service that reaches `host` (an IPv4 address or a name) and
-    /// its address (doc/71 §14.16): an address in the tailnet's
-    /// 100.64.0.0/10 or a name `ts` resolves (MagicDNS: whole names,
-    /// search domains, short names; when `ts` runs and the app has
-    /// `svc:ts/resolve`) goes through `svc:ts` while `ts` has its own IP
-    /// stack (form A), through `svc:net`'s `ts0` in form B (doc/72); other
-    /// names through `svc:net` and its DNS (waiting up to `ms`).
+    /// `svc:net` and the address of `host` (an IPv4 address or a name;
+    /// doc/71 §14.16): a name `ts` resolves (MagicDNS: whole names, search
+    /// domains, short names; when `ts` runs and the app has
+    /// `svc:ts/resolve`), else `svc:net`'s DNS (waiting up to `ms`). The
+    /// tailnet is `svc:net`'s link `ts0` (doc/72).
     pub fn for_host(host: &str, ms: u64) -> Result<(Net, u32), NetError> {
-        // Form A: `svc:ts` has the interface `ts0` up.
-        let own_stack = |ts: &Net| matches!(ts.if_info(0), Ok(Some(_)));
         if let Ok(ip) = host.parse::<Ipv4Addr>() {
-            let ip = ip.to_bits();
-            return Ok((Net::for_ip(ip)?, ip));
+            return Ok((Net::connect()?, ip.to_bits()));
         }
         if let Ok(mut ts) = Net::connect_to("ts")
             && let Ok(ip) = ts.resolve(host, ms)
         {
-            if own_stack(&ts) {
-                return Ok((ts, ip));
-            }
             drop(ts);
             return Ok((Net::connect()?, ip));
         }
         let mut n = Net::connect()?;
         let ip = n.resolve(host, ms)?;
         Ok((n, ip))
-    }
-
-    /// The service that reaches IPv4 address `ip`: `svc:ts` for the
-    /// tailnet's while `ts` has its own IP stack (form A), else `svc:net`
-    /// (form B's `ts0` among its links, doc/72).
-    pub fn for_ip(ip: u32) -> Result<Net, NetError> {
-        if is_tailnet(ip)
-            && let Ok(ts) = Net::connect_to("ts")
-            && matches!(ts.if_info(0), Ok(Some(_)))
-        {
-            return Ok(ts);
-        }
-        Net::connect()
     }
 
     fn call(&self, op: u8, sock: u16, a: u32, b: u32) -> Result<(u32, u32), NetError> {

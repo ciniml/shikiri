@@ -53,10 +53,10 @@ PERMIT_mic    := --permit audio:in
 PERMIT_spkcheck := --permit audio:out --permit audio:in
 # Tailscale (doc/71): the control server over TLS; its keys and the auth
 # key are secret settings (strong: the system key).
-PERMIT_tsget := --permit svc:ts/info --permit svc:ts/tcp-connect --permit svc:ts/resolve --permit svc:ts/udp:any --permit svc:net/tcp-connect --permit svc:net/udp:any
+PERMIT_tsget := --permit svc:ts/info --permit svc:net/tcp-connect --permit svc:net/udp:any
 PERMIT_ts := --permit shm --permit listen:ts --permit svc:netlink/ts0 --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:net/udp:41641 --permit svc:net/tcp-listen:80 --permit svc:net/info --permit random \
              --permit svc:cfg/r:ts. --permit svc:cfg/w:ts. --permit svc:cfg/secret:ts. --stack 262144
-PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:ts/tcp-connect --permit svc:ts/resolve --stack 24576
+PERMIT_ota    := --permit listen:ota --permit update --permit svc:fs/r: --permit svc:net/tcp-connect --permit svc:net/resolve --permit svc:ts/resolve --stack 24576
 PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit svc:net/udp:5353 --permit svc:net/mcast \
                  --permit svc:net/info --permit svc:fs/rw:T5OS/MATTER --permit random --permit listen:matter \
                  --permit svc:ble/scan --permit svc:ble/central --permit svc:ble/peripheral \
@@ -65,7 +65,7 @@ PERMIT_matter := --permit svc:net/udp:5540 --permit svc:net/udp:5541 --permit sv
 PERMIT_font   := --permit listen:font --permit shm
 PERMIT_term   := --permit display --permit kbd --permit listen:tty --permit proc:spawn/shell --permit svc:font --stack 16384
 PERMIT_shell  := --permit svc:tty --permit svc:fs/rw: --permit svc:net/tcp-connect --permit svc:net/ping \
-                 --permit svc:net/resolve --permit svc:net/info --permit svc:ts/info --permit svc:ts/resolve --permit svc:ts/ping --permit svc:ts/tcp-connect --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:mem \
+                 --permit svc:net/resolve --permit svc:net/info --permit svc:ts/info --permit svc:ts/resolve --permit proc:spawn --permit proc:list --permit proc:apps --permit proc:mem \
                  --permit proc:kill/own --permit display:focus --permit svc:ota --permit svc:matter/read --permit svc:matter/control --permit svc:matter/admin \
                  --permit svc:cfg/r: --permit svc:cfg/w: --permit audio:volume --stack 32768
 # What an app needs before the kernel starts it (doc/51 §3): `svc:NAME` (a

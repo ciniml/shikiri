@@ -188,3 +188,34 @@
 - 試験: tsclient 27（`disco::tests::round_trip` に覚えた箱、`wg::tests::initiate_to_device` に一時的な鍵）、smoltcp の UDP 35、emu、virt、p4emu が通った。
 - 実機（ts だけ入れ直した段階）: ハンドシェイクの返事は 43.5 → 35.6（DH を覚えた）→ 27 ms（一時的な鍵も）。待ち行列が止まらなかった回の ping の 1 回目は 87〜101 ms（前は 161〜166 ms）。
 - 実機（net も入れ直して reboot）: 3 分あまり何も送らなかった後の ping の 1 回目が 3 回とも 72〜77 ms（2 回目からは 5 ms）。`ts.udp_rebound` は出なかった。ハンドシェイクの返事は 27 ms。残りは、ハンドシェイクの往復と Tab5 の 27 ms、disco の確かめ直し、Wi-Fi の起き抜け（disco の ping の 1 回目も 25〜70 ms）。
+
+## 17. 形 A を外す（2026-11-16）
+- 利用者の「すすめて」で、形 A（`ts` の中の smoltcp と `svc:ts` のソケット）を外した。形 B を既定にしてから（§8）困ることが出ていなかった。
+- tsclient:
+  - `tun` は環への置き場所の `Tun { rx, tx }` だけにした。`Node::pipe`、`Tun::set_address`、smoltcp を回す `Tun::poll` はなくした。tsclient は smoltcp に頼らなくなった（依存と `pub use smoltcp` を外した）。
+  - `Node::new` は時刻を取らない（smoltcp の時計の初期値だけに使っていた）。
+  - smoltcp の試験 `tun::tests::ping_and_syn` はなくなり、tsclient の試験は 26。
+- `ts`:
+  - 設定 `ts.form` は読まない。各セッションの前に `svc:netlink` へつなぐ（0.5 秒おきに 20 回）。つなげなければ、そのセッションは `ts.failed step=netlink` で、ほかの失敗と同じく待ってやり直す。新しいイベントは `ts.netlink_open ok`（前の `ts.form b`）。
+  - `ts.routes` は、`net` が経路を持つ形 B だけで送っていた。これからは常に送る。
+  - 状態のページは `svc:net` のソケット（`ts0` だけで待ち受け、§14）だけにした。
+  - `svc:ts` は、RESOLVE / RESOLVE_RESULT（MagicDNS の名前）、PEER_INFO、LOGIN_INFO、RESOLVE の後の CLOSE だけに答える。TCP、UDP、PING、IF_INFO は BAD_REQUEST を返す。許可は `resolve` と `info` だけになった。
+  - `ts.stats` に `heap_peak`（ヒープが最も多く持ったバイト数）を足した。割り当てのたびに `used()` を見る。
+  - ヒープは 1 MiB から 512 KiB にした。この節の実機では、最初の map（31.7 KB、名前 22）、TLS 2 本、ページ 5 回を経ても `heap_peak=239728`（約 234 KiB）だった。
+- `t5_rt`:
+  - `Net::for_host` は、名前を `svc:ts` で引けてもソケットは常に `svc:net` に開く。
+  - `Net::for_ip` と `is_tailnet` は使い手がいなくなったので外した。`tsget` と `ota` は `Net::connect` を使う。
+- shell の `ifconfig` は `svc:ts` を見なくなった。`ts0` は `net` のリンクとして出る。
+- 許可も減らした。`tsget` からは `svc:ts/tcp-connect`、`resolve`、`udp:any` を、`ota` からは `svc:ts/tcp-connect` を、shell からは `svc:ts/ping` と `tcp-connect` を外した。
+- `ts.t5a` は 691244 → 650192 バイトになった。
+- 試験: tsclient 26、emu、virt、p4emu が通った。
+- 実機（ts、tsget、shell、ota を入れ直して reboot）で次を確かめた:
+  - `ts.netlink_open ok=true` の後、`ts.derp` まで動いた。
+  - ホストからは、状態のページの取得、ping（5〜7 ms）が通った。
+  - shell では `ts`（相手の一覧）、`ping prometheus`（名前で引いて 7〜9 ms）が動き、`ifconfig` に `ts0` が出た。
+  - `run tsget`（ホストの HTTP、200、24 ms）も動いた。
+- 気づいたこと（直していない）:
+  - ts を起動し直した直後、ホストからの ping の最初の数回が 3〜4.7 秒遅れた。2 回とも同じだった。
+  - ログでは、ホストからの initiation（UDP）に 35 ms で返したのに、ホストは 5 秒後（REKEY_TIMEOUT）に initiation を出し直し、2 回目のハンドシェイクで通った。最初の返事がホストに届いていない。
+  - このとき Tab5 はホストと IPv6 の ULA で直につながっていて、`unsent=2` が出ていた。Tab5 は Matter 試験の網（192.168.8.0/24）にいた。
+  - 推測: 起き抜けの IPv6 の近隣の解決を待つ間に、smoltcp の UDP が返事を捨てた（§16 の 1 秒）。形 A を外したこととは関わらない（ハンドシェイクと UDP の道は変えていない）。
