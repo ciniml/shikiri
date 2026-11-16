@@ -455,6 +455,17 @@ impl Node {
         self.wg.peers.iter().position(|p| p.key == key)
     }
 
+    /// Where to send WireGuard message `m` that UDP would not take to `to`:
+    /// through DERP to the peer there. None for disco (for that path only)
+    /// or an address no peer has.
+    pub fn derp_instead(&self, to: Addr, m: &[u8]) -> Option<Dest> {
+        if m.starts_with(disco::MAGIC) {
+            return None;
+        }
+        let peer = self.peer_at(Dest::Udp(to))?;
+        Some(Dest::Derp(self.wg.peers[peer].key))
+    }
+
     /// Work done ahead while idle: the next handshake's ephemeral key.
     pub fn prepare(&mut self, rng: &mut impl CryptoRngCore) {
         self.wg.prepare(rng);
@@ -714,6 +725,11 @@ mod tests {
         let ping = out.iter().find(|o| o.0 == Dest::Udp(disco::v4([198, 51, 100, 7], 41641))).unwrap();
         let Message::Ping { tx, .. } = disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &ping.1).unwrap() else { panic!() };
         let cmm = out.iter().find(|o| o.0 == Dest::Derp([5; 32])).unwrap();
+        // WireGuard's messages UDP would not take there go through DERP;
+        // disco's do not.
+        let at = disco::v4([198, 51, 100, 7], 41641);
+        assert_eq!((n.derp_instead(at, &[1, 0, 0, 0]), n.derp_instead(at, &ping.1)), (Some(Dest::Derp([5; 32])), None));
+        assert_eq!(n.derp_instead(disco::v4([198, 51, 100, 8], 41641), &[1, 0, 0, 0]), None);
         assert_eq!(disco::open(&peer_disco, &KeyPair::from_private([3; 32]).public, &cmm.1), Some(Message::CallMeMaybe { endpoints: alloc::vec![disco::v4([192, 0, 2, 1], 41641)] }));
         assert_eq!(n.direct_peers(20_000), 0);
         let pong = disco::seal(&peer_disco, &KeyPair::from_private([3; 32]).public, [7; 24], &Message::Pong { tx, src: disco::v4([192, 0, 2, 1], 41641) });

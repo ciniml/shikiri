@@ -34,6 +34,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -123,6 +124,13 @@ const RELAY_RETRY_MS: u64 = 30_000;
 /// Past smoltcp's own drop of a datagram nobody answers (1 s), so the
 /// socket keeps what it learnt from that (doc/72 §16).
 const UDP_STUCK_MS: u64 = 3_000;
+/// After a UDP send found the queue full (and waited), sends skip it for
+/// this long: smoltcp drops a datagram whose next hop does not answer only
+/// after a second (doc/72 §16), and a wait each stalled the loop.
+const UDP_JAM_MS: u64 = 250;
+/// `ts.udp_unsent` for each of the first this many datagrams `net` would
+/// not take.
+const UNSENT_SHOWN: u32 = 8;
 /// `ts.filtered` for each of the first this many packets the ACL turns
 /// away, then for one in 64.
 const FILTERED_SHOWN: u32 = 8;
@@ -532,8 +540,11 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
     let mut direct = 0;
     // Datagrams `net` would not take (no route: an IPv6 address off our links).
     let mut udp_unsent = 0u32;
-    // Since when sends find the UDP queue full.
+    // Since when sends find the UDP queue full, and when one last did.
     let mut udp_full_since: Option<u64> = None;
+    let mut udp_jam_at = 0;
+    // WireGuard messages sent through DERP as UDP would not take them.
+    let mut udp_via_derp = 0u32;
     let mut shown_web = 0;
     let started = now_ms();
     let mut relay: Option<Relay> = None;
@@ -625,7 +636,8 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
             }
         }
         busy |= pipe.step(&mut node);
-        for (dest, m) in node.poll(rng, now_ms()) {
+        let mut out: VecDeque<(Dest, Vec<u8>)> = node.poll(rng, now_ms()).into();
+        while let Some((dest, m)) = out.pop_front() {
             busy = true;
             match dest {
                 Dest::Derp(peer) => {
@@ -661,16 +673,33 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                     }
                 }
                 Dest::Udp(a) => {
+                    // Right after a send found the queue full, skip it: each
+                    // try waits (doc/72 §18).
+                    let jammed = udp_full_since.is_some_and(|_| now_ms() - udp_jam_at < UDP_JAM_MS);
                     if let Some(s) = udp {
                         let to = sock_addr(&a);
-                        let r = net.borrow_mut().udp_send_ip(s, to.ip(), to.port(), &m);
-                        if r.is_err() {
+                        let r = if jammed { Err(t5_rt::NetError::TimedOut) } else { net.borrow_mut().udp_send_ip(s, to.ip(), to.port(), &m) };
+                        if let Err(e) = r {
                             udp_unsent += 1;
+                            if udp_unsent <= UNSENT_SHOWN {
+                                event!(Info, "ts.udp_unsent", to = to.to_string().as_str(), status = net_status(e), len = m.len() as u32, count = udp_unsent, jammed = jammed);
+                            }
+                            // WireGuard's messages (a handshake response
+                            // above all) go through DERP instead; disco's
+                            // are for that path only.
+                            if let Some(d) = node.derp_instead(a, &m) {
+                                udp_via_derp += 1;
+                                out.push_back((d, m));
+                            }
+                        }
+                        if jammed {
+                            continue;
                         }
                         // A full queue that stays full: a datagram whose next
                         // hop never answers blocks it (doc/72 §9). A new
                         // socket drops it.
                         if matches!(r, Err(t5_rt::NetError::TimedOut)) {
+                            udp_jam_at = now_ms();
                             let since = *udp_full_since.get_or_insert(now_ms());
                             if now_ms() - since > UDP_STUCK_MS {
                                 let _ = net.borrow().close(s);
@@ -688,7 +717,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
         let s = node.stats;
         let d = node.direct_peers(now_ms());
         if d != direct {
-            event!(Info, "ts.direct", peers = d, udp_in = s.udp_in, udp_out = s.udp_out, udp6_in = s.udp6_in, unsent = udp_unsent, pongs = s.pongs, heartbeats = s.heartbeats);
+            event!(Info, "ts.direct", peers = d, udp_in = s.udp_in, udp_out = s.udp_out, udp6_in = s.udp6_in, unsent = udp_unsent, via_derp = udp_via_derp, pongs = s.pongs, heartbeats = s.heartbeats);
             direct = d;
         }
         if (s.handshakes, s.initiations, s.echo_replies, s.dropped, web.served) != (shown.handshakes, shown.initiations, shown.echo_replies, shown.dropped, shown_web) {

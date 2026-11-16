@@ -146,7 +146,9 @@ pub const UNRESOLVED_DROP: crate::time::Duration = crate::time::Duration::from_s
 /// time: a Tailscale peer's endpoint on the LAN that never answers was
 /// pinged every time traffic began (doc/72 §16).
 pub const UNRESOLVED_KEPT: crate::time::Duration = crate::time::Duration::from_secs(600);
-const UNRESOLVED_COUNT: usize = 4;
+/// tab5-os: destinations remembered (a tailnet has peers with several
+/// endpoints each that may not answer; 4 thrashed, doc/72 §18).
+const UNRESOLVED_COUNT: usize = 16;
 
 impl<'a> Socket<'a> {
     /// Create an UDP socket with the given buffers.
