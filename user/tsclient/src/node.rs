@@ -117,8 +117,8 @@ pub struct Node {
     pub clock: Option<(u64, u64)>,
     /// To send: (where, message).
     out: Vec<(Dest, Vec<u8>)>,
-    /// This node's disco key.
-    disco: KeyPair,
+    /// This node's disco key, with the boxes to peers' made from it.
+    boxes: disco::Boxes,
     /// The home DERP region (for pongs to pings that came through it).
     pub home_region: i32,
     /// Peers heard over UDP: (node key, address, port, when).
@@ -165,7 +165,7 @@ impl Node {
             last_filtered: String::new(),
             clock: None,
             out: Vec::new(),
-            disco,
+            boxes: disco::Boxes::new(disco),
             home_region: 0,
             direct: Vec::new(),
             endpoints: Vec::new(),
@@ -332,7 +332,7 @@ impl Node {
         if !self.netmap.peers.iter().any(|p| p.disco_key() == Some(sender)) {
             return self.drop("disco from an unknown key");
         }
-        let Some(m) = disco::open(&self.disco, &sender, data) else { return self.drop("disco box") };
+        let Some(m) = self.boxes.open(&sender, data) else { return self.drop("disco box") };
         let mut nonce = [0u8; 24];
         match m {
             Message::Ping { tx, .. } => {
@@ -341,7 +341,7 @@ impl Node {
                     Dest::Derp(_) => disco::v4(DERP_MAGIC_IP, self.home_region as u16),
                 };
                 rng.fill_bytes(&mut nonce);
-                let pong = disco::seal(&self.disco, &sender, nonce, &Message::Pong { tx, src });
+                let pong = self.boxes.seal(&sender, nonce, &Message::Pong { tx, src });
                 self.stats.pongs += 1;
                 self.out.push((from, pong));
             }
@@ -354,7 +354,7 @@ impl Node {
                     rng.fill_bytes(&mut tx);
                     rng.fill_bytes(&mut nonce);
                     let ping = Message::Ping { tx, node_key: Some(self.wg.public()) };
-                    self.out.push((Dest::Udp(a), disco::seal(&self.disco, &sender, nonce, &ping)));
+                    self.out.push((Dest::Udp(a), self.boxes.seal(&sender, nonce, &ping)));
                 }
             }
             Message::Pong { tx, .. } => {
@@ -471,6 +471,11 @@ impl Node {
         self.wg.peers.iter().position(|p| p.key == key)
     }
 
+    /// Work done ahead while idle: the next handshake's ephemeral key.
+    pub fn prepare(&mut self, rng: &mut impl CryptoRngCore) {
+        self.wg.prepare(rng);
+    }
+
     /// The last direct path to the peer with node key `key`, in use now or
     /// lapsed, and when it was last confirmed.
     pub fn last_path(&self, key: &[u8; LEN]) -> Option<(Addr, u64)> {
@@ -537,7 +542,7 @@ impl Node {
         if !self.endpoints.is_empty() {
             rng.fill_bytes(&mut nonce);
             let cmm = Message::CallMeMaybe { endpoints: self.endpoints.clone() };
-            self.out.push((Dest::Derp(key), disco::seal(&self.disco, &their_disco, nonce, &cmm)));
+            self.out.push((Dest::Derp(key), self.boxes.seal(&their_disco, nonce, &cmm)));
         }
     }
 
@@ -553,7 +558,7 @@ impl Node {
         self.pings.push_back((tx, key));
         mark(&mut self.pinged, key, now_ms);
         let ping = Message::Ping { tx, node_key: Some(self.wg.public()) };
-        self.out.push((Dest::Udp(to), disco::seal(&self.disco, their_disco, nonce, &ping)));
+        self.out.push((Dest::Udp(to), self.boxes.seal(their_disco, nonce, &ping)));
     }
 
     /// Pings the direct paths of the active peers every `HEARTBEAT_MS`.

@@ -172,3 +172,19 @@
   - 自分の initiation に返事が来て、待たせたパケットがなければ keepalive（空の transport）を送る。相手（responder）は、新しいセッションで何か届くまでそれで送らない（wireguard-go も返事の後に keepalive を送る）。
 - 試験: `node::tests::unknown_session`（initiation がすぐ出る、出ている間は繰り返さない、返事に keepalive、相手はそれで新しいセッションで送れる）。tsclient の試験は 27。emu、virt、p4emu が通った。
 - 実機: ts を入れ直し、前のセッションを Tab5 から始めた状態で ts を起動し直した。`no session` 1 つで initiation を出し（`unknown_sessions=1`）、28 ms でつながった。1 回目のページ取得は 1.03 秒（前は 8.1〜19.4 秒）。残りの 1 秒は、捨てた SYN をホストの TCP が再送するまでの時間（最初の再送が 1 秒）。捨てたパケットは解けないので、ここは縮まらない。
+
+## 16. しばらく通信がなかった後の最初のパケット（2026-11-16）
+- §13 の残り: 3 分ほど何も送らなかった後、ホストからの ping の 1 回目が 161〜424 ms（2 回目からは 5 ms）。Wi-Fi の省電力は切ってある（`wifi` の modem sleep は引数で頼んだときだけ）。disco の ping（`tailscale ping`）の 1 回目は 25〜70 ms。
+- 3 つの原因が重なっていた:
+  1. ハンドシェイクのやり直し。前のセッションが 180 秒（REJECT_AFTER_TIME）を過ぎていて、相手は initiation から始める。ts の返事に 43.5 ms かかった（`ts.handshake via us`、新しいイベント）。受け手の X25519 は 5 回で、1 回が約 9 ms。
+  2. disco のメッセージを開くたび・閉じるたびに X25519 をしていた（`SalsaBox::new`）。起き抜けに相手は disco の ping をまとめて 10 個あまり送るので、それだけで 100 ms ほど。
+  3. ホストが広告する endpoint のうち 192.168.10.2 は、Tab5 と同じ /24 にあるが ARP に答えない（ホストの別の口で、別の線の先）。そこへの disco の ping が `net` の UDP の待ち行列の先頭に残り、後ろの返事を止めた。ts が 1 秒後にソケットを作り直す（`ts.udp_rebound`）まで、ping の返事が 287〜1396 ms 遅れた回があった。
+- 直し:
+  - tsclient `disco::Boxes`: 相手の disco key ごとの箱を 16 まで覚える（Tailscale も覚える）。`Node` は `disco::open` と `seal` の代わりにこれを使う。
+  - tsclient `wg::Peer::static_static`: 自分と相手の固定の鍵の DH を一度だけ計算して覚える（wireguard-go と同じ）。
+  - tsclient `wg::Device::prepare`: 次のハンドシェイクの一時的な鍵を、手の空いたときに作っておく（一度だけ使う）。ts は主ループが眠る前に `Node::prepare` を呼ぶ。
+  - smoltcp `udp::Socket::dispatch`（third_party）: 先頭が送れないとき捨てるまでを 3 秒から 1 秒にし、捨てた宛て先を 4 つまで 10 分覚える。覚えた宛て先へのデータグラムは 1 度試し（ARP も出る）、送れなければすぐ捨てる。送れたら忘れる。試験 `test_send_unresolved_dropped` を広げた。
+  - ts の `UDP_STUCK_MS` を 1 秒から 3 秒に（smoltcp が先に捨てて覚えるように。作り直すと覚えたものが消える）。
+- 試験: tsclient 27（`disco::tests::round_trip` に覚えた箱、`wg::tests::initiate_to_device` に一時的な鍵）、smoltcp の UDP 35、emu、virt、p4emu が通った。
+- 実機（ts だけ入れ直した段階）: ハンドシェイクの返事は 43.5 → 35.6（DH を覚えた）→ 27 ms（一時的な鍵も）。待ち行列が止まらなかった回の ping の 1 回目は 87〜101 ms（前は 161〜166 ms）。
+- 実機（net も入れ直して reboot）: 3 分あまり何も送らなかった後の ping の 1 回目が 3 回とも 72〜77 ms（2 回目からは 5 ms）。`ts.udp_rebound` は出なかった。ハンドシェイクの返事は 27 ms。残りは、ハンドシェイクの往復と Tab5 の 27 ms、disco の確かめ直し、Wi-Fi の起き抜け（disco の ping の 1 回目も 25〜70 ms）。

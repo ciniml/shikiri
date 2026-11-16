@@ -144,6 +144,21 @@ pub struct Peer {
     pending: Option<Pending>,
     /// When data came in that nothing sent has answered yet.
     unanswered: Option<u64>,
+    /// DH of our static key and its, the same every handshake: made once
+    /// (an X25519, about 9 ms on the ESP32-P4), as wireguard-go does.
+    static_static: Option<[u8; LEN]>,
+}
+
+impl Peer {
+    fn static_static(&mut self, ours: &KeyPair) -> [u8; LEN] {
+        *self.static_static.get_or_insert_with(|| ours.dh(&self.key))
+    }
+}
+
+fn ephemeral(rng: &mut impl CryptoRngCore) -> KeyPair {
+    let mut e = [0u8; 32];
+    rng.fill_bytes(&mut e);
+    KeyPair::from_private(e)
 }
 
 /// What `Device::receive` made of a message.
@@ -169,6 +184,9 @@ pub struct Device {
     next_index: u32,
     /// The last initiator not among the peers (for the log).
     pub unknown: [u8; LEN],
+    /// The next handshake's ephemeral key, made while idle (`prepare`);
+    /// used once.
+    spare: Option<KeyPair>,
 }
 
 impl Device {
@@ -176,7 +194,19 @@ impl Device {
         let c0 = hash(&[CONSTRUCTION]);
         let h0 = hash(&[&hash(&[&c0, IDENTIFIER]), &key.public]);
         let mac1_key = hash(&[LABEL_MAC1, &key.public]);
-        Device { key, mac1_key, h0, c0, peers: Vec::new(), next_index: rng.next_u32(), unknown: [0; LEN] }
+        Device { key, mac1_key, h0, c0, peers: Vec::new(), next_index: rng.next_u32(), unknown: [0; LEN], spare: None }
+    }
+
+    /// Makes the next handshake's ephemeral key now, while nothing waits
+    /// (an X25519, about 9 ms on the ESP32-P4).
+    pub fn prepare(&mut self, rng: &mut impl CryptoRngCore) {
+        if self.spare.is_none() {
+            self.spare = Some(ephemeral(rng));
+        }
+    }
+
+    fn ephemeral(&mut self, rng: &mut impl CryptoRngCore) -> KeyPair {
+        self.spare.take().unwrap_or_else(|| ephemeral(rng))
     }
 
     /// This node's key (its node key).
@@ -195,7 +225,7 @@ impl Device {
                     p.ip = ip;
                     self.peers.push(p);
                 }
-                None => self.peers.push(Peer { key, ip, last_timestamp: [0; 12], next: None, current: None, previous: None, pending: None, unanswered: None }),
+                None => self.peers.push(Peer { key, ip, last_timestamp: [0; 12], next: None, current: None, previous: None, pending: None, unanswered: None, static_static: None }),
             }
         }
     }
@@ -234,7 +264,7 @@ impl Device {
             self.unknown = s;
             return Received::Nothing("unknown peer");
         };
-        let (c2, k) = hkdf2(&c, &self.key.dh(&s));
+        let (c2, k) = hkdf2(&c, &self.peers[pi].static_static(&self.key));
         c = c2;
         let mut ts = [0u8; 12];
         if !open(&k, &h, &m[88..116], &mut ts) {
@@ -248,9 +278,7 @@ impl Device {
         peer.last_timestamp = ts;
 
         // The response.
-        let mut er = [0u8; 32];
-        rng.fill_bytes(&mut er);
-        let er = KeyPair::from_private(er);
+        let er = self.spare.take().unwrap_or_else(|| ephemeral(rng));
         let local = self.next_index;
         self.next_index = self.next_index.wrapping_add(1);
         let mut r = vec![0u8; RESPONSE_LEN];
@@ -290,9 +318,7 @@ impl Device {
     /// any before: the peer refuses the rest).
     pub fn initiate(&mut self, peer: usize, tai64n: [u8; 12], rng: &mut impl CryptoRngCore, now_ms: u64) -> Option<Vec<u8>> {
         let r_pub = self.peers.get(peer)?.key;
-        let mut e = [0u8; 32];
-        rng.fill_bytes(&mut e);
-        let e = KeyPair::from_private(e);
+        let e = self.ephemeral(rng);
         let local = self.next_index;
         self.next_index = self.next_index.wrapping_add(1);
         let mut h = hash(&[&hash(&[&self.c0, IDENTIFIER]), &r_pub]);
@@ -308,7 +334,7 @@ impl Device {
         let t = ChaCha20Poly1305::new(Key::from_slice(&k)).encrypt_in_place_detached(&nonce(0), &h, &mut m[40..72]).ok()?;
         m[72..88].copy_from_slice(&t);
         h = hash(&[&h, &m[40..88]]);
-        let (c2, k) = hkdf2(&c, &self.key.dh(&r_pub));
+        let (c2, k) = hkdf2(&c, &self.peers[peer].static_static(&self.key));
         c = c2;
         m[88..100].copy_from_slice(&tai64n);
         let t = ChaCha20Poly1305::new(Key::from_slice(&k)).encrypt_in_place_detached(&nonce(0), &h, &mut m[88..100]).ok()?;
@@ -571,7 +597,11 @@ mod tests {
         a.set_peers([(kb.public, [100, 64, 0, 2])].into_iter());
         b.set_peers([(ka.public, [100, 64, 0, 1])].into_iter());
         assert!(a.wants_handshake(0, 0) && !a.can_send(0, 0));
+        // The ephemeral key made ahead goes to one handshake only.
+        a.prepare(&mut rng);
+        let spare = a.spare.as_ref().unwrap().public;
         let m = a.initiate(0, [0, 0, 0, 0, 0x40, 0, 0, 1, 0, 0, 0, 0], &mut rng, 0).unwrap();
+        assert!(a.spare.is_none() && m[8..40] == spare);
         assert!(!a.wants_handshake(0, 1000));
         assert!(a.wants_handshake(0, 6000));
         let Received::Reply(r) = b.receive(Some(&ka.public), &m, &mut rng, 0) else { panic!() };

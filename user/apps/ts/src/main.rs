@@ -99,7 +99,9 @@ const RELAY_IDLE_MS: u64 = 60_000;
 /// (connecting stops the loop meanwhile).
 const RELAY_RETRY_MS: u64 = 30_000;
 /// UDP sends finding the queue full this long: the socket is made anew.
-const UDP_STUCK_MS: u64 = 1_000;
+/// Past smoltcp's own drop of a datagram nobody answers (1 s), so the
+/// socket keeps what it learnt from that (doc/72 §16).
+const UDP_STUCK_MS: u64 = 3_000;
 /// `ts.filtered` for each of the first this many packets the ACL turns
 /// away, then for one in 64.
 const FILTERED_SHOWN: u32 = 8;
@@ -548,7 +550,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
             };
             last_derp = now_ms();
             if let Some((src, data)) = packet {
-                node.from_derp(&src, &data, rng, now_ms());
+                handshake_timed(&mut node, "derp", |n| n.from_derp(&src, &data, rng, now_ms()));
             }
         }
         // The other region's DERP: packets for us (peers mostly use ours),
@@ -560,7 +562,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                 match r.derp.read() {
                     Ok(Frame::Packet { src, data }) => {
                         let (src, data) = (src, data.to_vec());
-                        node.from_derp(&src, &data, rng, now_ms());
+                        handshake_timed(&mut node, "relay", |n| n.from_derp(&src, &data, rng, now_ms()));
                     }
                     Ok(_) => {}
                     Err(_) => gone = Some("read"),
@@ -601,7 +603,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
                     IpAddr::V4(a) => disco::v4(a.octets(), port),
                     IpAddr::V6(a) => (a.octets(), port),
                 };
-                node.from_udp(from, &udp_buf[..n], rng, now_ms());
+                handshake_timed(&mut node, "udp", |node| node.from_udp(from, &udp_buf[..n], rng, now_ms()));
             }
         }
         if let Some(p) = pipe.as_mut() {
@@ -708,6 +710,7 @@ fn run(rng: &mut ChaCha20Rng, server: &'static str, host_info: control::Host, au
         if busy {
             idle_ms = 1;
         } else {
+            node.prepare(rng);
             // A client's request or a datagram ends the nap.
             let armed = udp.is_some() && net.borrow().udp_arm().is_ok();
             let n = net.borrow();
@@ -1102,6 +1105,16 @@ fn trace(out: bool, p: &[u8]) {
         win = u16::from_be_bytes([t[14], t[15]]) as u32,
         len = (p.len() - ihl - doff) as u32
     );
+}
+
+/// Hands a message to `node` by `f`; one that made a handshake step is
+/// logged with how long it took (`ts.handshake`).
+fn handshake_timed(node: &mut Node, via: &'static str, f: impl FnOnce(&mut Node)) {
+    let (before, t) = (node.stats.handshakes, time_ns());
+    f(node);
+    if node.stats.handshakes != before {
+        event!(Info, "ts.handshake", via = via, us = ((time_ns() - t) / 1000) as u32);
+    }
 }
 
 fn log_map(node: &Node, bytes: usize) {

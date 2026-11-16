@@ -37,7 +37,7 @@ pub fn v4(ip: [u8; 4], port: u16) -> Addr {
     (a, port)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Ping { tx: [u8; TXID], node_key: Option<[u8; LEN]> },
     Pong { tx: [u8; TXID], src: Addr },
@@ -55,11 +55,14 @@ pub fn sender(pkt: &[u8]) -> Option<[u8; LEN]> {
 
 /// Opens a disco message to `me` from the disco key `from`.
 pub fn open(me: &KeyPair, from: &[u8; LEN], pkt: &[u8]) -> Option<Message> {
+    open_with(&SalsaBox::new(&PublicKey::from(*from), &SecretKey::from(me.private)), pkt)
+}
+
+fn open_with(b: &SalsaBox, pkt: &[u8]) -> Option<Message> {
     let nonce: [u8; NONCE] = pkt.get(MAGIC.len() + LEN..HEADER)?.try_into().ok()?;
     let sealed = pkt.get(HEADER..)?;
     let (tag, ct) = sealed.split_at_checked(TAG)?;
     let mut m = ct.to_vec();
-    let b = SalsaBox::new(&PublicKey::from(*from), &SecretKey::from(me.private));
     b.decrypt_in_place_detached(&nonce.into(), b"", &mut m, tag.into()).ok()?;
     let (&ty, rest) = m.split_first()?;
     let body = rest.get(1..)?;
@@ -107,16 +110,60 @@ fn body(m: &Message) -> Vec<u8> {
 
 /// Seals `m` from `me` to the disco key `to`; `nonce` fresh randomness.
 pub fn seal(me: &KeyPair, to: &[u8; LEN], nonce: [u8; NONCE], m: &Message) -> Vec<u8> {
+    seal_with(&SalsaBox::new(&PublicKey::from(*to), &SecretKey::from(me.private)), &me.public, nonce, m)
+}
+
+fn seal_with(b: &SalsaBox, me: &[u8; LEN], nonce: [u8; NONCE], m: &Message) -> Vec<u8> {
     let mut ct = body(m);
-    let b = SalsaBox::new(&PublicKey::from(*to), &SecretKey::from(me.private));
     let tag = b.encrypt_in_place_detached(&nonce.into(), b"", &mut ct).expect("box");
     let mut p = Vec::with_capacity(HEADER + TAG + ct.len());
     p.extend_from_slice(MAGIC);
-    p.extend_from_slice(&me.public);
+    p.extend_from_slice(me);
     p.extend_from_slice(&nonce);
     p.extend_from_slice(&tag);
     p.extend_from_slice(&ct);
     p
+}
+
+/// Peers' boxes kept.
+const BOXES: usize = 16;
+
+/// `open` and `seal` with the box for each peer kept: making one is an
+/// X25519 (about 9 ms on the ESP32-P4), and a peer that wakes sends a
+/// dozen messages or so at once.
+pub struct Boxes {
+    me: KeyPair,
+    /// Least recently used first.
+    boxes: Vec<([u8; LEN], SalsaBox)>,
+}
+
+impl Boxes {
+    pub fn new(me: KeyPair) -> Boxes {
+        Boxes { me, boxes: Vec::new() }
+    }
+
+    fn get(&mut self, peer: &[u8; LEN]) -> &SalsaBox {
+        let b = match self.boxes.iter().position(|b| b.0 == *peer) {
+            Some(i) => self.boxes.remove(i),
+            None => {
+                if self.boxes.len() == BOXES {
+                    self.boxes.remove(0);
+                }
+                (*peer, SalsaBox::new(&PublicKey::from(*peer), &SecretKey::from(self.me.private)))
+            }
+        };
+        self.boxes.push(b);
+        &self.boxes.last().unwrap().1
+    }
+
+    pub fn open(&mut self, from: &[u8; LEN], pkt: &[u8]) -> Option<Message> {
+        open_with(self.get(from), pkt)
+    }
+
+    pub fn seal(&mut self, to: &[u8; LEN], nonce: [u8; NONCE], m: &Message) -> Vec<u8> {
+        let me = self.me.public;
+        seal_with(self.get(to), &me, nonce, m)
+    }
 }
 
 #[cfg(test)]
@@ -129,12 +176,20 @@ mod tests {
         let ping = Message::Ping { tx: [1; TXID], node_key: Some([2; LEN]) };
         let p = seal(&a, &b.public, [3; NONCE], &ping);
         assert_eq!(sender(&p), Some(a.public));
-        assert_eq!(open(&b, &a.public, &p), Some(ping));
+        assert_eq!(open(&b, &a.public, &p), Some(ping.clone()));
         // Not for a third key.
         assert_eq!(open(&KeyPair::from_private([9; 32]), &a.public, &p), None);
         let pong = Message::Pong { tx: [1; TXID], src: v4([192, 0, 2, 1], 41641) };
         assert_eq!(open(&a, &b.public, &seal(&b, &a.public, [4; NONCE], &pong)), Some(pong));
         let cmm = Message::CallMeMaybe { endpoints: alloc::vec![v4([192, 0, 2, 2], 1), v4([198, 51, 100, 1], 2)] };
-        assert_eq!(open(&a, &b.public, &seal(&b, &a.public, [5; NONCE], &cmm)), Some(cmm));
+        assert_eq!(open(&a, &b.public, &seal(&b, &a.public, [5; NONCE], &cmm)), Some(cmm.clone()));
+        // The same through kept boxes, one peer pushed out and made again.
+        let mut boxes = Boxes::new(b.clone());
+        assert_eq!(boxes.open(&a.public, &p), Some(ping.clone()));
+        for k in 0..BOXES as u8 {
+            boxes.seal(&[k; LEN], [6; NONCE], &cmm);
+        }
+        assert_eq!((boxes.boxes.len(), boxes.open(&a.public, &p)), (BOXES, Some(ping)));
+        assert_eq!(open(&a, &b.public, &boxes.seal(&a.public, [7; NONCE], &cmm)), Some(cmm));
     }
 }
